@@ -1,0 +1,361 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Unified error taxonomy, `uaos.error/1` (plan §2.7).
+//!
+//! Every error UAOS itself originates has a registered code `UAOS-<DOMAIN>-<NNNN>`, a class,
+//! a severity, a retry hint, a localizable message key, and a remediation pointer. The
+//! registry below is the single source; reference documentation is generated from it.
+//!
+//! Two rules from the drop-in contract (ADR-0005):
+//! * **Upstream provider errors are never rewritten.** Clients' recovery logic matches on the
+//!   provider's wording; UAOS adds `x-uaos-*` headers and panel text only.
+//! * **UAOS-originated errors use the client dialect's own error shape**, carrying this
+//!   contract in a `uaos` extension object.
+
+use std::fmt;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::id::{CorrelationId, EventId};
+
+/// Subsystem that originates an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ErrorDomain {
+    /// Journal and storage.
+    Journal,
+    /// Authorization policy.
+    Policy,
+    /// Budget ledger.
+    Budget,
+    /// Secret detection and redaction.
+    Redact,
+    /// Operation runtime.
+    Runtime,
+    /// Client-facing ingress.
+    Ingress,
+    /// Outbound network path.
+    Egress,
+    /// Configuration.
+    Config,
+    /// Credentials and keys.
+    Identity,
+}
+
+impl ErrorDomain {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Journal => "JOURNAL",
+            Self::Policy => "POLICY",
+            Self::Budget => "BUDGET",
+            Self::Redact => "REDACT",
+            Self::Runtime => "RUNTIME",
+            Self::Ingress => "INGRESS",
+            Self::Egress => "EGRESS",
+            Self::Config => "CONFIG",
+            Self::Identity => "IDENTITY",
+        }
+    }
+}
+
+/// Who or what is at the root of the error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorClass {
+    /// The request itself is invalid.
+    User,
+    /// Configuration is invalid or inconsistent.
+    Config,
+    /// A policy decision refused the action.
+    Policy,
+    /// A budget rule refused the action.
+    Budget,
+    /// The upstream provider failed.
+    Provider,
+    /// A tool failed.
+    Tool,
+    /// A defect or resource failure inside UAOS.
+    Internal,
+    /// A security control acted.
+    Security,
+}
+
+/// Incident severity (CLAUDE.md §4 Observability).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    /// Secret leak, RCE, data loss, budget runaway.
+    S1,
+    /// Durability, crash, provider cascade.
+    S2,
+    /// UX or performance degradation.
+    S3,
+    /// Expected, user-actionable condition (for example a policy denial).
+    Info,
+}
+
+/// A registered error code such as `UAOS-BUDGET-0001`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ErrorCode {
+    domain: ErrorDomain,
+    number: u16,
+}
+
+impl ErrorCode {
+    /// Creates a code. Only codes present in [`REGISTRY`] are meaningful.
+    #[must_use]
+    pub const fn new(domain: ErrorDomain, number: u16) -> Self {
+        Self { domain, number }
+    }
+
+    /// The originating domain.
+    #[must_use]
+    pub const fn domain(self) -> ErrorDomain {
+        self.domain
+    }
+}
+
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "UAOS-{}-{:04}", self.domain.as_str(), self.number)
+    }
+}
+
+/// Static description of a registered error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrorSpec {
+    /// The code.
+    pub code: ErrorCode,
+    /// Root-cause class.
+    pub class: ErrorClass,
+    /// Severity.
+    pub severity: Severity,
+    /// Whether retrying the same request can succeed without any change.
+    pub retryable: bool,
+    /// Whether the condition implies a possible secret exposure.
+    pub secret_leak_risk: bool,
+    /// Localization key for the user-facing message (Fluent catalogs, TR/EN).
+    pub message_key: &'static str,
+    /// English summary used in generated reference documentation.
+    pub summary: &'static str,
+    /// What to do about it.
+    pub remediation: &'static str,
+}
+
+macro_rules! registry {
+    ($( $const_name:ident = $domain:ident $num:literal, $class:ident, $sev:ident,
+        retryable: $retry:literal, leak: $leak:literal, $key:literal, $summary:literal, $fix:literal; )*) => {
+        /// Registered error codes, one constant per code.
+        pub mod codes {
+            use super::{ErrorCode, ErrorDomain};
+            $(
+                #[doc = $summary]
+                pub const $const_name: ErrorCode = ErrorCode::new(ErrorDomain::$domain, $num);
+            )*
+        }
+
+        /// The error registry: the single source of truth for codes and their meaning.
+        pub const REGISTRY: &[ErrorSpec] = &[
+            $(ErrorSpec {
+                code: codes::$const_name,
+                class: ErrorClass::$class,
+                severity: Severity::$sev,
+                retryable: $retry,
+                secret_leak_risk: $leak,
+                message_key: $key,
+                summary: $summary,
+                remediation: $fix,
+            },)*
+        ];
+    };
+}
+
+registry! {
+    JOURNAL_WRITE_FAILED = Journal 1, Internal, S2, retryable: false, leak: false,
+        "error-journal-write-failed", "A critical journal record could not be handed to the OS; the operation was not started.",
+        "Run `uaos doctor`; check disk health and permissions of the data directory.";
+    JOURNAL_DISK_FULL = Journal 2, Internal, S2, retryable: false, leak: false,
+        "error-journal-disk-full", "The data directory is out of space; operations that need a critical record fail closed.",
+        "Free disk space; no data was corrupted. See the disk-full runbook.";
+    JOURNAL_FSYNC_FAILED = Journal 3, Internal, S2, retryable: false, leak: false,
+        "error-journal-fsync-failed", "Flushing the journal to stable storage failed; the writer stopped and unflushed records are rewritten to a new segment.",
+        "Check storage health; run `uaos journal verify`.";
+    JOURNAL_CHAIN_BROKEN = Journal 4, Security, S1, retryable: false, leak: false,
+        "error-journal-chain-broken", "The journal hash chain does not verify; records were altered or lost outside UAOS.",
+        "Stop and preserve the data directory; run `uaos journal verify --report`.";
+    JOURNAL_INSTANCE_LOCKED = Journal 5, Config, Info, retryable: false, leak: false,
+        "error-journal-instance-locked", "Another UAOS daemon already owns this data directory.",
+        "Use `uaos status` to find it; `uaos run` attaches to it automatically.";
+    JOURNAL_READER_TOO_OLD = Journal 6, Config, S3, retryable: false, leak: false,
+        "error-journal-reader-too-old", "This binary is older than the journal's minimum reader version; it refuses to run instead of risking corruption.",
+        "Upgrade, or restore the matching data-directory backup before downgrading.";
+    POLICY_DENIED = Policy 1, Policy, Info, retryable: false, leak: false,
+        "error-policy-denied", "Policy denied the operation.",
+        "Run `uaos policy explain <operation>` to see the matching rules.";
+    POLICY_APPROVAL_REQUIRED = Policy 2, Policy, Info, retryable: true, leak: false,
+        "error-policy-approval-required", "A human must approve this operation; retry after approving.",
+        "Approve with `uaos approvals` (requires user presence), then retry.";
+    POLICY_EVALUATION_ERROR = Policy 3, Security, S2, retryable: false, leak: false,
+        "error-policy-evaluation-error", "A policy failed to evaluate; UAOS treats evaluation errors as denial.",
+        "Run `uaos policy check` to find the failing policy.";
+    BUDGET_HARD_STOP = Budget 1, Budget, Info, retryable: false, leak: false,
+        "error-budget-hard-stop", "The budget pool reached its hard cap; the request was stopped before being sent.",
+        "Run `uaos budget explain`; raise the cap or wait for the next period.";
+    BUDGET_INSUFFICIENT = Budget 2, Budget, Info, retryable: false, leak: false,
+        "error-budget-insufficient", "Remaining budget cannot cover even the smallest useful response for this request.",
+        "Run `uaos budget explain`; shorten the context or raise the cap.";
+    BUDGET_UNKNOWN_PRICING = Budget 3, Config, S3, retryable: false, leak: false,
+        "error-budget-unknown-pricing", "The model or a billing dimension has no known price, so the hard cap cannot be guaranteed.",
+        "Update pricing with `uaos pricing update`, or declare a price with `uaos pricing set`.";
+    BUDGET_SETTLEMENT_OVERRUN = Budget 4, Internal, S1, retryable: false, leak: false,
+        "error-budget-settlement-overrun", "Actual cost exceeded the reservation; the estimator was recalibrated.",
+        "Review `uaos budget explain`; report the trace if it repeats.";
+    REDACT_BLOCKED = Redact 1, Security, Info, retryable: false, leak: true,
+        "error-redact-blocked", "A high-risk secret was detected in outbound content and the request was blocked.",
+        "Run `uaos redact test` on the content; remove the secret or start a fresh session.";
+    REDACT_DETECTOR_FAILURE = Redact 2, Security, S2, retryable: true, leak: true,
+        "error-redact-detector-failure", "A detector failed; UAOS blocks rather than sending unscanned content.",
+        "Retry; if it persists run `uaos doctor` and report the trace.";
+    REDACT_EXPOSED_SECRET = Redact 3, Security, S2, retryable: false, leak: true,
+        "error-redact-exposed-secret", "A secret was found in content that had already been sent before; it cannot be unsent.",
+        "Rotate the secret now. UAOS will not retro-edit history (it would break provider signatures).";
+    RUNTIME_OVERLOAD = Runtime 1, Internal, S3, retryable: true, leak: false,
+        "error-runtime-overload", "UAOS is at capacity and did not admit the request; in-flight work continues.",
+        "Retry after the indicated delay.";
+    RUNTIME_DEADLINE = Runtime 2, Internal, S3, retryable: true, leak: false,
+        "error-runtime-deadline", "The operation exceeded its deadline and was cancelled.",
+        "Retry; check `uaos trace` for the slow stage.";
+    INGRESS_UNAUTHENTICATED = Ingress 1, User, Info, retryable: false, leak: false,
+        "error-ingress-unauthenticated", "The request did not carry a valid UAOS credential.",
+        "Use the key printed by `uaos init`, or run the agent under `uaos run --`.";
+    INGRESS_TOO_LARGE = Ingress 2, User, Info, retryable: false, leak: false,
+        "error-ingress-too-large", "The request exceeds a configured size or depth limit.",
+        "Reduce the request size or raise the limit in the profile.";
+    INGRESS_UNSUPPORTED = Ingress 3, User, Info, retryable: false, leak: false,
+        "error-ingress-unsupported", "The request uses a feature the selected route cannot carry; UAOS refuses instead of silently dropping it.",
+        "Choose a route that supports the feature, or remove it from the request.";
+    CONFIG_INVALID = Config 1, Config, S3, retryable: false, leak: false,
+        "error-config-invalid", "The configuration failed validation and was not applied.",
+        "Run `uaos profile check` for the exact field and reason.";
+    CONFIG_DRIFT = Config 2, Security, S3, retryable: false, leak: false,
+        "error-config-drift", "The configuration file changed outside UAOS; it will not load without approval.",
+        "Review the diff with `uaos profile diff` and approve it.";
+    IDENTITY_REVOKED = Identity 1, Security, Info, retryable: false, leak: false,
+        "error-identity-revoked", "The credential has been revoked.",
+        "Issue a new scoped key with `uaos key issue`.";
+    IDENTITY_SCOPE_EXCEEDS_PARENT = Identity 2, Security, Info, retryable: false, leak: false,
+        "error-identity-scope-exceeds-parent", "A child key cannot have more scope than its parent.",
+        "Narrow the requested scope.";
+}
+
+/// Looks up the registered specification for a code.
+#[must_use]
+pub fn spec(code: ErrorCode) -> Option<&'static ErrorSpec> {
+    REGISTRY.iter().find(|s| s.code == code)
+}
+
+/// Schema tag of the error contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum ErrorSchema {
+    /// Version 1.
+    #[serde(rename = "uaos.error/1")]
+    V1,
+}
+
+/// A UAOS-originated error as carried on the wire (inside the client dialect's error shape).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    title = "uaos.error/1",
+    description = "A UAOS-originated error. Never used to rewrite upstream provider errors."
+)]
+pub struct UaosError {
+    /// Schema tag, always `uaos.error/1`.
+    pub schema: ErrorSchema,
+    /// Registered code, e.g. `UAOS-BUDGET-0001`.
+    pub code: String,
+    /// Root-cause class.
+    pub class: ErrorClass,
+    /// Severity.
+    pub severity: Severity,
+    /// Whether retrying the same request can succeed.
+    pub retryable: bool,
+    /// Localization key of the user-facing message.
+    pub message_key: String,
+    /// Sanitized, actionable message for the agent. Never contains secrets or local paths.
+    pub agent_message: String,
+    /// What to do about it.
+    pub remediation: String,
+    /// Whether the condition implies a possible secret exposure.
+    pub secret_leak_risk: bool,
+    /// Correlation identifier for `uaos trace`.
+    pub correlation_id: CorrelationId,
+    /// Journal event that records this error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_id: Option<EventId>,
+}
+
+impl UaosError {
+    /// Builds the wire error for a registered code.
+    #[must_use]
+    pub fn from_spec(spec: &ErrorSpec, correlation_id: CorrelationId, audit_id: Option<EventId>) -> Self {
+        Self {
+            schema: ErrorSchema::V1,
+            code: spec.code.to_string(),
+            class: spec.class,
+            severity: spec.severity,
+            retryable: spec.retryable,
+            message_key: spec.message_key.to_owned(),
+            agent_message: spec.summary.to_owned(),
+            remediation: spec.remediation.to_owned(),
+            secret_leak_risk: spec.secret_leak_risk,
+            correlation_id,
+            audit_id,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn codes_are_unique_and_well_formed() {
+        let mut seen = BTreeSet::new();
+        for s in REGISTRY {
+            assert!(seen.insert(s.code), "duplicate code {}", s.code);
+            let text = s.code.to_string();
+            assert!(text.starts_with("UAOS-") && text.len() >= "UAOS-X-0000".len(), "{text}");
+            assert!(s.message_key.starts_with("error-"), "{text}: message key");
+            assert!(
+                s.message_key.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'),
+                "{text}: message key must be a Fluent identifier"
+            );
+            assert!(!s.summary.is_empty() && !s.remediation.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn numbers_are_dense_per_domain() {
+        // Gaps usually mean a code was deleted; codes are retired, never reused.
+        let mut by_domain: std::collections::BTreeMap<ErrorDomain, Vec<u16>> = std::collections::BTreeMap::new();
+        for s in REGISTRY {
+            by_domain.entry(s.code.domain).or_default().push(s.code.number);
+        }
+        for (domain, mut numbers) in by_domain {
+            numbers.sort_unstable();
+            let expected: Vec<u16> = (1..).take(numbers.len()).collect();
+            assert_eq!(numbers, expected, "{domain:?}");
+        }
+    }
+
+    #[test]
+    fn display_format() {
+        assert_eq!(codes::BUDGET_HARD_STOP.to_string(), "UAOS-BUDGET-0001");
+        assert_eq!(
+            spec(codes::JOURNAL_CHAIN_BROKEN).map(|s| s.severity),
+            Some(Severity::S1)
+        );
+    }
+}

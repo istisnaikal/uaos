@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "uaos-platform"
+description = "UAOS platform boundary: the only crate that touches clocks, randomness, the filesystem, processes and OS facilities. Real and deterministic-simulation implementations."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+getrandom.workspace = true
+thiserror.workspace = true
+uaos-contracts.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Named, unit-typed limits. No magic numbers elsewhere in the kernel: a bound that matters
+//! is declared here with its unit and the reason it has this value.
+
+/// A size in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Bytes(pub u64);
+
+impl Bytes {
+    /// Returns `true` if `len` bytes fit within this limit.
+    #[must_use]
+    pub fn admits(self, len: usize) -> bool {
+        u64::try_from(len).is_ok_and(|len| len <= self.0)
+    }
+}
+
+/// Maximum serialized size of an event's inline payload.
+///
+/// Inline payloads carry metadata only (IDs, amounts, reason codes); content always goes to
+/// encrypted chunks. 1 KiB is large enough for any metadata record and small enough that a
+/// journal line stays cheap to hash and scan.
+pub const MAX_INLINE_PAYLOAD: Bytes = Bytes(1024);
+
+/// Maximum number of entries in an event's `metadata` map. Bounded so that hostile or buggy
+/// producers cannot grow journal lines without limit.
+pub const MAX_METADATA_ENTRIES: usize = 16;
+
+/// Maximum length of a metadata key.
+pub const MAX_METADATA_KEY: Bytes = Bytes(64);
+
+/// Maximum length of a metadata value. Values are short labels, never content.
+pub const MAX_METADATA_VALUE: Bytes = Bytes(256);
+
+/// Maximum length of a namespaced event type such as `op.reserved_intent`.
+pub const MAX_EVENT_TYPE: Bytes = Bytes(64);
+
+/// Maximum length of a module name.
+pub const MAX_MODULE_NAME: Bytes = Bytes(64);
+
+/// Maximum length of an idempotency key supplied by a client or module.
+pub const MAX_IDEMPOTENCY_KEY: Bytes = Bytes(128);
+
+/// Maximum length of a reason code such as `hard_cap_reached`.
+pub const MAX_REASON_CODE: Bytes = Bytes(64);

@@ -1,0 +1,300 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Gate registry (plan §4.2). Validated by `cargo xtask gates` on every merge.
+#
+#   active  — runs in CI (`job`) and is proven to bite by a seeded violation (`negative`).
+#   pending — its subject does not exist yet; `phase` names when it activates. Pending gates
+#             never pass vacuously: they block a RELEASE (`cargo xtask gates --release`).
+#
+# The required sets (CLAUDE.md §4 merge blockers + required behaviors, plan §4.2 additions) are
+# hard-coded in xtask/src/gates.rs. Removing an entry requires an ADR. Deviation from CLAUDE.md,
+# recorded in ADR-0003: CLAUDE.md lists these as merge blockers from day one; a gate whose
+# subject is not built yet is tracked as `pending` instead of being faked green.
+
+# ── fmt / clippy / test ──────────────────────────────────────────────────────────────────
+[[gate]]
+id = "fmt"
+source = "CLAUDE.md §4 CI merge blocker: fmt/clippy/test"
+lane = "merge"
+status = "active"
+job = "fmt"
+negative = ["fmt-unformatted"]
+
+[[gate]]
+id = "clippy"
+source = "CLAUDE.md §4 CI merge blocker: fmt/clippy/test; plan §4.3 code standard"
+lane = "merge"
+status = "active"
+job = "clippy"
+negative = ["clippy-unwrap", "clippy-unsafe", "clippy-ambient-clock", "clippy-nondeterministic-map"]
+
+[[gate]]
+id = "test"
+source = "CLAUDE.md §4 CI merge blocker: fmt/clippy/test"
+lane = "merge"
+status = "active"
+job = "test"
+negative = ["test-failure"]
+
+# ── supply chain and hygiene ─────────────────────────────────────────────────────────────
+[[gate]]
+id = "secret-scan"
+source = "CLAUDE.md §4 CI merge blocker: secret scan"
+lane = "merge"
+status = "active"
+job = "secrets"
+negative = ["secret-committed"]
+
+[[gate]]
+id = "cargo-deny"
+source = "CLAUDE.md §4 CI merge blocker: cargo deny"
+lane = "merge"
+status = "active"
+job = "deny"
+negative = ["license-not-allowed"]
+
+[[gate]]
+id = "cargo-vet"
+source = "plan §4.4 supply chain"
+lane = "merge"
+status = "active"
+job = "vet"
+negative = ["unaudited-dependency"]
+
+[[gate]]
+id = "spdx-headers"
+source = "plan §5 license hygiene"
+lane = "merge"
+status = "active"
+job = "headers"
+negative = ["spdx-header-missing"]
+
+[[gate]]
+id = "dco"
+source = "plan §5 contributions (DCO, no CLA)"
+lane = "merge"
+status = "active"
+job = "dco"
+negative = ["dco-missing-signoff"]
+
+[[gate]]
+id = "codeql"
+source = "plan §4.4 static analysis"
+lane = "merge"
+status = "active"
+job = "codeql"
+negative_exempt = "Third-party analyzer; seeding a real vulnerability to prove detection is out of scope. Findings block via code scanning alerts."
+
+# ── architecture and contracts ───────────────────────────────────────────────────────────
+[[gate]]
+id = "arch-check"
+source = "plan §1.2 one mechanism per concern; ADR-0001"
+lane = "merge"
+status = "active"
+job = "arch"
+negative = ["arch-forbidden-edge", "arch-ring1-reaches-kernel"]
+
+[[gate]]
+id = "schema-compat"
+source = "plan §2.7 contract versioning"
+lane = "merge"
+status = "active"
+job = "schemas"
+negative = ["schema-breaking-change", "schema-drift"]
+
+[[gate]]
+id = "docs-contract-sync"
+source = "CLAUDE.md §4 CI merge blocker: docs-changed-with-contract"
+lane = "merge"
+status = "active"
+job = "docs-sync"
+negative = ["contract-without-changelog"]
+
+[[gate]]
+id = "gate-registry"
+source = "plan §4.2 gate registry"
+lane = "merge"
+status = "active"
+job = "gates"
+negative = ["gate-registry-incomplete"]
+
+[[gate]]
+id = "gate-selftest"
+source = "plan P0 acceptance: every gate shown to fail on a seeded violation"
+lane = "merge"
+status = "active"
+job = "negative"
+negative_exempt = "This gate is the harness that proves the others; its own bite is the BROKEN result it reports."
+
+[[gate]]
+id = "path-spaces-unicode"
+source = "plan P0: build from a path with spaces and ü/ş/ı"
+lane = "merge"
+status = "active"
+job = "paths"
+negative_exempt = "Environmental: the job itself is the positive proof on Windows; a seeded failure would require breaking path handling on purpose."
+
+# ── pending: subjects built in later phases ──────────────────────────────────────────────
+[[gate]]
+id = "journal-durability"
+source = "CLAUDE.md §4 CI merge blocker: journal durability"
+lane = "merge"
+status = "pending"
+phase = "P1"
+
+[[gate]]
+id = "budget-concurrency"
+source = "CLAUDE.md §4 CI merge blocker: budget concurrency"
+lane = "merge"
+status = "pending"
+phase = "P2"
+
+[[gate]]
+id = "redaction-corpus"
+source = "CLAUDE.md §4 CI merge blocker: redaction corpus"
+lane = "merge"
+status = "pending"
+phase = "P2"
+
+[[gate]]
+id = "kernel-tokens"
+source = "plan §1.2 secure path is the only one that compiles (trybuild)"
+lane = "merge"
+status = "pending"
+phase = "P2"
+
+[[gate]]
+id = "adapter-conformance"
+source = "CLAUDE.md §4 CI merge blocker: adapter conformance"
+lane = "merge"
+status = "pending"
+phase = "P3"
+
+[[gate]]
+id = "perf-smoke"
+source = "CLAUDE.md §4 CI merge blocker: perf smoke"
+lane = "merge"
+status = "pending"
+phase = "P3"
+
+[[gate]]
+id = "prefix-stability"
+source = "plan §1.2 byte-honest transforms"
+lane = "merge"
+status = "pending"
+phase = "P3"
+
+[[gate]]
+id = "pricing-reconciliation"
+source = "CLAUDE.md §4 required behavior: pricing reconciliation; plan D12"
+lane = "merge"
+status = "pending"
+phase = "P3"
+
+[[gate]]
+id = "empty-kernel"
+source = "plan §1.2 the kernel knows no feature"
+lane = "merge"
+status = "pending"
+phase = "P3"
+
+[[gate]]
+id = "panel-auth-csrf"
+source = "CLAUDE.md §4 CI merge blocker: panel auth/CSRF"
+lane = "merge"
+status = "pending"
+phase = "P4"
+
+[[gate]]
+id = "profile-migration"
+source = "CLAUDE.md §4 CI merge blocker: profile migration"
+lane = "merge"
+status = "pending"
+phase = "P4"
+
+[[gate]]
+id = "a11y-critical-flows"
+source = "CLAUDE.md §4 CI merge blocker: a11y critical flows"
+lane = "merge"
+status = "pending"
+phase = "P4"
+
+[[gate]]
+id = "sandbox-escape"
+source = "CLAUDE.md §4 CI merge blocker: sandbox escape"
+lane = "merge"
+status = "pending"
+phase = "P5"
+
+# ── required behaviors (CLAUDE.md §4) ────────────────────────────────────────────────────
+[[behavior]]
+id = "disk-full"
+source = "CLAUDE.md §4 required behavior: disk full"
+status = "pending"
+phase = "P1"
+
+[[behavior]]
+id = "budget-double-spend"
+source = "CLAUDE.md §4 required behavior: budget double-spend"
+status = "pending"
+phase = "P2"
+
+[[behavior]]
+id = "pricing-reconciliation"
+source = "CLAUDE.md §4 required behavior: pricing reconciliation"
+status = "pending"
+phase = "P3"
+
+[[behavior]]
+id = "sync-conflict"
+source = "CLAUDE.md §4 required behavior: sync conflict (profile import 3-way diff)"
+status = "pending"
+phase = "P4"
+
+[[behavior]]
+id = "prompt-injection-tool-hook-skill"
+source = "CLAUDE.md §4 required behavior: prompt injection via tool/live hook/skill"
+status = "pending"
+phase = "P5"
+
+[[behavior]]
+id = "malicious-package"
+source = "CLAUDE.md §4 required behavior: malicious package"
+status = "pending"
+phase = "P5"
+
+[[behavior]]
+id = "devam-side-effect-honesty"
+source = "CLAUDE.md §4 required behavior: @devam side-effect honesty"
+status = "pending"
+phase = "P6A"
+
+[[behavior]]
+id = "yenipen-diff-restore"
+source = "CLAUDE.md §4 required behavior: @yenipen diff/restore"
+status = "pending"
+phase = "P6A"
+
+[[behavior]]
+id = "cross-project-consent"
+source = "CLAUDE.md §4 required behavior: cross-project consent"
+status = "pending"
+phase = "P6A"
+
+[[behavior]]
+id = "fuzzy-dangerous-tag"
+source = "CLAUDE.md §4 required behavior: fuzzy dangerous tag"
+status = "pending"
+phase = "P6A"
+
+[[behavior]]
+id = "hap-dry-run-requires-coverage"
+source = "CLAUDE.md §4 required behavior: /hap dry-run without coverage cannot apply"
+status = "pending"
+phase = "P7"
+
+[[behavior]]
+id = "benchmark-privacy"
+source = "CLAUDE.md §4 required behavior: benchmark privacy"
+status = "pending"
+phase = "P7"

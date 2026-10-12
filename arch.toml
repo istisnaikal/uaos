@@ -1,0 +1,88 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Allowed dependency edges (ADR-0001). `cargo xtask arch-check` fails the merge when:
+#   * a workspace crate is not declared here,
+#   * a crate depends (normal or build) on a workspace crate not in its `allow` list,
+#   * a crate's transitive dependency closure contains a crate in its `ban` list,
+#   * a crate under modules/ (Ring 1) depends on any workspace crate other than
+#     uaos-contracts and uaos-module-api.
+# Dev-dependencies are not edges of the product graph and are not checked here.
+# Crates planned for later phases are declared now: the matrix is the contract they will
+# be built against, not something negotiated when they arrive.
+
+[ring1]
+allow = ["uaos-contracts", "uaos-module-api"]
+
+[crate.uaos-contracts]
+ring = 0
+allow = []
+ban = ["tokio", "hyper", "reqwest", "rusqlite", "mio", "socket2"]
+
+[crate.uaos-platform]
+ring = 0
+allow = ["uaos-contracts"]
+ban = ["tokio", "hyper", "reqwest"]
+
+[crate.uaos-state]
+ring = 0
+allow = ["uaos-contracts", "uaos-platform"]
+ban = ["hyper", "reqwest"]
+
+[crate.uaos-identity]
+ring = 0
+allow = ["uaos-contracts", "uaos-platform", "uaos-state"]
+ban = ["hyper", "reqwest"]
+
+[crate.uaos-policy]
+ring = 0
+allow = ["uaos-contracts"]
+ban = ["tokio", "hyper", "reqwest", "rusqlite"]
+
+[crate.uaos-ledger]
+ring = 0
+allow = ["uaos-contracts", "uaos-state"]
+ban = ["hyper", "reqwest"]
+
+[crate.uaos-redact]
+ring = 0
+allow = ["uaos-contracts", "uaos-platform"]
+ban = ["tokio", "hyper", "reqwest", "rusqlite"]
+
+[crate.uaos-module-api]
+ring = 0
+allow = ["uaos-contracts"]
+ban = ["hyper", "reqwest", "rusqlite"]
+
+[crate.uaos-egress]
+ring = 0
+allow = ["uaos-contracts", "uaos-platform", "uaos-policy"]
+ban = ["rusqlite"]
+
+[crate.uaos-runtime]
+ring = 0
+allow = [
+  "uaos-contracts", "uaos-platform", "uaos-state", "uaos-identity", "uaos-policy",
+  "uaos-ledger", "uaos-redact", "uaos-module-api", "uaos-egress",
+]
+ban = []
+
+[crate.uaos-api]
+ring = 0
+allow = ["uaos-contracts", "uaos-platform", "uaos-runtime", "uaos-identity", "uaos-module-api"]
+ban = ["rusqlite"]
+
+[crate.uaos]
+ring = 0
+# Composition root: the one crate allowed to wire everything, including Ring 1 defaults.
+allow = ["*"]
+ban = []
+
+[crate.uaos-testkit]
+ring = "dev"
+allow = ["*"]
+ban = []
+
+[crate.xtask]
+ring = "tool"
+allow = ["uaos-contracts"]
+ban = []
