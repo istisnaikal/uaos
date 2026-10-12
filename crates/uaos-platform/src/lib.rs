@@ -16,6 +16,7 @@
 
 #![deny(missing_docs)]
 
+pub mod crypto;
 pub mod fs;
 pub mod real;
 pub mod sim;

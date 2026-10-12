@@ -20,8 +20,11 @@ publish = false
 # Internal
 uaos-contracts = { path = "crates/uaos-contracts" }
 uaos-platform = { path = "crates/uaos-platform" }
+uaos-state = { path = "crates/uaos-state" }
 
 # External — every addition needs a justification in the PR (CONTRIBUTING.md §Dependencies).
+# aws-lc-rs: the single audited crypto family for TLS and primitives (plan D18).
+aws-lc-rs = { version = "1.18.2", default-features = false, features = ["aws-lc-sys", "alloc"] }
 cargo_metadata = "0.23.1"
 getrandom = "0.4.3"
 jiff = { version = "0.2.38", default-features = false, features = ["std", "serde"] }

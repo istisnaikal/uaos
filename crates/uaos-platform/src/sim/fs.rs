@@ -135,6 +135,21 @@ impl SimFs {
         s.collect_garbage();
     }
 
+    /// Silently changes one byte of a file in both its OS and durable views, modelling media
+    /// corruption or tampering by another process. Returns `false` if there is no such byte.
+    #[must_use]
+    pub fn overwrite_byte(&self, path: &Path, offset: usize, value: u8) -> bool {
+        let mut s = lock(&self.state);
+        let Some(id) = s.live.get(path).copied() else {
+            return false;
+        };
+        s.nodes
+            .get_mut(&id)
+            .and_then(|n| n.data.get_mut(offset))
+            .map(|b| *b = value)
+            .is_some()
+    }
+
     /// Bytes the OS currently holds for `path` (test inspection).
     #[must_use]
     pub fn os_view(&self, path: &Path) -> Option<Vec<u8>> {

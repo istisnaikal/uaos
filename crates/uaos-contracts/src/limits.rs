@@ -43,3 +43,29 @@ pub const MAX_IDEMPOTENCY_KEY: Bytes = Bytes(128);
 
 /// Maximum length of a reason code such as `hard_cap_reached`.
 pub const MAX_REASON_CODE: Bytes = Bytes(64);
+
+/// A duration in milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Millis(pub u64);
+
+impl Millis {
+    /// The duration in nanoseconds, saturating.
+    #[must_use]
+    pub const fn as_nanos(self) -> u64 {
+        self.0.saturating_mul(1_000_000)
+    }
+}
+
+/// Maximum size of one journal line. Envelopes carry metadata only (inline payload ≤ 1 KiB,
+/// metadata ≤ 16 × 320 B), so a real record is a few KiB at most; 16 KiB leaves headroom while
+/// bounding the memory a reader needs per line.
+pub const MAX_JOURNAL_LINE: Bytes = Bytes(16 * 1024);
+
+/// Target size at which the journal rotates to a new segment. 64 MiB keeps a segment quick to
+/// verify and cheap to archive, and keeps the number of files small for long-lived journals.
+pub const JOURNAL_SEGMENT_TARGET: Bytes = Bytes(64 * 1024 * 1024);
+
+/// Default power-loss window W of balanced durability (ADR-0003): acknowledged records reach
+/// stable storage within this time. Spike H1 measured group-fsync p99.9 at 5.9 ms on an
+/// entry-level `NVMe` drive, so 50 ms is reachable with wide margin while batching flushes.
+pub const DEFAULT_FLUSH_WINDOW: Millis = Millis(50);
