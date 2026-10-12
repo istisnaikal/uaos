@@ -6,6 +6,8 @@
 //! seeded generator. These are test doubles for reproducibility, **not** security
 //! primitives; the composition root never injects them.
 
+pub mod fs;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use uaos_contracts::time::WallTime;

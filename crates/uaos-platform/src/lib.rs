@@ -10,12 +10,13 @@
 //! `clippy.toml` bans direct use of clocks, randomness, `std::fs` and process spawning
 //! everywhere else; this crate is the single, audited place where those calls are made.
 //!
-//! Phase scope: P0 provides time, randomness and identifier generation. Filesystem,
-//! locking, peer credentials, keychain and process spawning arrive with the journal (P1)
-//! and runtime (P3), each with a real and a simulated implementation.
+//! Phase scope: time, randomness and identifiers (P0); filesystem and exclusive locks (P1,
+//! WP1.1). Peer credentials, keychain and process spawning arrive with the work packages that
+//! first need them, each with a real and a simulated implementation.
 
 #![deny(missing_docs)]
 
+pub mod fs;
 pub mod real;
 pub mod sim;
 
