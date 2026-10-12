@@ -8,6 +8,11 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P1 WP1.1 — `uaos-platform::fs`: the filesystem boundary for durable stores (append-only
+  files, atomic replace, rename, remove, directory sync, exclusive lock). `OsFs` wraps `std::fs`
+  (lock via `File::try_lock`, released by the OS if the holder dies); `SimFs` models process
+  crash vs power loss, torn writes on disk-full, and failed flushes that drop unflushed bytes.
+  One conformance scenario runs against both.
 - P0 Bedrock: workspace, pinned toolchain (1.98.1), lint policy (clippy pedantic + restriction
   set, architecture bans in `clippy.toml`), supply-chain policy (`deny.toml`, cargo-vet with
   imported audit sets).

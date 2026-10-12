@@ -1,0 +1,471 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! An in-memory filesystem that can crash.
+//!
+//! Every file has two views: what the OS holds (`data`) and the prefix that is durable
+//! (`durable_len`). The namespace likewise has a live view and a durable view, updated per
+//! directory by [`Fs::sync_dir`]. Two kinds of failure are modelled exactly as ADR-0003 needs:
+//!
+//! * [`SimFs::crash`] — the process dies. OS-held bytes and the live namespace survive; open
+//!   handles become stale; locks are released.
+//! * [`SimFs::power_loss`] — the machine dies. Files are cut to their durable prefix and the
+//!   namespace reverts to its last synced state.
+//!
+//! Faults: [`SimFs::set_capacity`] makes appends fail with `NoSpace` after writing the prefix
+//! that still fits (a torn record); [`SimFs::fail_next_sync`] makes the next flush fail and
+//! **drops the unflushed bytes** — Linux's behaviour after a failed writeback, which is why a
+//! journal must never "retry fsync and trust the cache".
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use crate::fs::{AppendFile, Fs, FsError, LockGuard, temp_sibling};
+
+type FileId = u64;
+
+#[derive(Debug, Default)]
+struct Node {
+    data: Vec<u8>,
+    durable_len: usize,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    live: BTreeMap<PathBuf, FileId>,
+    durable: BTreeMap<PathBuf, FileId>,
+    nodes: BTreeMap<FileId, Node>,
+    dirs: BTreeSet<PathBuf>,
+    locks: BTreeSet<PathBuf>,
+    next_id: FileId,
+    generation: u64,
+    capacity: Option<u64>,
+    fail_next_sync: bool,
+}
+
+impl State {
+    fn used_bytes(&self) -> u64 {
+        self.nodes
+            .values()
+            .map(|n| u64::try_from(n.data.len()).unwrap_or(u64::MAX))
+            .sum()
+    }
+
+    fn parent_exists(&self, path: &Path) -> bool {
+        match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => self.dirs.contains(p),
+            _ => true,
+        }
+    }
+
+    fn create(&mut self, path: &Path) -> FileId {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.nodes.insert(id, Node::default());
+        self.live.insert(path.to_path_buf(), id);
+        id
+    }
+
+    /// Drops nodes no longer referenced by either namespace view.
+    fn collect_garbage(&mut self) {
+        let referenced: BTreeSet<FileId> = self.live.values().chain(self.durable.values()).copied().collect();
+        self.nodes.retain(|id, _| referenced.contains(id));
+    }
+
+    fn take_sync_fault(&mut self, id: FileId, op: &'static str) -> Result<(), FsError> {
+        if self.fail_next_sync {
+            self.fail_next_sync = false;
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.data.truncate(node.durable_len);
+            }
+            return Err(FsError::SyncFailed { op });
+        }
+        Ok(())
+    }
+}
+
+/// Deterministic, fault-injecting in-memory [`Fs`]. Clones share the same disk, so two
+/// "processes" can contend for the same lock.
+#[derive(Debug, Clone, Default)]
+pub struct SimFs {
+    state: Arc<Mutex<State>>,
+}
+
+fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
+    // A panicking test thread must not wedge the simulated disk for the others.
+    state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl SimFs {
+    /// Creates an empty simulated disk.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Limits total stored bytes. `None` removes the limit.
+    pub fn set_capacity(&self, bytes: Option<u64>) {
+        lock(&self.state).capacity = bytes;
+    }
+
+    /// Makes the next flush (`sync_data`, `sync_dir`, `write_atomic`) fail. For file flushes,
+    /// the unflushed bytes are discarded.
+    pub fn fail_next_sync(&self) {
+        lock(&self.state).fail_next_sync = true;
+    }
+
+    /// Simulates the process dying: handles become stale and locks are released; everything
+    /// already handed to the OS remains.
+    pub fn crash(&self) {
+        let mut s = lock(&self.state);
+        s.generation += 1;
+        s.locks.clear();
+    }
+
+    /// Simulates the machine losing power: files are cut to their durable prefix and the
+    /// namespace reverts to its last synced state. Implies [`SimFs::crash`].
+    pub fn power_loss(&self) {
+        let mut s = lock(&self.state);
+        s.generation += 1;
+        s.locks.clear();
+        s.live = s.durable.clone();
+        for node in s.nodes.values_mut() {
+            node.data.truncate(node.durable_len);
+        }
+        s.collect_garbage();
+    }
+
+    /// Bytes the OS currently holds for `path` (test inspection).
+    #[must_use]
+    pub fn os_view(&self, path: &Path) -> Option<Vec<u8>> {
+        let s = lock(&self.state);
+        s.live.get(path).and_then(|id| s.nodes.get(id)).map(|n| n.data.clone())
+    }
+}
+
+#[derive(Debug)]
+struct SimAppendFile {
+    state: Arc<Mutex<State>>,
+    id: FileId,
+    generation: u64,
+}
+
+impl SimAppendFile {
+    fn check(&self, s: &State, op: &'static str) -> Result<(), FsError> {
+        if s.generation != self.generation {
+            return Err(FsError::StaleHandle { op });
+        }
+        if !s.nodes.contains_key(&self.id) {
+            return Err(FsError::NotFound { op });
+        }
+        Ok(())
+    }
+}
+
+impl AppendFile for SimAppendFile {
+    fn append(&mut self, bytes: &[u8]) -> Result<(), FsError> {
+        let mut s = lock(&self.state);
+        self.check(&s, "append")?;
+        let free = s.capacity.map(|cap| cap.saturating_sub(s.used_bytes()));
+        let fits = free.map_or(bytes.len(), |free| {
+            usize::try_from(free).unwrap_or(usize::MAX).min(bytes.len())
+        });
+        let (written, rest) = bytes.split_at(fits);
+        if let Some(node) = s.nodes.get_mut(&self.id) {
+            node.data.extend_from_slice(written);
+        }
+        if rest.is_empty() {
+            Ok(())
+        } else {
+            Err(FsError::NoSpace { op: "append" })
+        }
+    }
+
+    fn sync_data(&mut self) -> Result<(), FsError> {
+        let mut s = lock(&self.state);
+        self.check(&s, "sync_data")?;
+        s.take_sync_fault(self.id, "sync_data")?;
+        if let Some(node) = s.nodes.get_mut(&self.id) {
+            node.durable_len = node.data.len();
+        }
+        Ok(())
+    }
+
+    fn os_len(&self) -> Result<u64, FsError> {
+        let s = lock(&self.state);
+        self.check(&s, "os_len")?;
+        Ok(s.nodes
+            .get(&self.id)
+            .map_or(0, |n| u64::try_from(n.data.len()).unwrap_or(u64::MAX)))
+    }
+}
+
+#[derive(Debug)]
+struct SimLockGuard {
+    state: Arc<Mutex<State>>,
+    path: PathBuf,
+    generation: u64,
+}
+
+impl LockGuard for SimLockGuard {}
+
+impl Drop for SimLockGuard {
+    fn drop(&mut self) {
+        let mut s = lock(&self.state);
+        // A crash already released every lock; a guard from a dead process must not release a
+        // lock re-acquired by its successor.
+        if s.generation == self.generation {
+            s.locks.remove(&self.path);
+        }
+    }
+}
+
+impl Fs for SimFs {
+    fn create_dir_all(&self, path: &Path) -> Result<(), FsError> {
+        let mut s = lock(&self.state);
+        for ancestor in path.ancestors().filter(|a| !a.as_os_str().is_empty()) {
+            s.dirs.insert(ancestor.to_path_buf());
+        }
+        Ok(())
+    }
+
+    fn open_append(&self, path: &Path) -> Result<Box<dyn AppendFile>, FsError> {
+        let mut s = lock(&self.state);
+        if !s.parent_exists(path) {
+            return Err(FsError::NotFound { op: "open_append" });
+        }
+        let id = match s.live.get(path) {
+            Some(&id) => id,
+            None => s.create(path),
+        };
+        Ok(Box::new(SimAppendFile {
+            state: Arc::clone(&self.state),
+            id,
+            generation: s.generation,
+        }))
+    }
+
+    fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+        self.os_view(path).ok_or(FsError::NotFound { op: "read" })
+    }
+
+    fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
+        let s = lock(&self.state);
+        if !s.dirs.contains(path) {
+            return Err(FsError::NotFound { op: "list_dir" });
+        }
+        let files = s.live.keys().filter(|p| p.parent() == Some(path));
+        let subdirs = s.dirs.iter().filter(|d| d.parent() == Some(path));
+        let mut out: Vec<PathBuf> = files.chain(subdirs).cloned().collect();
+        out.sort();
+        Ok(out)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), FsError> {
+        let mut s = lock(&self.state);
+        if !s.parent_exists(to) {
+            return Err(FsError::NotFound { op: "rename" });
+        }
+        let id = s.live.remove(from).ok_or(FsError::NotFound { op: "rename" })?;
+        s.live.insert(to.to_path_buf(), id);
+        s.collect_garbage();
+        Ok(())
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+        let mut s = lock(&self.state);
+        s.live.remove(path).ok_or(FsError::NotFound { op: "remove_file" })?;
+        s.collect_garbage();
+        Ok(())
+    }
+
+    fn sync_dir(&self, path: &Path) -> Result<(), FsError> {
+        let mut s = lock(&self.state);
+        if !s.dirs.contains(path) {
+            return Err(FsError::NotFound { op: "sync_dir" });
+        }
+        if s.fail_next_sync {
+            s.fail_next_sync = false;
+            return Err(FsError::SyncFailed { op: "sync_dir" });
+        }
+        let in_dir = |p: &PathBuf| p.parent() == Some(path);
+        s.durable.retain(|p, _| !in_dir(p));
+        let live_entries: Vec<(PathBuf, FileId)> = s
+            .live
+            .iter()
+            .filter(|(p, _)| in_dir(p))
+            .map(|(p, id)| (p.clone(), *id))
+            .collect();
+        s.durable.extend(live_entries);
+        s.collect_garbage();
+        Ok(())
+    }
+
+    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+        let tmp = temp_sibling(path);
+        let result = (|| {
+            if self.os_view(&tmp).is_some() {
+                self.remove_file(&tmp)?;
+            }
+            let mut file = self.open_append(&tmp)?;
+            file.append(bytes)?;
+            file.sync_data()?;
+            drop(file);
+            self.rename(&tmp, path)?;
+            match path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => self.sync_dir(parent),
+                _ => Ok(()),
+            }
+        })();
+        if result.is_err() && self.os_view(&tmp).is_some() {
+            // Mirrors the real implementation's cleanup; failure here changes nothing reported.
+            let _cleanup_result = self.remove_file(&tmp);
+        }
+        result
+    }
+
+    fn try_lock_exclusive(&self, path: &Path) -> Result<Box<dyn LockGuard>, FsError> {
+        let mut s = lock(&self.state);
+        if !s.parent_exists(path) {
+            return Err(FsError::NotFound { op: "lock" });
+        }
+        if !s.locks.insert(path.to_path_buf()) {
+            return Err(FsError::Locked { op: "lock" });
+        }
+        if !s.live.contains_key(path) {
+            s.create(path);
+        }
+        Ok(Box::new(SimLockGuard {
+            state: Arc::clone(&self.state),
+            path: path.to_path_buf(),
+            generation: s.generation,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn setup() -> (SimFs, PathBuf) {
+        let fs = SimFs::new();
+        let dir = PathBuf::from("/data/journal");
+        fs.create_dir_all(&dir).unwrap();
+        (fs, dir)
+    }
+
+    #[test]
+    fn conforms() {
+        let fs = SimFs::new();
+        fs.create_dir_all(Path::new("/root")).unwrap();
+        crate::fs::conformance::run(&fs, Path::new("/root"));
+    }
+
+    #[test]
+    fn crash_keeps_os_bytes_and_staleness_is_enforced() {
+        let (fs, dir) = setup();
+        let seg = dir.join("seg");
+        let mut f = fs.open_append(&seg).unwrap();
+        f.append(b"acked\n").unwrap();
+        fs.crash();
+        assert_eq!(fs.read(&seg).unwrap(), b"acked\n");
+        assert_eq!(f.append(b"zombie"), Err(FsError::StaleHandle { op: "append" }));
+    }
+
+    #[test]
+    fn power_loss_keeps_only_durable_bytes_and_synced_entries() {
+        let (fs, dir) = setup();
+        let seg = dir.join("seg");
+        let mut f = fs.open_append(&seg).unwrap();
+        f.append(b"durable\n").unwrap();
+        f.sync_data().unwrap();
+        f.append(b"volatile\n").unwrap();
+        fs.sync_dir(&dir).unwrap();
+        let unsynced_entry = dir.join("new");
+        fs.open_append(&unsynced_entry).unwrap().sync_data().unwrap();
+
+        fs.power_loss();
+        assert_eq!(fs.read(&seg).unwrap(), b"durable\n");
+        assert!(
+            fs.read(&unsynced_entry).is_err(),
+            "entry was never made durable by sync_dir"
+        );
+    }
+
+    #[test]
+    fn failed_sync_discards_unflushed_bytes() {
+        let (fs, dir) = setup();
+        let seg = dir.join("seg");
+        let mut f = fs.open_append(&seg).unwrap();
+        f.append(b"a\n").unwrap();
+        f.sync_data().unwrap();
+        f.append(b"b\n").unwrap();
+        fs.fail_next_sync();
+        assert_eq!(f.sync_data(), Err(FsError::SyncFailed { op: "sync_data" }));
+        // The cache no longer has "b": re-reading proves nothing about durability.
+        assert_eq!(fs.read(&seg).unwrap(), b"a\n");
+        // The next flush "succeeds" — exactly the trap a journal must not fall into.
+        f.sync_data().unwrap();
+    }
+
+    #[test]
+    fn disk_full_writes_a_torn_prefix() {
+        let (fs, dir) = setup();
+        fs.set_capacity(Some(10));
+        let seg = dir.join("seg");
+        let mut f = fs.open_append(&seg).unwrap();
+        f.append(b"12345\n").unwrap();
+        assert_eq!(f.append(b"67890\n"), Err(FsError::NoSpace { op: "append" }));
+        assert_eq!(fs.read(&seg).unwrap(), b"12345\n6789");
+    }
+
+    #[test]
+    fn lock_is_released_by_crash_and_survives_stale_guard_drop() {
+        let (fs, dir) = setup();
+        let path = dir.join("uaos.lock");
+        let first = fs.try_lock_exclusive(&path).unwrap();
+        fs.crash();
+        let second = fs.try_lock_exclusive(&path).unwrap();
+        drop(first); // the dead process's guard must not release the successor's lock
+        assert!(matches!(fs.try_lock_exclusive(&path), Err(FsError::Locked { .. })));
+        drop(second);
+        assert!(fs.try_lock_exclusive(&path).is_ok());
+    }
+
+    #[test]
+    fn write_atomic_survives_power_loss_as_old_or_new() {
+        let (fs, dir) = setup();
+        let manifest = dir.join("MANIFEST");
+        fs.write_atomic(&manifest, b"old").unwrap();
+        fs.fail_next_sync();
+        assert!(fs.write_atomic(&manifest, b"new").is_err());
+        fs.power_loss();
+        assert_eq!(fs.read(&manifest).unwrap(), b"old");
+    }
+
+    proptest! {
+        /// Whatever happens, after power loss each file holds exactly what was durable.
+        #[test]
+        fn power_loss_preserves_exactly_the_synced_prefix(
+            ops in prop::collection::vec((prop::collection::vec(any::<u8>(), 0..32), any::<bool>()), 0..40)
+        ) {
+            let (fs, dir) = setup();
+            let seg = dir.join("seg");
+            let mut f = fs.open_append(&seg).unwrap();
+            fs.sync_dir(&dir).unwrap();
+            let mut durable = Vec::new();
+            let mut written = Vec::new();
+            for (bytes, sync) in ops {
+                f.append(&bytes).unwrap();
+                written.extend_from_slice(&bytes);
+                if sync {
+                    f.sync_data().unwrap();
+                    durable.clone_from(&written);
+                }
+            }
+            fs.power_loss();
+            prop_assert_eq!(fs.read(&seg).unwrap(), durable);
+        }
+    }
+}

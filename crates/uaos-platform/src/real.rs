@@ -2,6 +2,8 @@
 
 //! Real implementations, injected only by the composition root.
 
+pub mod fs;
+
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use uaos_contracts::time::WallTime;
