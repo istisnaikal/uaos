@@ -1,12 +1,12 @@
 # Security-sensitive paths require security-owner review (GOVERNANCE.md §Reviews).
-# PENDING-DECISION(D-08): replace the placeholder team with real handles when the GitHub organisation exists.
-/crates/uaos-contracts/   @uaos-security-owners
-/crates/uaos-platform/    @uaos-security-owners
-/schemas/                 @uaos-security-owners
-/arch.toml                @uaos-security-owners
-/clippy.toml              @uaos-security-owners
-/deny.toml                @uaos-security-owners
-/supply-chain/            @uaos-security-owners
-/gates.toml               @uaos-security-owners
-/.github/workflows/       @uaos-security-owners
-/xtask/                   @uaos-security-owners
+# A `@uaos-project/security-owners` team replaces the individual owner once a second security owner exists.
+/crates/uaos-contracts/   @istisnaikal
+/crates/uaos-platform/    @istisnaikal
+/schemas/                 @istisnaikal
+/arch.toml                @istisnaikal
+/clippy.toml              @istisnaikal
+/deny.toml                @istisnaikal
+/supply-chain/            @istisnaikal
+/gates.toml               @istisnaikal
+/.github/workflows/       @istisnaikal
+/xtask/                   @istisnaikal

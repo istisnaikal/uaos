@@ -5,11 +5,8 @@ UAOS holds API keys and sees agent traffic. We treat its security as the product
 ## Reporting a vulnerability
 
 **Do not open a public issue.** Report privately through GitHub's *private vulnerability
-reporting* on this repository ("Security" tab → "Report a vulnerability").
-
-PENDING-DECISION(D-08): the repository's public home and a dedicated security contact address
-are decided before the repository is published; until then reports go to the maintainers
-directly. A release cannot be cut while this marker exists (`cargo xtask decisions --release`).
+reporting*: <https://github.com/uaos-project/uaos/security/advisories/new> ("Security" tab →
+"Report a vulnerability"). Reports reach the maintainers only.
 
 Please include: affected version or commit, platform, reproduction steps, and impact. Redact any
 real secrets; never send us live credentials.
