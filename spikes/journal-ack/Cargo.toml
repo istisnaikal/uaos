@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPIKE (plan §10.1, hypothesis H1). Throwaway measurement code: not part of the workspace,
+# not product code. Promoted into uaos-state with tests, or deleted, at the P1 gate.
+[package]
+name = "spike-journal-ack"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+sha2 = "0.10"

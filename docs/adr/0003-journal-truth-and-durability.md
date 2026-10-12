@@ -44,9 +44,16 @@ overhead p95 ≤ 25 ms. Two stores (journal + SQLite) written independently drif
 - *Re-journaling full histories per turn:* ~0.2 GB per long session; disk exhaustion then fails
   closed for everything.
 
-## Open numbers (spike, P0/P1)
+## Measured numbers (spike H1; full report: `spikes/journal-ack/RESULTS.md`)
 
-Critical-ack p50/p99 and the window W per OS are measured and recorded here before the P1 gate.
+| OS / disk | write-ack p99 | group fsync p99 / max | strict fsync-per-ack p99 / max | kill test |
+|---|---|---|---|---|
+| Windows 10, entry-level NVMe (2026-10-12) | 41 µs | 0.78 ms / 9.9 ms | 0.64 ms / 9.3 ms | 500 kills, 746,250 acked, **0 lost** |
+| Linux (CI runner) | pending | pending | pending | pending |
+| macOS (`F_FULLFSYNC`) | pending | pending | pending | pending |
+
+Proposed balanced-mode power-loss window **W = 50 ms**, finalized once Linux and macOS are
+measured. This ADR's numbers are complete only when every row is filled; the P1 gate requires it.
 
 ## Verification
 
