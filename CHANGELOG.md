@@ -8,6 +8,15 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P1 WP1.2 — `uaos-state` journal core: append-only `uaos.event/1` segments chained over exact
+  line bytes from a per-journal genesis; atomic manifest with sealed/suspect/active segments;
+  one-daemon-per-data-directory lock; crash recovery that verifies the whole chain, flushes
+  before sealing, quarantines orphan segments and never appends after a torn tail; balanced
+  (W = 50 ms) and strict flush policies; failed flushes rewritten to a fresh segment, never
+  retried in place; disk-full and write failures fail closed until `recover()`; explicit
+  `JournalHealth`. Deterministic simulation (crash, power loss, failed flush, disk full) runs
+  256 scenarios per merge and 20,000 per policy in a deep sweep, all passing.
+- `uaos-platform::crypto`: SHA-256 via aws-lc-rs (ADR-0006: prebuilt NASM objects on Windows).
 - P1 WP1.1 — `uaos-platform::fs`: the filesystem boundary for durable stores (append-only
   files, atomic replace, rename, remove, directory sync, exclusive lock). `OsFs` wraps `std::fs`
   (lock via `File::try_lock`, released by the OS if the holder dies); `SimFs` models process

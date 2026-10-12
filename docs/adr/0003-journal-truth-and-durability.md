@@ -26,6 +26,17 @@ overhead p95 ≤ 25 ms. Two stores (journal + SQLite) written independently drif
    - **An fsync error is fatal for that segment:** the writer stops, events since the last good
      fsync are retained in memory and rewritten to a new segment, the old segment is marked
      suspect. Re-reading the page cache proves nothing and is never used as verification.
+   - **If that rewrite also fails** (e.g. no space), the acknowledged records after the last
+     flush exist only in the process's memory — the OS has already dropped its copy. The writer
+     enters `FlushFailed`, refuses new records, and `recover()` retries the rewrite. A crash in
+     this state loses those records; this is reported (S2), never hidden. The crash-durability
+     guarantee is therefore stated precisely: *every acknowledged record survives a process
+     crash, except records acknowledged after the last flush while the writer is in
+     `FlushFailed`.*
+   - **Recovery flushes before it seals.** On open, records the previous process left in the
+     OS (acknowledged, not yet flushed) are flushed *before* the manifest seals the segment
+     around them; a durable manifest never claims records a power loss could still remove.
+     (Found by the deterministic simulation in WP1.2.)
 4. **One combined `reserve+intent` record per Operation** before egress.
 5. **Chunked, content-addressed payloads** (`hmac-sha256:` refs with a per-pocket key). A long
    session stores each message once (linear, not quadratic, growth).

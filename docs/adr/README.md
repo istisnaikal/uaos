@@ -14,3 +14,4 @@ before their first code is merged (GOVERNANCE.md §Decisions).
 | [0003](0003-journal-truth-and-durability.md) | Journal as source of truth; durability classes; pending gates | Accepted |
 | [0004](0004-trust-model-and-approvals.md) | Trust model and approvals | Accepted |
 | [0005](0005-dialects-and-transform-invariants.md) | Client dialects and transform invariants | Accepted |
+| [0006](0006-aws-lc-prebuilt-nasm-on-windows.md) | aws-lc prebuilt NASM objects on Windows | Accepted |
