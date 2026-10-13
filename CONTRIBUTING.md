@@ -33,10 +33,12 @@ proven to bite by `cargo xtask negative`, which seeds a violation and checks the
 | lint | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | tests | `cargo nextest run --workspace --locked` and `cargo test --doc` |
 | architecture direction | `cargo xtask arch-check` |
+| lint exemptions only where owned | `cargo xtask allow-audit` |
+| no forbidden claims in documents | `cargo xtask claims` |
 | contract schemas | `cargo xtask schema-check` |
 | license headers | `cargo xtask headers` |
 | gate registry | `cargo xtask gates` |
-| dependencies | `cargo deny --locked check` and `cargo vet --locked` |
+| dependencies | `cargo deny --locked check`, `cargo vet --locked` and `cargo xtask vet-ratchet` (every new exemption needs `notes`) |
 | secrets | `gitleaks git` |
 | DCO / docs-with-contract | `cargo xtask dco <range>` / `cargo xtask docs-sync <range>` |
 

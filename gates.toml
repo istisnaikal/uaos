@@ -134,6 +134,30 @@ status = "active"
 job = "paths"
 negative_exempt = "Environmental: the job itself is the positive proof on Windows; a seeded failure would require breaking path handling on purpose."
 
+[[gate]]
+id = "allow-audit"
+source = "plan v2 PD-19, §2.1 reachability: guarded lints (unsafe_code, disallowed methods/types) may be allowed only under owner paths in arch.toml"
+lane = "merge"
+status = "active"
+job = "arch"
+negative = ["allow-audit-guarded-lint-outside-owner", "allow-audit-unsafe-outside-owner"]
+
+[[gate]]
+id = "vet-ratchet"
+source = "plan v2 PD-06, V8: cargo-vet exemptions without a notes reason may not grow, and progress must be recorded"
+lane = "merge"
+status = "active"
+job = "vet"
+negative = ["vet-ratchet-unnoted-exemption"]
+
+[[gate]]
+id = "claims-lint"
+source = "CLAUDE.md red line 6; plan v2 V6: forbidden claim words in public documents"
+lane = "merge"
+status = "active"
+job = "headers"
+negative = ["claims-forbidden-word"]
+
 # ── pending: subjects built in later phases ──────────────────────────────────────────────
 [[gate]]
 id = "journal-durability"

@@ -86,3 +86,21 @@ ban = []
 ring = "tool"
 allow = ["uaos-contracts"]
 ban = []
+
+# Where guarded lints may be switched off (`cargo xtask allow-audit`; plan v2 PD-19, ADR-0010).
+# Each key is a lint; each value lists owner paths. A pattern is a path prefix, and a `*` segment
+# matches exactly one segment. An `#[allow]` or `#[expect]` of the lint anywhere else fails the
+# merge. Adding an owner is an architecture change and needs review.
+[allow_audit]
+# Empty until ADR-0012 adds `crates/uaos-platform/src/os/` with the first unsafe code.
+"unsafe_code" = []
+"clippy::disallowed_methods" = [
+    "crates/uaos-platform/src/real", # owner of clocks, randomness and the filesystem (D15)
+    "crates/*/tests/",
+    "crates/*/benches/",
+    "crates/uaos-testkit/", # dev-only harnesses that need real processes and real time
+    "xtask/",
+]
+"clippy::disallowed_types" = [
+    "crates/uaos-policy/src/engine.rs", # Cedar's entity API takes a HashSet of parents
+]

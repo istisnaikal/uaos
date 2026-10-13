@@ -23,7 +23,7 @@ design that ignores this would make false claims ("the agent can never obtain th
 4. **Killing the daemon fails closed:** the agent holds no provider key, so it loses model access
    rather than gaining unmediated access.
 5. **Hardened mode (GA option):** the daemon runs as a dedicated OS user that owns the vault and
-   data directory; the key becomes genuinely unobtainable to the agent's user.
+   data directory; the key becomes genuinely unobtainable to the agent's user. <!-- claims-lint: allow (hardened mode only, item 5) -->
 
 ## Alternatives rejected
 
