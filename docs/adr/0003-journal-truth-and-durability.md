@@ -1,6 +1,6 @@
 # ADR-0003: Journal as source of truth; durability classes; pending gates
 
-**Status:** Accepted (2026-10-12) — durability numbers to be filled from the P0/P1 spike
+**Status:** Accepted (2026-10-12). Windows spike numbers recorded; Linux and macOS numbers are owed (plan v2 PD-01)
 **Plan refs:** D3, D4, D5, D20, §4.2 · **Deviates from:** CLAUDE.md §3 Storage ("Transactional state: SQLite WAL") and §4 merge-blocker wording
 
 ## Context
@@ -55,9 +55,20 @@ overhead p95 ≤ 25 ms. Two stores (journal + SQLite) written independently drif
 - *Re-journaling full histories per turn:* ~0.2 GB per long session; disk exhaustion then fails
   closed for everything.
 
-## Open numbers (spike, P0/P1)
+## Measured numbers
 
-Critical-ack p50/p99 and the window W per OS are measured and recorded here before the P1 gate.
+The P1 gate required critical-ack p50/p99 and the window W per OS before P1 closed. P1 closed with
+only the Windows spike row; the rest is phase debt PD-01, recorded here rather than hidden.
+
+| OS / disk | Source | write-ack p50 / p99 | group fsync p99 / p99.9 | strict fsync-per-ack p99 / max |
+|---|---|---|---|---|
+| Windows 10, entry-level NVMe (WD SN350), 2026-10-12 | spike H1, stand-in writer ([appendix](appendix/0003-h1-spike-results.md)) | 5.2 µs / 41 µs | 0.78 ms / 5.9 ms | 0.64 ms / 9.3 ms |
+| Windows, Linux, macOS | production `Journal`, nightly `ack-latency` bench (PD-01) | owed | owed | owed |
+
+The default power-loss window `W = 50 ms` (`uaos_contracts::limits::DEFAULT_FLUSH_WINDOW`) rests on
+the Windows group-fsync p99.9 of 5.9 ms. It is re-confirmed or changed once Linux and macOS
+(`F_FULLFSYNC`) rows exist. CI-runner numbers are labelled as such, because shared virtual disks
+are not reference hardware.
 
 ## Production-journal kill results (WP1.6)
 

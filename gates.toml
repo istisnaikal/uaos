@@ -161,10 +161,10 @@ negative = ["redact-detector-drops-a-format"]
 
 [[gate]]
 id = "kernel-tokens"
-source = "plan §1.2 secure path is the only one that compiles (trybuild)"
+source = "plan §1.2 secure path is the only one that compiles (trybuild); moved P2 -> P3 by plan v2 PD-04 (ADR-0002 amendment, ADR-0010)"
 lane = "merge"
 status = "pending"
-phase = "P2"
+phase = "P3"
 
 [[gate]]
 id = "adapter-conformance"

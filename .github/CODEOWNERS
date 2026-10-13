@@ -1,17 +1,31 @@
 # Security-sensitive paths require security-owner review (GOVERNANCE.md §Reviews).
 # A security-owners team replaces the individual owner once the project moves to an organisation
-# and a second security owner exists.
-/crates/uaos-contracts/   @istisnaikal
-/crates/uaos-platform/    @istisnaikal
-/crates/uaos-state/       @istisnaikal
-/crates/uaos-policy/      @istisnaikal
-/crates/uaos-ledger/      @istisnaikal
-/crates/uaos-redact/      @istisnaikal
+# and a second security owner exists. Last matching pattern wins.
+
+# Every Ring 0 crate, present and future (identity, egress, runtime, api, the bin), and the
+# dev-only harnesses whose results gate merges.
+/crates/                  @istisnaikal
+
+# Contracts, architecture and the gates that enforce them.
 /schemas/                 @istisnaikal
 /arch.toml                @istisnaikal
 /clippy.toml              @istisnaikal
 /deny.toml                @istisnaikal
-/supply-chain/            @istisnaikal
 /gates.toml               @istisnaikal
-/.github/workflows/       @istisnaikal
 /xtask/                   @istisnaikal
+
+# Build inputs: a change here changes what every crate compiles against.
+/Cargo.toml               @istisnaikal
+/Cargo.lock               @istisnaikal
+/rust-toolchain.toml      @istisnaikal
+/.cargo/                  @istisnaikal
+/supply-chain/            @istisnaikal
+
+# CI, review routing and the documents that state security posture.
+/.github/workflows/       @istisnaikal
+/.github/CODEOWNERS       @istisnaikal
+/docs/adr/                @istisnaikal
+/docs/threat-model/       @istisnaikal
+/docs/privacy/            @istisnaikal
+/GOVERNANCE.md            @istisnaikal
+/SECURITY.md              @istisnaikal
