@@ -43,6 +43,9 @@ pub enum BudgetTxError {
     /// A reservation-related entry has no reservation identifier.
     #[error("{0:?} entries must reference a reservation")]
     MissingReservation(BudgetTxKind),
+    /// A transfer entry does not name the pool on the other side.
+    #[error("{0:?} entries must name the counterparty pool")]
+    MissingCounterparty(BudgetTxKind),
     /// An idempotency key or reason code is malformed.
     #[error("idempotency keys are 1..=128 bytes of [A-Za-z0-9_.:-]; reason codes 1..=64 bytes of [a-z0-9_]")]
     MalformedToken,
@@ -205,6 +208,10 @@ pub struct BudgetTx {
     /// Reservation this entry belongs to (required for reserve/settle/release).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reservation_id: Option<ReservationId>,
+    /// The other pool of a transfer (required for `transfer_out` / `transfer_in`). Lets recovery
+    /// complete a transfer whose second half was never recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counterparty_pool: Option<PoolId>,
     /// Whether the reservation this entry belongs to is fully settled.
     pub settled: bool,
     /// Whether the amount is an estimate (no provider-reported usage was available).
@@ -238,6 +245,10 @@ impl BudgetTx {
         if self.kind.requires_reservation() && self.reservation_id.is_none() {
             return Err(BudgetTxError::MissingReservation(self.kind));
         }
+        if matches!(self.kind, BudgetTxKind::TransferOut | BudgetTxKind::TransferIn) && self.counterparty_pool.is_none()
+        {
+            return Err(BudgetTxError::MissingCounterparty(self.kind));
+        }
         let expected = self
             .balance_before
             .checked_add(self.effect()?)
@@ -270,6 +281,7 @@ mod tests {
             reason_code: ReasonCode::new("model_call").unwrap(),
             related_event: None,
             reservation_id: Some(ReservationId::from_parts(1, [2; 10])),
+            counterparty_pool: None,
             settled: false,
             estimated: false,
         }

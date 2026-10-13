@@ -37,3 +37,7 @@ jobs:
         run: cargo test -p uaos-state --release --locked --test journal simulation
         env:
           UAOS_SIM_CASES: "20000"
+      - name: Ledger simulation (100,000 schedules)
+        run: cargo test -p uaos-ledger --release --locked --test ledger simulation
+        env:
+          UAOS_SIM_CASES: "100000"

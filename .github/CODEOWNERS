@@ -3,6 +3,9 @@
 # and a second security owner exists.
 /crates/uaos-contracts/   @istisnaikal
 /crates/uaos-platform/    @istisnaikal
+/crates/uaos-state/       @istisnaikal
+/crates/uaos-policy/      @istisnaikal
+/crates/uaos-ledger/      @istisnaikal
 /schemas/                 @istisnaikal
 /arch.toml                @istisnaikal
 /clippy.toml              @istisnaikal

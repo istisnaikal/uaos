@@ -268,6 +268,19 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "lost or changed",
         },
         Case {
+            id: "ledger-reserve-beyond-available",
+            gate: "budget-concurrency",
+            tool: None,
+            // A ledger that accepts any reservation while the pool is not already in debt.
+            seed: replace(
+                "crates/uaos-ledger/src/state.rs",
+                "if pool.available < amount {",
+                "if pool.available < NanoUsd::ZERO {",
+            ),
+            runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-ledger", "--test", "ledger"] },
+            expect: "hard cap breached",
+        },
+        Case {
             id: "dco-missing-signoff",
             gate: "dco",
             tool: Some("git"),

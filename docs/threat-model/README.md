@@ -33,7 +33,7 @@ exist before the control can be claimed. Until a control's gate is active, the t
 | T3 | Supply chain (dependencies, CI, releases) | cargo-deny, cargo-vet with imported audits, pinned toolchain, SHA-pinned Actions, least-privilege workflow tokens, signed artifacts, SBOM | `cargo-deny`, `cargo-vet`, `secret-scan` | P0 | **controls active** (release signing P3) |
 | T4 | Local privilege escalation | runs as the user, never elevated; data dir owner-only; authenticated IPC | install tests | P1–P3 | open |
 | T5 | SSRF and exfiltration | single egress path; resolve→verify→pin; private/link-local/metadata ranges blocked; redirects re-checked | SSRF suite | P3–P5 | open |
-| T6 | Budget double-spend or undercount | single daemon per data dir; single-writer ledger; idempotency; InFlight never released; reconciler; full billing dimensions | `budget-concurrency`, `pricing-reconciliation` | P1–P3 | open |
+| T6 | Budget double-spend or undercount | single daemon per data dir; single-writer ledger; idempotency; InFlight never released; reconciler; full billing dimensions | `budget-concurrency`, `pricing-reconciliation` | P1–P3 | **ledger controls active** (P2: hard cap, single-use reservations, InFlight never released, crash recovery); periodic reconciler and pricing P3 |
 | T7 | Panel takeover (DNS rebinding, CSRF, XSS) | loopback, Host allowlist, Origin check, one-time code → cookie, CSRF token, strict CSP | `panel-auth-csrf` | P4 | open |
 | T8 | License tampering | Ring 2 only; cannot affect safety by construction | entitlement tests | P7 | open |
 | T9 | Context poisoning | injection policy, provenance, pocket isolation, assertions | leakage tests | P6 | open |

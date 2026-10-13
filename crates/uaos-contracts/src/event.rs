@@ -189,9 +189,11 @@ pub mod types {
     pub const REDACT_EXPOSED_SECRET: EventType = EventType::from_static("redact.exposed_secret");
     /// A content chunk was crypto-shredded.
     pub const CHUNK_SHREDDED: EventType = EventType::from_static("chunk.shredded");
+    /// One budget ledger entry (`uaos.budget_tx/1` in the inline payload).
+    pub const BUDGET_ENTRY: EventType = EventType::from_static("budget.entry");
 
     /// All kernel event types, for validation and generated documentation.
-    pub const ALL: [&EventType; 10] = [
+    pub const ALL: [&EventType; 11] = [
         &OP_RESERVED_INTENT,
         &OP_COMMITTED,
         &OP_FAILED,
@@ -202,6 +204,7 @@ pub mod types {
         &BUDGET_RELEASED,
         &REDACT_EXPOSED_SECRET,
         &CHUNK_SHREDDED,
+        &BUDGET_ENTRY,
     ];
 }
 

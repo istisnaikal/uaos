@@ -16,6 +16,17 @@
       "description": "Available balance before the entry.",
       "$ref": "#/$defs/NanoUsd"
     },
+    "counterparty_pool": {
+      "description": "The other pool of a transfer (required for `transfer_out` / `transfer_in`). Lets recovery\ncomplete a transfer whose second half was never recorded.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PoolId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "estimated": {
       "description": "Whether the amount is an estimate (no provider-reported usage was available).",
       "type": "boolean"

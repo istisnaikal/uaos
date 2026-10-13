@@ -2346,6 +2346,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "uaos-ledger"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "serde_json",
+ "thiserror",
+ "uaos-contracts",
+ "uaos-platform",
+ "uaos-state",
+]
+
+[[package]]
 name = "uaos-platform"
 version = "0.0.0"
 dependencies = [
