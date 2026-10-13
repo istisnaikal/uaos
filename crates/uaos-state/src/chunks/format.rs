@@ -74,12 +74,18 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let c = encode_chunk([3; NONCE_LEN], &[9; TAG_LEN + 5]);
-        assert_eq!(decode_chunk(&c), Some(([3; NONCE_LEN], &[9u8; TAG_LEN + 5][..])));
-        let k = encode_key(KekVersion(7), [4; NONCE_LEN], &[5; KEY_LEN + TAG_LEN]);
+        use uaos_platform::crypto::{SecretKey, seal};
+        use uaos_platform::sim::SimRng;
+        let key = SecretKey::generate(&SimRng::new(1)).unwrap();
+        let sealed = seal(&key, b"aad", b"content").unwrap();
+        let c = encode_chunk(sealed.nonce, &sealed.ciphertext);
+        assert_eq!(decode_chunk(&c), Some((sealed.nonce, &sealed.ciphertext[..])));
+
+        let wrapped = seal(&key, b"aad", &[5; KEY_LEN]).unwrap();
+        let k = encode_key(KekVersion(7), wrapped.nonce, &wrapped.ciphertext);
         assert_eq!(
             decode_key(&k),
-            Some((KekVersion(7), [4; NONCE_LEN], &[5u8; KEY_LEN + TAG_LEN][..]))
+            Some((KekVersion(7), wrapped.nonce, &wrapped.ciphertext[..]))
         );
     }
 

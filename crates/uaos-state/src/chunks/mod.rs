@@ -32,7 +32,7 @@ use uaos_contracts::digest::ChunkRef;
 use uaos_contracts::error::{ErrorCode, codes};
 use uaos_contracts::id::PocketId;
 use uaos_contracts::limits;
-use uaos_platform::crypto::{CryptoError, KEY_LEN, NONCE_LEN, SecretKey, hmac_sha256, open, seal};
+use uaos_platform::crypto::{CryptoError, KEY_LEN, SecretKey, hmac_sha256, open, seal};
 use uaos_platform::fs::{Fs, FsError};
 use uaos_platform::{PlatformError, Rng};
 
@@ -189,12 +189,6 @@ impl ChunkStore {
         Ok(())
     }
 
-    fn nonce(&self) -> Result<[u8; NONCE_LEN], ChunkError> {
-        let mut n = [0u8; NONCE_LEN];
-        self.rng.fill(&mut n).map_err(ChunkError::Platform)?;
-        Ok(n)
-    }
-
     /// The reference `content` has (or would have) in `pocket`.
     ///
     /// # Errors
@@ -224,11 +218,12 @@ impl ChunkStore {
         }
 
         let data_key = SecretKey::generate(self.rng.as_ref()).map_err(ChunkError::Platform)?;
-        let nonce = self.nonce()?;
-        let sealed =
-            seal(&data_key, nonce, &format::chunk_aad(pocket, chunk), content).map_err(|_| ChunkError::Corrupt)?;
+        let sealed = seal(&data_key, &format::chunk_aad(pocket, chunk), content).map_err(|_| ChunkError::Corrupt)?;
         self.fs
-            .write_atomic(&self.chunk_path(pocket, chunk), &format::encode_chunk(nonce, &sealed))
+            .write_atomic(
+                &self.chunk_path(pocket, chunk),
+                &format::encode_chunk(sealed.nonce, &sealed.ciphertext),
+            )
             .map_err(storage)?;
 
         let (version, kek) = self.keys.current_kek(pocket).map_err(ChunkError::Keyring)?;
@@ -244,18 +239,12 @@ impl ChunkStore {
         version: KekVersion,
         kek: &SecretKey,
     ) -> Result<(), ChunkError> {
-        let nonce = self.nonce()?;
-        let wrapped = seal(
-            kek,
-            nonce,
-            &format::key_aad(pocket, chunk, version),
-            data_key.expose_secret(),
-        )
-        .map_err(|_| ChunkError::Corrupt)?;
+        let wrapped = seal(kek, &format::key_aad(pocket, chunk, version), data_key.expose_secret())
+            .map_err(|_| ChunkError::Corrupt)?;
         self.fs
             .write_atomic(
                 &self.key_path(pocket, chunk),
-                &format::encode_key(version, nonce, &wrapped),
+                &format::encode_key(version, wrapped.nonce, &wrapped.ciphertext),
             )
             .map_err(storage)
     }
@@ -273,7 +262,7 @@ impl ChunkStore {
             Err(KeyringError::Retired) => return Err(ChunkError::Unavailable),
             Err(e) => return Err(ChunkError::Keyring(e)),
         };
-        let raw = open(&kek, nonce, &format::key_aad(pocket, chunk, version), wrapped)
+        let raw = open(&kek, &nonce, &format::key_aad(pocket, chunk, version), wrapped)
             .map_err(|_: CryptoError| ChunkError::Corrupt)?;
         let raw: [u8; KEY_LEN] = raw.as_slice().try_into().map_err(|_| ChunkError::Corrupt)?;
         Ok((SecretKey::from_bytes(raw), version))
@@ -293,7 +282,7 @@ impl ChunkStore {
         };
         let (nonce, sealed) = format::decode_chunk(&bytes).ok_or(ChunkError::Corrupt)?;
         let content =
-            open(&data_key, nonce, &format::chunk_aad(pocket, chunk), sealed).map_err(|_| ChunkError::Corrupt)?;
+            open(&data_key, &nonce, &format::chunk_aad(pocket, chunk), sealed).map_err(|_| ChunkError::Corrupt)?;
         if self.reference(pocket, &content)? != chunk {
             return Err(ChunkError::Corrupt);
         }
