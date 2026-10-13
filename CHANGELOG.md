@@ -8,6 +8,13 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P1 WP1.5 — OS keychain (ADR-0007): `uaos-platform::keychain` (`OsKeychain` over keyring-core with
+  an explicitly passed native store — Windows Credential Manager, macOS Keychain, Secret Service
+  over pure-Rust zbus — and a fault-injecting `SimKeychain`); `KeychainKeyring`, the production
+  `PocketKeyring`, with crash-safe rotation/retirement ordering and an in-memory key cache.
+  Conformance suites run against simulated and (on Windows/macOS CI) real keychains.
+  **Not yet implemented:** the headless passphrase vault of ADR-0007 §3; until it lands, hosts
+  without a keychain fail loudly with `UAOS-STORE-0003`.
 - P1 WP1.4 — `uaos-state::projection`: SQLite (bundled, WAL) projections of the journal —
   event index, operation states, cursor — holding metadata only. `catch_up` continues from the
   cursor and rebuilds automatically when the cursor no longer matches the journal (another

@@ -7,6 +7,7 @@
 //! primitives; the composition root never injects them.
 
 pub mod fs;
+pub mod keychain;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

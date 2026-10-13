@@ -15,3 +15,4 @@ before their first code is merged (GOVERNANCE.md §Decisions).
 | [0004](0004-trust-model-and-approvals.md) | Trust model and approvals | Accepted |
 | [0005](0005-dialects-and-transform-invariants.md) | Client dialects and transform invariants | Accepted |
 | [0006](0006-aws-lc-prebuilt-nasm-on-windows.md) | aws-lc prebuilt NASM objects on Windows | Accepted |
+| [0007](0007-key-storage-and-shred-guarantees.md) | Where keys live, and what "shredded" honestly means | Accepted |

@@ -37,6 +37,8 @@ flowchart LR
 - Content (prompts, outputs, tool payloads) is stored only as encrypted chunks with per-chunk
   keys; deleting means crypto-shredding plus pocket-key rotation.
 - SQLite never holds plaintext content (enforced by type from P1).
+- Pocket keys and provider API keys live in the OS keychain, never in the data directory
+  (ADR-0007). What "shredded" guarantees depends on that backend and is stated in ADR-0007 §4.
 - The data directory lives in the OS's local (non-roaming) application-data location;
   `uaos doctor` warns when it sits inside a cloud-sync folder (OneDrive, iCloud, Dropbox).
 - Limit stated honestly: OS-level backups and keychain backups are outside UAOS's control.

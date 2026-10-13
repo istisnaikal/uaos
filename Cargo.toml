@@ -27,6 +27,12 @@ uaos-state = { path = "crates/uaos-state" }
 aws-lc-rs = { version = "1.18.2", default-features = false, features = ["aws-lc-sys", "alloc"] }
 cargo_metadata = "0.23.1"
 getrandom = "0.4.3"
+# OS keychains (ADR-0007): core API plus one store per platform, passed explicitly (no global store).
+keyring-core = "1.0.1"
+windows-native-keyring-store = { version = "1.1.0", default-features = false }
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+# Pure-Rust D-Bus and crypto: no libdbus, no OpenSSL, no tokio in uaos-platform.
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-async-io-crypto-rust"] }
 jiff = { version = "0.2.38", default-features = false, features = ["std", "serde"] }
 proptest = "1.12.0"
 # SQLite compiled from pinned source: projections must not depend on a system library.
