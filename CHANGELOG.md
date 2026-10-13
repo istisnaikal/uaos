@@ -54,7 +54,11 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   | New 4 KiB chunk | 3.5 ms | p99.9 11.9 ms |
 
   The chunk path is the evidence behind PD-18 / ADR-0018: per-chunk flushes do not fit the
-  overhead budget.
+  overhead budget. First CI run on all three OSes, recorded in
+  `docs/adr/appendix/0003-ack-latency-2026-10-13.md`:
+  - balanced-ack p99 is 7.2 µs on Linux, 12.2 µs on macOS and 13.8 µs on Windows (H1 holds);
+  - the slowest group flush is 29.5 ms (p99.9), so W = 50 ms stands;
+  - a new chunk costs **28.5 ms at p99 on macOS**, more than the entire 25 ms overhead SLO.
 
 - P2 WP2.3 — `uaos-redact` (ADR-0009): schema-agnostic secret detection and redaction with a
   fail-closed final scan. Detector set v1 covers 11 high-risk classes:
