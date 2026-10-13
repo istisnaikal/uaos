@@ -167,6 +167,14 @@ mod tests {
         crate::fs::conformance::run(&OsFs, &scratch.0);
     }
 
+    /// Data directories live under user profiles such as `C:\Users\Şükrü` or `/home/ılgın`.
+    /// Runs on every CI OS, whatever its code page: UAOS itself must not depend on one.
+    #[test]
+    fn conforms_under_non_ascii_path_with_spaces() {
+        let scratch = Scratch::new("conform dir ü ş ı Ş İ");
+        crate::fs::conformance::run(&OsFs, &scratch.0);
+    }
+
     #[test]
     fn write_atomic_leaves_no_temporary_on_failure() {
         let scratch = Scratch::new("atomic");
