@@ -9,6 +9,7 @@
 use schemars::{Schema, schema_for};
 
 use crate::budget::BudgetTx;
+use crate::credential::CredentialEntry;
 use crate::error::UaosError;
 use crate::event::EventEnvelope;
 use crate::operation::Operation;
@@ -40,6 +41,11 @@ pub fn exported() -> Vec<ExportedSchema> {
             name: "budget_tx",
             major: 1,
             schema: schema_for!(BudgetTx),
+        },
+        ExportedSchema {
+            name: "credential",
+            major: 1,
+            schema: schema_for!(CredentialEntry),
         },
         ExportedSchema {
             name: "error",

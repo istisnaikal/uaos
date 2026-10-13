@@ -112,6 +112,18 @@ wire_u64! {
 }
 
 wire_u64! {
+    /// Revocation epoch of a credential (ADR-0011). Bumping it invalidates every descendant
+    /// issued under the previous value.
+    Epoch
+}
+
+wire_u64! {
+    /// Installation-wide count of revocations and epoch bumps (ADR-0011 restore guard). Also
+    /// kept in the OS keychain; a journal behind the keychain predates a revocation.
+    RevocationSeq
+}
+
+wire_u64! {
     /// Monotonic clock reading in nanoseconds since an arbitrary per-process origin.
     /// Never compared across processes; used to order and time events within one run.
     MonoNanos

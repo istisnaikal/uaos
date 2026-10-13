@@ -20,6 +20,7 @@
 #![deny(missing_docs)]
 
 pub mod budget;
+pub mod credential;
 pub mod digest;
 pub mod error;
 pub mod event;
@@ -29,4 +30,5 @@ pub mod money;
 pub mod operation;
 pub mod schema;
 pub mod time;
+mod token;
 pub mod wire;

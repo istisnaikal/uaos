@@ -143,6 +143,12 @@ tagged_digest! {
     ChunkRef, "hmac-sha256"
 }
 
+tagged_digest! {
+    /// Keyed (HMAC-SHA-256, installation identity key) digest of a credential secret
+    /// (ADR-0011). The secret itself is never stored or journaled.
+    CredentialDigest, "hmac-sha256"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
