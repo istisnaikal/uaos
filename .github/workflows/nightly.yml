@@ -41,6 +41,10 @@ jobs:
         run: cargo test -p uaos-ledger --release --locked --test ledger simulation
         env:
           UAOS_SIM_CASES: "100000"
+      - name: Identity derivations (10,000 cases)
+        run: cargo test -p uaos-identity --release --locked --test identity no_derivation
+        env:
+          UAOS_IDENTITY_CASES: "10000"
       - name: Redaction corpus (fresh seed; merge runs pin corpus v1)
         run: cargo test -p uaos-redact --release --locked --test corpus -- --nocapture
         env:

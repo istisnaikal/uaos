@@ -2346,6 +2346,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "uaos-identity"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "serde_json",
+ "thiserror",
+ "uaos-contracts",
+ "uaos-platform",
+ "uaos-state",
+ "zeroize",
+]
+
+[[package]]
 name = "uaos-ledger"
 version = "0.0.0"
 dependencies = [
