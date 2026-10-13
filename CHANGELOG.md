@@ -33,6 +33,18 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 - `docs/roadmap.md` (public roadmap), `docs/rfcs/` (process and template), `MAINTAINERS.md` (with
   the single-maintainer risk stated), `docs/research/name-check.md`.
 
+- Proposed ADRs for P3 (48 h review windows open):
+  - **ADR-0010:** kernel tokens: a pipeline typestate in a private runtime module, plus
+    reachability enforced by `arch.toml`, a `surface` check and a Ring 1 closure ban.
+  - **ADR-0013:** tokio with hyper and rustls directly; no reqwest or axum; egress owns name
+    resolution.
+  - **ADR-0014:** codecs describe structure with declarative selectors over a kernel-owned
+    view, and the kernel performs every edit; new Ring 0 crate `uaos-json`.
+  - **ADR-0017:** rehydration is a policy-gated action with a recorded round trip and a
+    per-session known-secret matcher.
+  - **ADR-0018:** chunks join the journal's durability classes. One new chunk costs 28.5 ms
+    at p99 on a macOS runner today.
+
 - P2 WP2.3 — `uaos-redact` (ADR-0009): schema-agnostic secret detection and redaction with a
   fail-closed final scan. Detector set v1 covers 11 high-risk classes:
   - private keys, JWTs;
@@ -132,3 +144,4 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 - Governance: LICENSE (Apache-2.0), NOTICE, README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT
   (Contributor Covenant 2.1), GOVERNANCE, RELEASING, ADR-0001–0005, threat model v0, privacy
   data flow v0, vision traceability matrix.
+
