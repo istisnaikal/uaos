@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Behaviour of scoped credentials (ADR-0011, plan v2 WP2.4).
+//! Behaviour of scoped credentials (ADR-0011, plan v2 WP2.4), including regression tests for
+//! the findings of the WP2.4 adversarial review (`docs/reviews/WP2.4.md`).
 
 #![allow(
     clippy::unwrap_used,
@@ -10,25 +11,29 @@
     reason = "tests: failures should be loud and immediate"
 )]
 
+use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use proptest::prelude::*;
+use proptest::test_runner::{Config, TestCaseError, TestRunner};
 use uaos_contracts::credential::{
-    ActionName, CredentialKind, PatternMatch, PatternValue, ResourceKind, ResourcePattern, Scope, ScopeSet,
+    ActionName, CredentialKind, Label, PatternMatch, PatternValue, ResourceKind, ResourcePattern, Scope, ScopeSet,
 };
 use uaos_contracts::error::codes;
 use uaos_contracts::event::Actor;
-use uaos_contracts::id::{CorrelationId, CredentialId, PocketId, TypedId};
+use uaos_contracts::id::{CorrelationId, CredentialId, PocketId, PoolId, TypedId};
 use uaos_contracts::limits::{self, Millis};
 use uaos_contracts::time::WallTime;
 use uaos_contracts::wire::{ConfigVersion, RevocationSeq};
 use uaos_identity::scope::{ScopeRequest, scope_covers, scope_within};
 use uaos_identity::{
-    Identity, IdentityError, IdentityKeys, IssueRequest, Issued, JournalSink, MemorySink, entries_from_journal,
+    GUARD_CEILING, GuardOutcome, GuardStatus, Identity, IdentityError, IdentityKeys, IssueRequest, Issued, JournalSink,
+    MemorySink, Verified, entries_from_journal,
 };
 use uaos_platform::fs::Fs;
-use uaos_platform::keychain::Keychain;
+use uaos_platform::keychain::{Keychain, KeychainError};
 use uaos_platform::sim::fs::SimFs;
 use uaos_platform::sim::keychain::SimKeychain;
 use uaos_platform::sim::{SimClock, SimRng};
@@ -36,6 +41,8 @@ use uaos_platform::{Clock, Rng};
 use uaos_state::journal::{FlushPolicy, JOURNAL_DIR, Journal, read_verified};
 
 const INSTALLATION: &str = "inst-test";
+const GUARD_ACCOUNT: &str = "inst-test/identity/revocation-seq";
+const KEY_ACCOUNT: &str = "inst-test/identity/hmac";
 const T0: i128 = 1_760_000_000_000_000_000;
 const HOUR: i128 = 3_600_000_000_000;
 
@@ -51,15 +58,19 @@ fn pocket(n: u8) -> PocketId {
     PocketId::from_parts(1, [n; 10])
 }
 
+fn pool(n: u8) -> PoolId {
+    PoolId::from_parts(1, [n; 10])
+}
+
 fn action(name: &str) -> ActionName {
     ActionName::new(name).unwrap()
 }
 
-fn models(prefix: &str) -> ResourcePattern {
+fn pattern(kind: ResourceKind, matching: PatternMatch, value: &str) -> ResourcePattern {
     ResourcePattern {
-        kind: ResourceKind::Model,
-        matching: PatternMatch::Prefix,
-        value: PatternValue::new(prefix).unwrap(),
+        kind,
+        matching,
+        value: PatternValue::new(value).unwrap(),
     }
 }
 
@@ -76,11 +87,19 @@ fn master_scope() -> Scope {
 fn sub_scope(expires_hours: i128) -> Scope {
     Scope {
         actions: ScopeSet::Only([action("model.call"), action("model.count_tokens")].into()),
-        resources: ScopeSet::Only([models("claude-")].into()),
+        resources: ScopeSet::Only([pattern(ResourceKind::Model, PatternMatch::Prefix, "claude-")].into()),
         pockets: ScopeSet::Only([pocket(1)].into()),
         pools: ScopeSet::Any,
         expires_at: Some(at(expires_hours)),
     }
+}
+
+fn keys_for(keychain: &Arc<SimKeychain>, credentials_exist: bool) -> Result<IdentityKeys, IdentityError> {
+    IdentityKeys::open(keychain.clone(), &SimRng::new(11), INSTALLATION, credentials_exist)
+}
+
+fn set_guard(keychain: &SimKeychain, value: u64) {
+    keychain.set(GUARD_ACCOUNT, &value.to_be_bytes()).unwrap();
 }
 
 struct World {
@@ -94,18 +113,23 @@ struct World {
 impl World {
     fn new() -> Self {
         let keychain = Arc::new(SimKeychain::new());
-        let rng = SimRng::new(11);
-        let keys = IdentityKeys::open(keychain.clone(), &rng, INSTALLATION).unwrap();
+        let keys = keys_for(&keychain, false).unwrap();
         Self {
             keychain,
             keys,
-            rng,
+            rng: SimRng::new(11),
             identity: Identity::default(),
             sink: MemorySink::default(),
         }
     }
 
-    fn issue(&mut self, id: CredentialId, parent: Option<CredentialId>, scope: Scope) -> Result<Issued, IdentityError> {
+    fn issue_at(
+        &mut self,
+        id: CredentialId,
+        parent: Option<CredentialId>,
+        scope: Scope,
+        now: WallTime,
+    ) -> Result<Issued, IdentityError> {
         self.identity.issue(
             &mut self.sink,
             &self.keys,
@@ -113,17 +137,35 @@ impl World {
             IssueRequest {
                 id,
                 parent,
-                label: None,
+                label: Some(Label::new("test").unwrap()),
                 scope,
             },
-            at(0),
+            now,
         )
     }
 
-    fn verify(&self, issued: &Issued, now: WallTime) -> Result<uaos_identity::Verified, IdentityError> {
+    fn issue(&mut self, id: CredentialId, parent: Option<CredentialId>, scope: Scope) -> Result<Issued, IdentityError> {
+        self.issue_at(id, parent, scope, at(0))
+    }
+
+    fn verify(&self, issued: &Issued, now: WallTime) -> Result<Verified, IdentityError> {
         self.identity.verify(&self.keys, &issued.text, now)
     }
+
+    fn revoke(&mut self, id: CredentialId) -> Result<GuardOutcome, IdentityError> {
+        self.identity.revoke(&mut self.sink, &mut self.keys, id)
+    }
+
+    fn bump(&mut self, id: CredentialId) -> Result<GuardOutcome, IdentityError> {
+        self.identity
+            .bump_epoch(&mut self.sink, &mut self.keys, id)
+            .map(|(_, outcome)| outcome)
+    }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Issuance and verification
+// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn issued_credentials_verify_with_their_chain_and_scope() {
@@ -134,25 +176,47 @@ fn issued_credentials_verify_with_their_chain_and_scope() {
     let verified = w.verify(&sub, at(1)).unwrap();
     assert_eq!(verified.credential, cred(2));
     assert_eq!(verified.chain, vec![cred(2), cred(1)]);
+    let request = |resource: Option<(ResourceKind, &'static str)>, pocket_id: Option<PocketId>| ScopeRequest {
+        action: "model.call",
+        resource,
+        pocket: pocket_id,
+        pool: None,
+    };
     assert!(scope_covers(
         &verified.scope,
-        &ScopeRequest {
-            action: "model.call",
-            resource: Some((ResourceKind::Model, "claude-sonnet-5-5")),
-            pocket: Some(pocket(1)),
-            pool: None,
-        }
+        &request(Some((ResourceKind::Model, "claude-sonnet-5-5")), Some(pocket(1)))
     ));
     assert!(!scope_covers(
         &verified.scope,
-        &ScopeRequest {
-            action: "model.call",
-            resource: Some((ResourceKind::Model, "gpt-5")),
-            pocket: Some(pocket(1)),
-            pool: None,
-        }
+        &request(Some((ResourceKind::Model, "gpt-5")), Some(pocket(1)))
     ));
     assert_eq!(w.verify(&master, at(1)).unwrap().kind, CredentialKind::Master);
+}
+
+#[test]
+fn a_restricted_dimension_left_out_of_a_request_is_denied() {
+    // Review M2: "no resource" or "no pocket" must not slip past a restriction.
+    let scope = sub_scope(24);
+    let base = ScopeRequest {
+        action: "model.call",
+        resource: Some((ResourceKind::Model, "claude-x")),
+        pocket: Some(pocket(1)),
+        pool: None,
+    };
+    assert!(scope_covers(&scope, &base));
+    assert!(!scope_covers(&scope, &ScopeRequest { resource: None, ..base }));
+    assert!(!scope_covers(&scope, &ScopeRequest { pocket: None, ..base }));
+    // A request that spends nothing carries no pool; a pool restriction does not apply.
+    let mut pooled = scope.clone();
+    pooled.pools = ScopeSet::Only([pool(1)].into());
+    assert!(scope_covers(&pooled, &base));
+    assert!(!scope_covers(
+        &pooled,
+        &ScopeRequest {
+            pool: Some(pool(2)),
+            ..base
+        }
+    ));
 }
 
 #[test]
@@ -162,24 +226,24 @@ fn a_child_can_never_exceed_its_parent() {
     w.issue(cred(2), Some(cred(1)), sub_scope(24)).unwrap();
     let mut wider = sub_scope(12);
     wider.resources = ScopeSet::Any;
-    let err = w.issue(cred(3), Some(cred(2)), wider).unwrap_err();
-    assert_eq!(err.code(), codes::IDENTITY_SCOPE_EXCEEDS_PARENT);
+    assert_eq!(
+        w.issue(cred(3), Some(cred(2)), wider).unwrap_err().code(),
+        codes::IDENTITY_SCOPE_EXCEEDS_PARENT
+    );
     let mut later = sub_scope(48);
-    later.resources = ScopeSet::Only([models("claude-opus")].into());
+    later.resources = ScopeSet::Only([pattern(ResourceKind::Model, PatternMatch::Prefix, "claude-opus")].into());
     assert!(matches!(
         w.issue(cred(4), Some(cred(2)), later),
         Err(IdentityError::ScopeExceedsParent(_))
     ));
-    // Narrower in every dimension is accepted, and its kind is Child.
     let mut narrower = sub_scope(12);
     narrower.actions = ScopeSet::Only([action("model.call")].into());
-    narrower.resources = ScopeSet::Only([models("claude-opus")].into());
+    narrower.resources = ScopeSet::Only([pattern(ResourceKind::Model, PatternMatch::Prefix, "claude-opus")].into());
     assert_eq!(
         w.issue(cred(5), Some(cred(2)), narrower).unwrap().record.kind,
         CredentialKind::Child
     );
-    // Refused issuances were never recorded.
-    assert_eq!(w.sink.entries.len(), 3);
+    assert_eq!(w.sink.entries.len(), 3, "refused issuances are never recorded");
 }
 
 #[test]
@@ -196,25 +260,78 @@ fn the_chain_is_bounded() {
 }
 
 #[test]
+fn live_children_per_parent_are_bounded() {
+    // Review M7.
+    let mut w = World::new();
+    w.issue(cred(0), None, master_scope()).unwrap();
+    for i in 0..limits::MAX_LIVE_CHILDREN {
+        let id = CredentialId::from_parts(1_000 + u64::try_from(i).unwrap(), [7; 10]);
+        w.issue(id, Some(cred(0)), sub_scope(24)).unwrap();
+    }
+    let err = w.issue(cred(250), Some(cred(0)), sub_scope(24)).unwrap_err();
+    assert_eq!(err.code(), codes::IDENTITY_LIMIT_REACHED);
+}
+
+#[test]
+fn issuing_under_a_dead_chain_or_with_an_expired_scope_is_refused() {
+    // Review L1.
+    let mut w = World::new();
+    w.issue(cred(1), None, master_scope()).unwrap();
+    w.issue(cred(2), Some(cred(1)), sub_scope(24)).unwrap();
+    w.issue(cred(3), Some(cred(2)), sub_scope(12)).unwrap();
+    w.revoke(cred(2)).unwrap();
+    assert_eq!(
+        w.issue(cred(4), Some(cred(3)), sub_scope(6)).unwrap_err(),
+        IdentityError::Revoked(cred(2)),
+        "a revoked grandparent kills the chain"
+    );
+    w.issue(cred(5), Some(cred(1)), sub_scope(24)).unwrap();
+    w.issue(cred(6), Some(cred(5)), sub_scope(12)).unwrap();
+    w.bump(cred(1)).unwrap();
+    assert!(
+        w.issue(cred(7), Some(cred(6)), sub_scope(6)).is_err(),
+        "an epoch-stale chain cannot issue"
+    );
+    let err = w.issue_at(cred(8), Some(cred(1)), sub_scope(1), at(2)).unwrap_err();
+    assert_eq!(err.code(), codes::IDENTITY_INVALID_REQUEST, "already expired");
+    assert_eq!(
+        w.bump(cred(2)).unwrap_err().code(),
+        codes::IDENTITY_INVALID_REQUEST,
+        "revoked: no bump"
+    );
+}
+
+#[test]
+fn request_mistakes_are_user_errors_not_internal_failures() {
+    // Review M5.
+    let mut w = World::new();
+    w.issue(cred(1), None, master_scope()).unwrap();
+    let mut no_expiry = sub_scope(24);
+    no_expiry.expires_at = None;
+    for err in [
+        w.issue(cred(2), Some(cred(1)), no_expiry).unwrap_err(),
+        w.issue(cred(1), None, master_scope()).unwrap_err(),
+        w.issue(cred(3), Some(cred(99)), sub_scope(24)).unwrap_err(),
+    ] {
+        assert_eq!(err.code(), codes::IDENTITY_INVALID_REQUEST, "{err}");
+    }
+    w.issue(cred(4), Some(cred(1)), sub_scope(24)).unwrap();
+    w.revoke(cred(4)).unwrap();
+    assert_eq!(w.revoke(cred(4)).unwrap_err().code(), codes::IDENTITY_INVALID_REQUEST);
+    assert!(!w.identity.is_poisoned());
+}
+
+#[test]
 fn revocation_takes_effect_on_the_next_verify_for_every_descendant() {
     let mut w = World::new();
     w.issue(cred(1), None, master_scope()).unwrap();
     let sub_a = w.issue(cred(2), Some(cred(1)), sub_scope(24)).unwrap();
     let child = w.issue(cred(3), Some(cred(2)), sub_scope(12)).unwrap();
     let sub_b = w.issue(cred(4), Some(cred(1)), sub_scope(24)).unwrap();
-    w.identity.revoke(&mut w.sink, &mut w.keys, cred(2)).unwrap();
+    assert_eq!(w.revoke(cred(2)).unwrap(), GuardOutcome::Synced);
     assert_eq!(w.verify(&sub_a, at(1)).unwrap_err(), IdentityError::Revoked(cred(2)));
     assert_eq!(w.verify(&child, at(1)).unwrap_err(), IdentityError::Revoked(cred(2)));
     assert!(w.verify(&sub_b, at(1)).is_ok(), "a sibling is unaffected");
-    // A revoked parent cannot issue.
-    assert_eq!(
-        w.issue(cred(5), Some(cred(2)), sub_scope(12)).unwrap_err(),
-        IdentityError::Revoked(cred(2))
-    );
-    assert!(
-        w.identity.revoke(&mut w.sink, &mut w.keys, cred(2)).is_err(),
-        "revoking twice is refused"
-    );
 }
 
 #[test]
@@ -223,7 +340,7 @@ fn an_epoch_bump_revokes_descendants_but_not_the_credential() {
     let master = w.issue(cred(1), None, master_scope()).unwrap();
     let old_sub = w.issue(cred(2), Some(cred(1)), sub_scope(24)).unwrap();
     let old_child = w.issue(cred(3), Some(cred(2)), sub_scope(12)).unwrap();
-    w.identity.bump_epoch(&mut w.sink, &mut w.keys, cred(1)).unwrap();
+    w.bump(cred(1)).unwrap();
     assert!(w.verify(&master, at(1)).is_ok());
     assert!(
         w.verify(&old_sub, at(1)).is_err(),
@@ -235,19 +352,13 @@ fn an_epoch_bump_revokes_descendants_but_not_the_credential() {
 }
 
 #[test]
-fn expiry_is_checked_up_the_chain() {
+fn expiry_is_checked_up_the_chain_at_and_after_the_instant() {
     let mut w = World::new();
     w.issue(cred(1), None, master_scope()).unwrap();
     w.issue(cred(2), Some(cred(1)), sub_scope(10)).unwrap();
     let child = w.issue(cred(3), Some(cred(2)), sub_scope(5)).unwrap();
     assert!(w.verify(&child, at(4)).is_ok());
     assert_eq!(w.verify(&child, at(5)).unwrap_err(), IdentityError::Expired(cred(3)));
-    let mut sub_scope_no_expiry = sub_scope(10);
-    sub_scope_no_expiry.expires_at = None;
-    assert!(
-        w.issue(cred(4), Some(cred(1)), sub_scope_no_expiry).is_err(),
-        "sub keys must expire"
-    );
 }
 
 #[test]
@@ -257,12 +368,15 @@ fn malformed_and_unknown_credentials_are_refused_without_echo() {
     let err = w.identity.verify(&w.keys, "uaos_sk_not-a-key", at(1)).unwrap_err();
     assert_eq!(err.code(), codes::IDENTITY_MALFORMED);
     assert!(!err.to_string().contains("not-a-key"));
-    // A well-formed key from another installation (other identity key) is unknown here.
-    let other = World::new();
-    let foreign_keys = IdentityKeys::open(Arc::new(SimKeychain::new()), &SimRng::new(99), "other").unwrap();
-    let foreign = Identity::default().verify(&foreign_keys, &issued.text, at(1));
-    assert_eq!(foreign.unwrap_err().code(), codes::IDENTITY_UNKNOWN);
-    drop(other);
+    let other_keychain = Arc::new(SimKeychain::new());
+    let foreign = keys_for(&other_keychain, false).unwrap();
+    assert_eq!(
+        Identity::default()
+            .verify(&foreign, &issued.text, at(1))
+            .unwrap_err()
+            .code(),
+        codes::IDENTITY_UNKNOWN
+    );
 }
 
 #[test]
@@ -278,57 +392,86 @@ fn the_secret_never_appears_in_records_entries_or_debug_output() {
     assert!(!format!("{:?}", w.identity).contains(body));
 }
 
+// ---------------------------------------------------------------------------------------------
+// Keys and the restore guard
+// ---------------------------------------------------------------------------------------------
+
 #[test]
-fn the_identity_key_persists_in_the_keychain() {
+fn the_identity_key_persists_and_a_lost_key_is_not_silently_replaced() {
+    // Review M3.
     let mut w = World::new();
     let issued = w.issue(cred(1), None, master_scope()).unwrap();
-    let reopened = IdentityKeys::open(w.keychain.clone(), &SimRng::new(12345), INSTALLATION).unwrap();
+    let reopened = keys_for(&w.keychain, true).unwrap();
     assert!(w.identity.verify(&reopened, &issued.text, at(1)).is_ok());
-    // Losing the identity key invalidates every credential: fail closed.
-    w.keychain.delete(&format!("{INSTALLATION}/identity/hmac")).unwrap();
-    let fresh = IdentityKeys::open(w.keychain.clone(), &SimRng::new(5), INSTALLATION).unwrap();
-    assert_eq!(
-        w.identity.verify(&fresh, &issued.text, at(1)).unwrap_err(),
-        IdentityError::Unknown
+    w.keychain.delete(KEY_ACCOUNT).unwrap();
+    assert_eq!(keys_for(&w.keychain, true).unwrap_err(), IdentityError::KeyLost);
+    assert!(
+        w.keychain.get(KEY_ACCOUNT).unwrap().is_none(),
+        "no replacement key was created"
     );
+    w.keychain.set(KEY_ACCOUNT, b"short").unwrap();
+    assert_eq!(keys_for(&w.keychain, true).unwrap_err(), IdentityError::KeyLost);
 }
 
 #[test]
-fn a_restored_data_directory_fails_closed_until_recovered() {
+fn a_restored_data_directory_fails_closed_and_ordinary_writes_cannot_reopen_it() {
+    // Review H1: revoking or bumping something else must not close the gap.
     let mut w = World::new();
     w.issue(cred(1), None, master_scope()).unwrap();
-    let sub = w.issue(cred(2), Some(cred(1)), sub_scope(24)).unwrap();
-    // Backup taken here (entries so far), then the sub key is revoked.
+    let revoked_later = w.issue(cred(2), Some(cred(1)), sub_scope(24)).unwrap();
+    w.issue(cred(3), Some(cred(1)), sub_scope(24)).unwrap();
     let backup = w.sink.entries.clone();
-    w.identity.revoke(&mut w.sink, &mut w.keys, cred(2)).unwrap();
+    w.revoke(cred(2)).unwrap();
     assert_eq!(w.keys.guard(), RevocationSeq(1));
 
-    // Restore the old data directory: the journal no longer knows about the revocation.
     let mut restored = Identity::replay(&backup).unwrap();
-    let err = restored.verify(&w.keys, &sub.text, at(1)).unwrap_err();
+    let stale = restored.verify(&w.keys, &revoked_later.text, at(1)).unwrap_err();
     assert_eq!(
-        err.code(),
+        stale.code(),
         codes::IDENTITY_STALE_DATA_DIR,
         "the revoked key must not resurrect"
     );
-
     let mut sink = MemorySink::default();
-    let revoked = restored.recover_after_restore(&mut sink, &mut w.keys).unwrap();
-    assert_eq!(revoked, 1);
+    for refused in [
+        restored.revoke(&mut sink, &mut w.keys, cred(3)).unwrap_err(),
+        restored.bump_epoch(&mut sink, &mut w.keys, cred(1)).unwrap_err(),
+        restored
+            .issue(
+                &mut sink,
+                &w.keys,
+                &w.rng,
+                IssueRequest {
+                    id: cred(9),
+                    parent: Some(cred(1)),
+                    label: None,
+                    scope: sub_scope(24),
+                },
+                at(1),
+            )
+            .unwrap_err(),
+    ] {
+        assert_eq!(refused.code(), codes::IDENTITY_STALE_DATA_DIR, "{refused}");
+    }
+    assert!(sink.entries.is_empty(), "nothing was recorded on a stale directory");
     assert_eq!(
-        restored.verify(&w.keys, &sub.text, at(1)).unwrap_err(),
+        restored.verify(&w.keys, &revoked_later.text, at(1)).unwrap_err().code(),
+        codes::IDENTITY_STALE_DATA_DIR
+    );
+
+    let (masters, outcome) = restored.recover_after_restore(&mut sink, &mut w.keys).unwrap();
+    assert_eq!((masters, outcome), (1, GuardOutcome::Synced));
+    assert_eq!(sink.entries.len(), 1, "recovery is one atomic entry");
+    assert_eq!(
+        restored.verify(&w.keys, &revoked_later.text, at(1)).unwrap_err(),
         IdentityError::Revoked(cred(1))
     );
-    assert!(restored.state().revocation_seq() >= w.keys.guard());
-
-    // A new master issued after recovery works.
     let new_master = restored
         .issue(
             &mut sink,
             &w.keys,
             &w.rng,
             IssueRequest {
-                id: cred(9),
+                id: cred(10),
                 parent: None,
                 label: None,
                 scope: master_scope(),
@@ -337,6 +480,79 @@ fn a_restored_data_directory_fails_closed_until_recovered() {
         )
         .unwrap();
     assert!(restored.verify(&w.keys, &new_master.text, at(3)).is_ok());
+}
+
+#[test]
+fn recovery_is_refused_when_nothing_is_stale() {
+    // Review L3.
+    let mut w = World::new();
+    w.issue(cred(1), None, master_scope()).unwrap();
+    let err = w.identity.recover_after_restore(&mut w.sink, &mut w.keys).unwrap_err();
+    assert_eq!(err.code(), codes::IDENTITY_INVALID_REQUEST);
+}
+
+#[test]
+fn a_tampered_or_deleted_counter_fails_closed_and_cannot_block_revocation_silently() {
+    // Review H2 and M3.
+    let mut w = World::new();
+    let master = w.issue(cred(1), None, master_scope()).unwrap();
+    w.issue(cred(2), Some(cred(1)), sub_scope(24)).unwrap();
+    w.revoke(cred(2)).unwrap();
+    w.issue(cred(3), Some(cred(1)), sub_scope(24)).unwrap();
+    w.revoke(cred(3)).unwrap();
+
+    set_guard(&w.keychain, u64::MAX);
+    let tampered = keys_for(&w.keychain, true).unwrap();
+    assert_eq!(
+        w.identity.verify(&tampered, &master.text, at(1)).unwrap_err().code(),
+        codes::IDENTITY_COUNTER_INCONSISTENT
+    );
+
+    w.keychain.delete(GUARD_ACCOUNT).unwrap();
+    let mut deleted = keys_for(&w.keychain, true).unwrap();
+    assert_eq!(
+        w.identity.verify(&deleted, &master.text, at(1)).unwrap_err().code(),
+        codes::IDENTITY_COUNTER_INCONSISTENT,
+        "a counter far behind the journal is not trusted"
+    );
+    assert_eq!(
+        w.identity
+            .revoke(&mut w.sink, &mut deleted, cred(1))
+            .unwrap_err()
+            .code(),
+        codes::IDENTITY_COUNTER_INCONSISTENT
+    );
+
+    w.keychain.set(GUARD_ACCOUNT, b"bad").unwrap();
+    let malformed = keys_for(&w.keychain, true).unwrap();
+    assert_eq!(malformed.guard(), RevocationSeq(GUARD_CEILING));
+    assert!(w.identity.verify(&malformed, &master.text, at(1)).is_err());
+}
+
+#[test]
+fn an_interrupted_keychain_write_lags_by_one_and_is_repaired() {
+    // Review M4: a transient keychain failure must not force re-issuing every key.
+    let mut w = World::new();
+    w.issue(cred(1), None, master_scope()).unwrap();
+    let sub = w.issue(cred(2), Some(cred(1)), sub_scope(24)).unwrap();
+    let other = w.issue(cred(3), Some(cred(1)), sub_scope(24)).unwrap();
+    w.keychain.fail_next(KeychainError::Denied);
+    assert_eq!(
+        w.revoke(cred(2)).unwrap(),
+        GuardOutcome::Lagging,
+        "recorded, counter not raised"
+    );
+    assert_eq!(w.verify(&sub, at(1)).unwrap_err(), IdentityError::Revoked(cred(2)));
+    assert!(
+        w.verify(&other, at(1)).is_ok(),
+        "verification keeps working while lagging"
+    );
+
+    let mut reopened = keys_for(&w.keychain, true).unwrap();
+    assert_eq!(reopened.guard(), RevocationSeq(0));
+    assert_eq!(w.identity.reconcile(&mut reopened).unwrap(), GuardStatus::Lagging);
+    assert_eq!(reopened.guard(), RevocationSeq(1), "repaired");
+    assert_eq!(w.identity.reconcile(&mut reopened).unwrap(), GuardStatus::InSync);
 }
 
 #[test]
@@ -350,7 +566,6 @@ fn a_recording_failure_poisons_until_replayed() {
     assert!(w.issue(cred(3), Some(cred(1)), sub_scope(24)).is_err());
     let rebuilt = Identity::replay(&w.sink.entries).unwrap();
     assert!(!rebuilt.is_poisoned());
-    assert!(rebuilt.state().node(cred(1)).is_some());
     assert!(
         rebuilt.state().node(cred(2)).is_none(),
         "the failed entry was not recorded"
@@ -365,58 +580,184 @@ fn an_oversized_record_is_refused_without_poisoning() {
     let mut scope = sub_scope(24);
     scope.resources = ScopeSet::Only(
         (0..limits::MAX_SCOPE_ITEMS)
-            .map(|i| ResourcePattern {
-                kind: ResourceKind::Tool,
-                matching: PatternMatch::Exact,
-                value: PatternValue::new(long("t", i)).unwrap(),
-            })
+            .map(|i| pattern(ResourceKind::Tool, PatternMatch::Exact, &long("t", i)))
             .collect(),
     );
     scope.actions = ScopeSet::Only((0..limits::MAX_SCOPE_ITEMS).map(|i| action(&long("a", i))).collect());
-    let err = w.issue(cred(2), Some(cred(1)), scope).unwrap_err();
-    assert_eq!(err.code(), codes::IDENTITY_RECORD_TOO_LARGE);
+    assert_eq!(
+        w.issue(cred(2), Some(cred(1)), scope).unwrap_err().code(),
+        codes::IDENTITY_RECORD_TOO_LARGE
+    );
     assert!(!w.identity.is_poisoned());
 }
 
 // ---------------------------------------------------------------------------------------------
-// Random derivation trees
+// Random hierarchies against an independent model
 // ---------------------------------------------------------------------------------------------
+
+const ACTIONS: [&str; 3] = ["model.call", "model.count_tokens", "tool.call"];
+
+fn arb_patterns() -> impl Strategy<Value = ScopeSet<ResourcePattern>> {
+    let one = (
+        prop_oneof![Just(ResourceKind::Model), Just(ResourceKind::Tool)],
+        prop_oneof![Just(PatternMatch::Exact), Just(PatternMatch::Prefix)],
+        "[ab]{1,2}",
+    )
+        .prop_map(|(k, m, v)| pattern(k, m, &v));
+    prop_oneof![
+        1 => Just(ScopeSet::Any),
+        2 => proptest::collection::btree_set(one, 0..3).prop_map(ScopeSet::Only),
+    ]
+}
+
+fn arb_ids(max: u8) -> impl Strategy<Value = BTreeSet<u8>> {
+    proptest::collection::btree_set(1u8..=max, 0..3)
+}
 
 fn arb_scope() -> impl Strategy<Value = Scope> {
     let actions = prop_oneof![
-        Just(ScopeSet::Any),
-        proptest::sample::subsequence(vec!["model.call", "model.count_tokens", "tool.call"], 0..=3)
+        1 => Just(ScopeSet::Any),
+        2 => proptest::sample::subsequence(ACTIONS.to_vec(), 0..=3)
             .prop_map(|v| ScopeSet::Only(v.into_iter().map(action).collect())),
     ];
-    let resources = prop_oneof![
-        Just(ScopeSet::Any),
-        proptest::collection::btree_set(
-            (
-                prop_oneof![Just(PatternMatch::Exact), Just(PatternMatch::Prefix)],
-                "[ab]{1,3}"
-            )
-                .prop_map(|(m, v)| {
-                    ResourcePattern {
-                        kind: ResourceKind::Model,
-                        matching: m,
-                        value: PatternValue::new(v).unwrap(),
-                    }
-                }),
-            0..3,
-        )
-        .prop_map(ScopeSet::Only),
-    ];
     let pockets = prop_oneof![
-        Just(ScopeSet::Any),
-        proptest::collection::btree_set(1u8..4, 0..3).prop_map(|s| ScopeSet::Only(s.into_iter().map(pocket).collect())),
+        1 => Just(ScopeSet::Any),
+        2 => arb_ids(3).prop_map(|s| ScopeSet::Only(s.into_iter().map(pocket).collect())),
     ];
-    (actions, resources, pockets, 1i128..48).prop_map(|(actions, resources, pockets, hours)| Scope {
+    let pools = prop_oneof![
+        1 => Just(ScopeSet::Any),
+        2 => arb_ids(2).prop_map(|s| ScopeSet::Only(s.into_iter().map(pool).collect())),
+    ];
+    (actions, arb_patterns(), pockets, pools, 1i128..48).prop_map(|(actions, resources, pockets, pools, hours)| Scope {
         actions,
         resources,
         pockets,
-        pools: ScopeSet::Any,
+        pools,
         expires_at: Some(at(hours)),
     })
+}
+
+#[derive(Debug, Clone)]
+enum Op {
+    Revoke(usize),
+    Bump(usize),
+}
+
+fn arb_op() -> impl Strategy<Value = Op> {
+    prop_oneof![(0usize..16).prop_map(Op::Revoke), (0usize..16).prop_map(Op::Bump)]
+}
+
+/// Every request over a small universe, for the independent coverage oracle.
+fn request_universe() -> Vec<ScopeRequest<'static>> {
+    const NAMES: [&str; 6] = ["a", "b", "aa", "ab", "ba", "bb"];
+    let mut resources: Vec<Option<(ResourceKind, &'static str)>> = vec![None];
+    for kind in [ResourceKind::Model, ResourceKind::Tool] {
+        resources.extend(NAMES.iter().map(|n| Some((kind, *n))));
+    }
+    let pockets = [None, Some(pocket(1)), Some(pocket(2)), Some(pocket(3))];
+    let pools = [None, Some(pool(1)), Some(pool(2))];
+    let mut out = Vec::new();
+    for action in ACTIONS {
+        for resource in &resources {
+            for pocket_id in pockets {
+                for pool_id in pools {
+                    out.push(ScopeRequest {
+                        action,
+                        resource: *resource,
+                        pocket: pocket_id,
+                        pool: pool_id,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Runs one generated hierarchy; returns (credentials issued, credentials that verified).
+fn run_case(requests: Vec<(usize, Scope)>, ops: Vec<Op>) -> Result<(usize, usize), TestCaseError> {
+    let mut w = World::new();
+    let master = w.issue(cred(0), None, master_scope()).unwrap();
+    // Model: id -> (parent, text).
+    let mut parent_of: BTreeMap<CredentialId, Option<CredentialId>> = BTreeMap::new();
+    let mut texts: Vec<(CredentialId, Issued)> = vec![(cred(0), master)];
+    parent_of.insert(cred(0), None);
+    for (i, (pick, scope)) in requests.into_iter().enumerate() {
+        let parent = texts[pick % texts.len()].0;
+        let id = cred(u8::try_from(i + 1).unwrap());
+        let parent_scope = w.identity.state().node(parent).unwrap().record.scope.clone();
+        let within = scope_within(&scope, &parent_scope);
+        match w.issue(id, Some(parent), scope) {
+            Ok(done) => {
+                prop_assert!(within, "issuance accepted a scope outside its parent");
+                parent_of.insert(id, Some(parent));
+                texts.push((id, done));
+            }
+            Err(IdentityError::ScopeExceedsParent(_)) => prop_assert!(!within),
+            Err(IdentityError::DepthExceeded { .. }) => {}
+            Err(other) => prop_assert!(false, "unexpected refusal: {other}"),
+        }
+    }
+    let mut revoked = BTreeSet::new();
+    let mut bumped = BTreeSet::new();
+    for op in ops {
+        match op {
+            Op::Revoke(pick) => {
+                let id = texts[pick % texts.len()].0;
+                if w.revoke(id).is_ok() {
+                    revoked.insert(id);
+                }
+            }
+            Op::Bump(pick) => {
+                let id = texts[pick % texts.len()].0;
+                if w.bump(id).is_ok() {
+                    bumped.insert(id);
+                }
+            }
+        }
+    }
+    let ancestors = |id: CredentialId| {
+        let mut out = Vec::new();
+        let mut cur = parent_of[&id];
+        while let Some(p) = cur {
+            out.push(p);
+            cur = parent_of[&p];
+        }
+        out
+    };
+    let universe = request_universe();
+    let mut verified = 0usize;
+    for (id, issued) in &texts {
+        let strict = ancestors(*id);
+        let expected = !revoked.contains(id)
+            && !strict.iter().any(|a| revoked.contains(a))
+            && !strict.iter().any(|a| bumped.contains(a));
+        let actual = w.verify(issued, at(0));
+        prop_assert_eq!(
+            actual.is_ok(),
+            expected,
+            "verification disagrees with the model for {}: {:?}",
+            id,
+            actual
+        );
+        if let Ok(v) = actual {
+            verified += 1;
+            // Independent oracle: anything the credential covers, every ancestor covers.
+            for ancestor in &strict {
+                let a_scope = &w.identity.state().node(*ancestor).unwrap().record.scope;
+                for r in &universe {
+                    prop_assert!(
+                        !scope_covers(&v.scope, r) || scope_covers(a_scope, r),
+                        "a credential covers a request its ancestor does not: {:?}",
+                        r.action
+                    );
+                }
+            }
+        }
+    }
+    let replayed = Identity::replay(&w.sink.entries).unwrap();
+    prop_assert_eq!(replayed.state(), w.identity.state());
+    Ok((texts.len(), verified))
 }
 
 /// Property cases: 256 per merge; the nightly lane raises it with `UAOS_IDENTITY_CASES`.
@@ -428,55 +769,40 @@ fn cases() -> u32 {
         .unwrap_or(256)
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(cases()))]
-
-    /// No sequence of issuance requests produces a verifiable credential that escapes any
-    /// ancestor, and issuance accepts exactly the requests that are within the parent.
-    #[test]
-    fn no_derivation_escapes_its_ancestors(
-        requests in proptest::collection::vec((0usize..8, arb_scope()), 1..12),
-        bumps in proptest::collection::vec(0usize..8, 0..3),
-    ) {
-        let mut w = World::new();
-        w.issue(cred(0), None, master_scope()).unwrap();
-        let mut issued = vec![(cred(0), None::<CredentialId>, master_scope(), Some(w.identity.state().node(cred(0)).unwrap().clone()))];
-        let mut texts = vec![None];
-        for (i, (parent_pick, scope)) in requests.into_iter().enumerate() {
-            let parent = issued[parent_pick % issued.len()].0;
-            let id = cred(u8::try_from(i + 1).unwrap());
-            let parent_scope = w.identity.state().node(parent).unwrap().record.scope.clone();
-            let within = scope_within(&scope, &parent_scope);
-            match w.issue(id, Some(parent), scope.clone()) {
-                Ok(done) => {
-                    prop_assert!(within, "issuance accepted a scope outside its parent");
-                    issued.push((id, Some(parent), scope, None));
-                    texts.push(Some(done));
-                }
-                Err(IdentityError::ScopeExceedsParent(_)) => prop_assert!(!within),
-                Err(IdentityError::DepthExceeded { .. }) => {}
-                Err(other) => prop_assert!(false, "unexpected refusal: {other}"),
-            }
-        }
-        for b in bumps {
-            let target = issued[b % issued.len()].0;
-            w.identity.bump_epoch(&mut w.sink, &mut w.keys, target).unwrap();
-        }
-        // Every credential that still verifies is within each ancestor, and a replay of the
-        // recorded entries reaches the same state.
-        for (n, text) in texts.iter().enumerate() {
-            let Some(text) = text else { continue };
-            if let Ok(v) = w.verify(text, at(0)) {
-                for pair in v.chain.windows(2) {
-                    let child = &w.identity.state().node(pair[0]).unwrap().record.scope;
-                    let parent = &w.identity.state().node(pair[1]).unwrap().record.scope;
-                    prop_assert!(scope_within(child, parent), "credential #{n} escapes an ancestor");
-                }
-            }
-        }
-        let replayed = Identity::replay(&w.sink.entries).unwrap();
-        prop_assert_eq!(replayed.state(), w.identity.state());
-    }
+/// Random hierarchies with revocations and epoch bumps agree with an independent model, and
+/// nothing a credential covers is outside an ancestor's coverage. The totals guard against a
+/// generator that never exercises anything.
+#[test]
+fn derivations_match_the_model() {
+    let mut runner = TestRunner::new(Config {
+        cases: cases(),
+        ..Config::default()
+    });
+    let issued = Cell::new(0usize);
+    let verified = Cell::new(0usize);
+    let strategy = (
+        proptest::collection::vec((0usize..16, arb_scope()), 1..12),
+        proptest::collection::vec(arb_op(), 0..4),
+    );
+    runner
+        .run(&strategy, |(requests, ops)| {
+            let (i, v) = run_case(requests, ops)?;
+            issued.set(issued.get() + i);
+            verified.set(verified.get() + v);
+            Ok(())
+        })
+        .unwrap();
+    let n = usize::try_from(cases()).unwrap();
+    assert!(
+        issued.get() > 2 * n,
+        "generator too narrow: {} issued over {n} cases",
+        issued.get()
+    );
+    assert!(
+        verified.get() > n,
+        "too few verifications: {} over {n} cases",
+        verified.get()
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -508,36 +834,32 @@ fn journal_entries_survive_a_crash_and_replay_to_the_live_state() {
             Actor::System,
             ConfigVersion(1),
         );
-        let keys = &mut w.keys;
-        let id = &mut w.identity;
-        id.issue(
-            &mut sink,
-            keys,
-            &w.rng,
-            IssueRequest {
-                id: cred(1),
-                parent: None,
-                label: None,
-                scope: master_scope(),
-            },
-            at(0),
-        )
-        .unwrap();
-        id.issue(
-            &mut sink,
-            keys,
-            &w.rng,
-            IssueRequest {
-                id: cred(2),
-                parent: Some(cred(1)),
-                label: None,
-                scope: sub_scope(24),
-            },
-            at(0),
-        )
-        .unwrap();
-        id.revoke(&mut sink, keys, cred(2)).unwrap();
-        id.state().clone()
+        let request = |id, parent, scope| IssueRequest {
+            id,
+            parent,
+            label: None,
+            scope,
+        };
+        w.identity
+            .issue(
+                &mut sink,
+                &w.keys,
+                &w.rng,
+                request(cred(1), None, master_scope()),
+                at(0),
+            )
+            .unwrap();
+        w.identity
+            .issue(
+                &mut sink,
+                &w.keys,
+                &w.rng,
+                request(cred(2), Some(cred(1)), sub_scope(24)),
+                at(0),
+            )
+            .unwrap();
+        w.identity.revoke(&mut sink, &mut w.keys, cred(2)).unwrap();
+        w.identity.state().clone()
     };
     fs.crash();
     drop(journal);

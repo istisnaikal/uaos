@@ -3,9 +3,9 @@
 //! The credential secret and its text form (ADR-0011 §1).
 //!
 //! `uaos_sk_` + 52 characters of Crockford base32 (32 random bytes) + 7 characters encoding a
-//! CRC-32 of those bytes: 67 characters in total. The fixed prefix lets secret scanners, our own
-//! redactor included, recognise a leaked key. The checksum lets them reject look-alikes without
-//! a lookup. Parsing is strict: only the canonical upper-case alphabet is accepted, so one
+//! CRC-32 of those bytes: 67 characters in total. The fixed prefix gives secret scanners a format
+//! to match (UAOS's own redaction class arrives with detector set v2, WP2.4b). The checksum lets
+//! them reject look-alikes without a lookup. Parsing is strict: only the canonical upper-case alphabet is accepted, so one
 //! secret has exactly one text form.
 
 use std::fmt;

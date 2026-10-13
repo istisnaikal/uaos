@@ -12,7 +12,8 @@ use uaos_contracts::credential::{PatternMatch, ResourceKind, ResourcePattern, Sc
 use uaos_contracts::id::{PocketId, PoolId};
 use uaos_contracts::time::WallTime;
 
-/// A concrete request to check against a scope.
+/// A concrete request to check against a scope. Leaving out a dimension the scope restricts
+/// denies the request (see [`scope_covers`]).
 #[derive(Debug, Clone, Copy)]
 pub struct ScopeRequest<'a> {
     /// The action, e.g. `model.call`.
@@ -42,11 +43,19 @@ pub fn scope_covers(scope: &Scope, request: &ScopeRequest<'_>) -> bool {
         ScopeSet::Any => true,
         ScopeSet::Only(actions) => actions.iter().any(|a| a.as_str() == request.action),
     };
+    // A restricted dimension that the request leaves out fails closed: "no resource" must not
+    // slip past a resource restriction. The pool is the exception by meaning: a request without
+    // a pool spends no money, so a pool restriction does not apply to it.
     let resource = match (&scope.resources, request.resource) {
-        (ScopeSet::Any, _) | (_, None) => true,
+        (ScopeSet::Any, _) => true,
+        (ScopeSet::Only(_), None) => false,
         (ScopeSet::Only(patterns), Some((kind, name))) => patterns.iter().any(|p| pattern_matches(p, kind, name)),
     };
-    let pocket = request.pocket.is_none_or(|p| member(&scope.pockets, &p));
+    let pocket = match (&scope.pockets, request.pocket) {
+        (ScopeSet::Any, _) => true,
+        (ScopeSet::Only(_), None) => false,
+        (ScopeSet::Only(pockets), Some(p)) => pockets.contains(&p),
+    };
     let pool = request.pool.is_none_or(|p| member(&scope.pools, &p));
     action && resource && pocket && pool
 }

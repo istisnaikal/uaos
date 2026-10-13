@@ -7,10 +7,12 @@
 //! writer until it is rebuilt from the journal: the entry may or may not have been recorded, and
 //! guessing would let memory and truth diverge.
 //!
-//! Revocations and epoch bumps advance a counter in the OS keychain *before* they are journaled
-//! (the restore guard, ADR-0011 §7). A crash between the two leaves the keychain ahead of the
-//! journal, which is the safe direction: verification fails closed until
-//! [`Identity::recover_after_restore`] runs.
+//! **Restore guard (ADR-0011 §7).** Every revocation, epoch bump and restore recovery is
+//! journaled first, then the revocation counter in the OS keychain is raised to match. A crash
+//! between the two leaves the keychain exactly one behind; [`Identity::reconcile`] repairs that
+//! on open. A keychain *ahead* of the journal means the data directory was restored from before
+//! a revocation: verification and every write refuse until [`Identity::recover_after_restore`]
+//! revokes every live master in one atomic entry.
 
 use std::fmt;
 use std::sync::Arc;
@@ -29,7 +31,7 @@ use uaos_platform::keychain::Keychain;
 use zeroize::Zeroizing;
 
 use crate::secret::Secret;
-use crate::state::{IdentityError, IdentityState, Verified};
+use crate::state::{GUARD_CEILING, GuardStatus, IdentityError, IdentityState, Verified, guard_status};
 
 /// Where identity entries are recorded durably.
 pub trait IdentitySink {
@@ -80,38 +82,53 @@ impl fmt::Debug for IdentityKeys {
 const KEY_LEN: usize = 32;
 const GUARD_LEN: usize = 8;
 
-fn keys_error(e: impl fmt::Display) -> IdentityError {
+fn keychain_error(e: impl fmt::Display) -> IdentityError {
     IdentityError::KeysUnavailable(e.to_string())
 }
 
 impl IdentityKeys {
-    /// Loads the identity key and the restore-guard counter, creating the key on first use.
+    /// Loads the identity key and the restore-guard counter.
+    ///
+    /// The identity key is created only when no credential exists yet
+    /// (`credentials_exist == false`). A missing or malformed key while credentials exist is
+    /// [`IdentityError::KeyLost`]: creating a new one would silently invalidate every
+    /// credential. A malformed counter reads as implausible, so verification refuses
+    /// ([`IdentityError::CounterInconsistent`]).
     ///
     /// # Errors
-    /// [`IdentityError::KeysUnavailable`] if the keychain fails or holds malformed entries.
-    pub fn open(keychain: Arc<dyn Keychain>, rng: &dyn Rng, installation: &str) -> Result<Self, IdentityError> {
+    /// [`IdentityError::KeyLost`], or [`IdentityError::KeysUnavailable`] if the keychain fails.
+    pub fn open(
+        keychain: Arc<dyn Keychain>,
+        rng: &dyn Rng,
+        installation: &str,
+        credentials_exist: bool,
+    ) -> Result<Self, IdentityError> {
         let key_account = format!("{installation}/identity/hmac");
         let guard_account = format!("{installation}/identity/revocation-seq");
-        let hmac = if let Some(bytes) = keychain.get(&key_account).map_err(keys_error)? {
-            let array: [u8; KEY_LEN] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| keys_error("identity key has the wrong length"))?;
-            SecretKey::from_bytes(array)
-        } else {
-            let fresh = SecretKey::generate(rng).map_err(keys_error)?;
-            keychain.set(&key_account, fresh.expose_secret()).map_err(keys_error)?;
-            fresh
-        };
-        let guard = match keychain.get(&guard_account).map_err(keys_error)? {
-            None => RevocationSeq(0),
+        let hmac = match keychain.get(&key_account).map_err(keychain_error)? {
             Some(bytes) => {
-                let array: [u8; GUARD_LEN] = bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| keys_error("revocation counter has the wrong length"))?;
-                RevocationSeq(u64::from_be_bytes(array))
+                let mut array = Zeroizing::new([0u8; KEY_LEN]);
+                if bytes.len() != KEY_LEN {
+                    return Err(IdentityError::KeyLost);
+                }
+                array.copy_from_slice(&bytes);
+                SecretKey::from_bytes(*array)
             }
+            None if credentials_exist => return Err(IdentityError::KeyLost),
+            None => {
+                let fresh = SecretKey::generate(rng).map_err(keychain_error)?;
+                keychain
+                    .set(&key_account, fresh.expose_secret())
+                    .map_err(keychain_error)?;
+                fresh
+            }
+        };
+        let guard = match keychain.get(&guard_account).map_err(keychain_error)? {
+            None => RevocationSeq(0),
+            Some(bytes) => match <[u8; GUARD_LEN]>::try_from(bytes.as_slice()) {
+                Ok(array) => RevocationSeq(u64::from_be_bytes(array)),
+                Err(_) => RevocationSeq(GUARD_CEILING),
+            },
         };
         Ok(Self {
             hmac,
@@ -131,10 +148,14 @@ impl IdentityKeys {
         CredentialDigest::from_bytes(hmac_sha256(&self.hmac, secret.as_bytes()))
     }
 
-    fn advance_guard(&mut self, to: RevocationSeq) -> Result<(), IdentityError> {
+    /// Raises the keychain counter to `to`. Never lowers it.
+    fn raise_guard(&mut self, to: RevocationSeq) -> Result<(), IdentityError> {
+        if to <= self.guard {
+            return Ok(());
+        }
         self.keychain
             .set(&self.guard_account, &to.0.to_be_bytes())
-            .map_err(keys_error)?;
+            .map_err(keychain_error)?;
         self.guard = to;
         Ok(())
     }
@@ -149,7 +170,7 @@ pub struct IssueRequest {
     pub parent: Option<CredentialId>,
     /// Optional human-readable label.
     pub label: Option<Label>,
-    /// Requested scope; must be within the parent's.
+    /// Requested scope; must be within the parent's and expire after `now`.
     pub scope: Scope,
 }
 
@@ -169,6 +190,16 @@ impl fmt::Debug for Issued {
     }
 }
 
+/// What a revoking write left behind in the keychain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardOutcome {
+    /// The keychain counter matches the journal.
+    Synced,
+    /// The entry is recorded and effective, but raising the keychain counter failed. Verification
+    /// still works; the next revoking write or [`Identity::reconcile`] repairs it. Report it.
+    Lagging,
+}
+
 /// The identity: replayed state plus the rules for producing entries.
 #[derive(Debug, Default)]
 pub struct Identity {
@@ -180,11 +211,14 @@ impl Identity {
     /// Rebuilds the identity from its journaled entries, in order.
     ///
     /// # Errors
-    /// [`IdentityError::Invalid`] if an entry does not apply (a corrupt or reordered journal).
+    /// [`IdentityError::Unavailable`] naming the first entry that does not apply (a corrupt or
+    /// reordered journal).
     pub fn replay(entries: &[CredentialEntry]) -> Result<Self, IdentityError> {
         let mut state = IdentityState::default();
-        for entry in entries {
-            state.apply(entry)?;
+        for (n, entry) in entries.iter().enumerate() {
+            state
+                .apply(entry)
+                .map_err(|e| IdentityError::Unavailable(format!("identity entry {n} does not replay: {e}")))?;
         }
         Ok(Self { state, poisoned: false })
     }
@@ -201,6 +235,20 @@ impl Identity {
         self.poisoned
     }
 
+    /// On open: repairs a keychain counter left one behind by an interrupted write, and reports
+    /// how the counter relates to the journal.
+    ///
+    /// # Errors
+    /// [`IdentityError::StaleDataDirectory`] (restore recovery needed),
+    /// [`IdentityError::CounterInconsistent`], or a keychain failure during the repair.
+    pub fn reconcile(&self, keys: &mut IdentityKeys) -> Result<GuardStatus, IdentityError> {
+        let status = guard_status(keys.guard(), self.state.revocation_seq())?;
+        if status == GuardStatus::Lagging {
+            keys.raise_guard(self.state.revocation_seq())?;
+        }
+        Ok(status)
+    }
+
     fn ensure_usable(&self) -> Result<(), IdentityError> {
         if self.poisoned {
             Err(IdentityError::Unavailable(
@@ -211,12 +259,19 @@ impl Identity {
         }
     }
 
+    /// Writes are refused on a stale or inconsistent counter: only restore recovery may move a
+    /// stale directory forward (ADR-0011 §7).
+    fn ensure_writable(&self, keys: &IdentityKeys) -> Result<(), IdentityError> {
+        self.ensure_usable()?;
+        guard_status(keys.guard(), self.state.revocation_seq()).map(|_| ())
+    }
+
     /// Records `entry` and applies it. The state is checked first, so a refused entry is never
     /// recorded; a recording failure poisons the writer.
     fn commit(&mut self, sink: &mut dyn IdentitySink, entry: &CredentialEntry) -> Result<(), IdentityError> {
         self.state.check(entry)?;
         let size = serde_json::to_vec(entry)
-            .map_err(|e| IdentityError::Invalid(e.to_string()))?
+            .map_err(|e| IdentityError::Unavailable(e.to_string()))?
             .len();
         if !limits::MAX_INLINE_PAYLOAD.admits(size) {
             return Err(IdentityError::RecordTooLarge);
@@ -228,11 +283,37 @@ impl Identity {
         self.state.apply(entry)
     }
 
+    /// Records a revoking entry, then raises the keychain counter to the journal's.
+    fn commit_revoking(
+        &mut self,
+        sink: &mut dyn IdentitySink,
+        keys: &mut IdentityKeys,
+        entry: &CredentialEntry,
+    ) -> Result<GuardOutcome, IdentityError> {
+        self.commit(sink, entry)?;
+        Ok(match keys.raise_guard(self.state.revocation_seq()) {
+            Ok(()) => GuardOutcome::Synced,
+            Err(_) => GuardOutcome::Lagging,
+        })
+    }
+
+    fn next_seq(&self) -> Result<RevocationSeq, IdentityError> {
+        let seq = self.state.revocation_seq();
+        seq.0
+            .checked_add(1)
+            .map(RevocationSeq)
+            .ok_or(IdentityError::CounterInconsistent {
+                keychain: seq,
+                journal: seq,
+            })
+    }
+
     /// Issues a credential under `request.parent` (or a master) at `now`.
     ///
     /// # Errors
-    /// [`IdentityError`] if the request breaks a rule (scope, depth, revoked or unknown parent,
-    /// size), randomness fails, or recording fails.
+    /// [`IdentityError`] if the request breaks a rule: a parent chain that is not live at `now`,
+    /// a scope outside the parent's or already expired, depth, limits or size. Also if the
+    /// counter is stale or inconsistent, randomness fails, or recording fails.
     pub fn issue(
         &mut self,
         sink: &mut dyn IdentitySink,
@@ -241,17 +322,29 @@ impl Identity {
         request: IssueRequest,
         now: WallTime,
     ) -> Result<Issued, IdentityError> {
-        self.ensure_usable()?;
+        self.ensure_writable(keys)?;
+        if request.scope.expires_at.is_some_and(|expiry| expiry <= now) {
+            return Err(IdentityError::InvalidRequest(
+                "the requested scope has already expired".to_owned(),
+            ));
+        }
         let (kind, parent_epoch) = match request.parent {
             None => (CredentialKind::Master, Epoch(0)),
             Some(parent) => {
-                let node = self.state.node(parent).ok_or(IdentityError::Unknown)?;
+                let node = self
+                    .state
+                    .node(parent)
+                    .ok_or_else(|| IdentityError::InvalidRequest(format!("unknown parent {parent}")))?;
                 let kind = if node.record.kind == CredentialKind::Master {
                     CredentialKind::Sub
                 } else {
                     CredentialKind::Child
                 };
-                (kind, node.epoch)
+                let parent_epoch = node.epoch;
+                // The whole chain must be usable now; issuing under a dead chain would hand out
+                // a secret that can never verify.
+                self.state.chain_live(parent, now)?;
+                (kind, parent_epoch)
             }
         };
         let secret = Secret::generate(rng).map_err(|e| IdentityError::Unavailable(e.to_string()))?;
@@ -282,102 +375,112 @@ impl Identity {
     /// Verifies a presented credential at `now`.
     ///
     /// # Errors
-    /// [`IdentityError`]: malformed, unknown, revoked, expired, scope escape, or a data
-    /// directory older than the latest revocation.
+    /// [`IdentityError`]: malformed, unknown, revoked, expired, or a stale or inconsistent
+    /// revocation counter.
     pub fn verify(&self, keys: &IdentityKeys, presented: &str, now: WallTime) -> Result<Verified, IdentityError> {
         self.ensure_usable()?;
         let secret = Secret::parse(presented).map_err(|_| IdentityError::Malformed)?;
         self.state.verify(&keys.digest(&secret), now, keys.guard())
     }
 
-    fn next_seq(&self, keys: &IdentityKeys) -> RevocationSeq {
-        RevocationSeq(self.state.revocation_seq().0.max(keys.guard().0).saturating_add(1))
-    }
-
-    /// Revokes one credential. Its descendants stop verifying with it.
+    /// Revokes one credential; its descendants stop verifying with it.
     ///
     /// # Errors
-    /// [`IdentityError`] if the credential is unknown or already revoked, the keychain fails, or
-    /// recording fails.
+    /// [`IdentityError`] if the credential is unknown or already revoked, the counter is stale or
+    /// inconsistent, or recording fails.
     pub fn revoke(
         &mut self,
         sink: &mut dyn IdentitySink,
         keys: &mut IdentityKeys,
         credential: CredentialId,
-    ) -> Result<(), IdentityError> {
-        self.ensure_usable()?;
-        let seq = self.next_seq(keys);
+    ) -> Result<GuardOutcome, IdentityError> {
+        self.ensure_writable(keys)?;
         let entry = CredentialEntry {
             schema: CredentialSchema::V1,
             op: CredentialOp::Revoked {
                 credential,
-                revocation_seq: seq,
+                revocation_seq: self.next_seq()?,
             },
         };
-        self.state.check(&entry)?;
-        keys.advance_guard(seq)?;
-        self.commit(sink, &entry)
+        self.commit_revoking(sink, keys, &entry)
     }
 
     /// Bumps a credential's epoch: every descendant issued under the previous epoch stops
     /// verifying, while the credential itself stays valid.
     ///
     /// # Errors
-    /// As [`Identity::revoke`].
+    /// As [`Identity::revoke`], and for a revoked credential.
     pub fn bump_epoch(
         &mut self,
         sink: &mut dyn IdentitySink,
         keys: &mut IdentityKeys,
         credential: CredentialId,
-    ) -> Result<Epoch, IdentityError> {
-        self.ensure_usable()?;
-        let node = self.state.node(credential).ok_or(IdentityError::Unknown)?;
-        let epoch = Epoch(node.epoch.0.saturating_add(1));
-        let seq = self.next_seq(keys);
+    ) -> Result<(Epoch, GuardOutcome), IdentityError> {
+        self.ensure_writable(keys)?;
+        let node = self
+            .state
+            .node(credential)
+            .ok_or_else(|| IdentityError::InvalidRequest(format!("unknown credential {credential}")))?;
+        let epoch = node
+            .epoch
+            .0
+            .checked_add(1)
+            .map(Epoch)
+            .ok_or_else(|| IdentityError::InvalidRequest("epoch exhausted".to_owned()))?;
         let entry = CredentialEntry {
             schema: CredentialSchema::V1,
             op: CredentialOp::EpochBumped {
                 credential,
                 epoch,
-                revocation_seq: seq,
+                revocation_seq: self.next_seq()?,
             },
         };
-        self.state.check(&entry)?;
-        keys.advance_guard(seq)?;
-        self.commit(sink, &entry)?;
-        Ok(epoch)
+        let outcome = self.commit_revoking(sink, keys, &entry)?;
+        Ok((epoch, outcome))
     }
 
-    /// After a data directory older than the latest revocation was detected: revokes every
-    /// master that is still live, catching the journal up with the keychain. Every credential
-    /// then fails to verify until the maintainer issues a new master and new keys (ADR-0011 §7).
-    /// Returns the number of masters revoked.
+    /// For a data directory older than the latest revocation: one atomic entry revokes every
+    /// live master and catches the journal up with the keychain. Every credential then fails to
+    /// verify until the maintainer issues a new master and new keys (ADR-0011 §7). Returns the
+    /// number of masters revoked.
     ///
     /// # Errors
-    /// As [`Identity::revoke`].
+    /// [`IdentityError::InvalidRequest`] if the directory is not stale; a counter that is
+    /// inconsistent rather than ahead; recording failures.
     pub fn recover_after_restore(
         &mut self,
         sink: &mut dyn IdentitySink,
         keys: &mut IdentityKeys,
-    ) -> Result<usize, IdentityError> {
+    ) -> Result<(usize, GuardOutcome), IdentityError> {
         self.ensure_usable()?;
-        let masters: Vec<CredentialId> = self
+        match guard_status(keys.guard(), self.state.revocation_seq()) {
+            Err(IdentityError::StaleDataDirectory { .. }) => {}
+            Err(other) => return Err(other),
+            Ok(_) => {
+                return Err(IdentityError::InvalidRequest(
+                    "the data directory is not stale; nothing to recover".to_owned(),
+                ));
+            }
+        }
+        let seq = keys
+            .guard()
+            .0
+            .checked_add(1)
+            .map(RevocationSeq)
+            .ok_or(IdentityError::CounterInconsistent {
+                keychain: keys.guard(),
+                journal: self.state.revocation_seq(),
+            })?;
+        let masters = self
             .state
             .nodes()
             .filter(|n| n.record.kind == CredentialKind::Master && !n.revoked)
-            .map(|n| n.record.id)
-            .collect();
-        for &master in &masters {
-            self.revoke(sink, keys, master)?;
-        }
-        let seq = self.next_seq(keys);
+            .count();
         let entry = CredentialEntry {
             schema: CredentialSchema::V1,
             op: CredentialOp::RestoreRecovered { revocation_seq: seq },
         };
-        self.state.check(&entry)?;
-        keys.advance_guard(seq)?;
-        self.commit(sink, &entry)?;
-        Ok(masters.len())
+        let outcome = self.commit_revoking(sink, keys, &entry)?;
+        Ok((masters, outcome))
     }
 }

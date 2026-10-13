@@ -87,3 +87,14 @@ pub const MAX_CREDENTIAL_DEPTH: usize = 4;
 
 /// Maximum length of a credential label, an action name or a resource pattern value.
 pub const MAX_CREDENTIAL_TOKEN: Bytes = Bytes(64);
+
+/// Maximum length of a credential label, in characters.
+pub const MAX_LABEL_CHARS: usize = 64;
+
+/// Maximum number of live (unrevoked) credentials per installation (ADR-0011). Bounds the
+/// identity tables a verification consults (I-08); revoked entries are removed by journal
+/// compaction (P4).
+pub const MAX_LIVE_CREDENTIALS: usize = 4096;
+
+/// Maximum number of live credentials issued directly by one credential (ADR-0011).
+pub const MAX_LIVE_CHILDREN: usize = 256;

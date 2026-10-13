@@ -117,7 +117,8 @@ impl PatternValue {
     }
 }
 
-/// A human-readable label for a credential: 1..=64 bytes without control characters.
+/// A human-readable label for a credential: 1..=64 characters without control characters
+/// (C0, DEL and C1).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Label(String);
 
@@ -129,7 +130,7 @@ impl Label {
     pub fn new(label: impl Into<String>) -> Result<Self, CredentialError> {
         let label = label.into();
         let ok = !label.is_empty()
-            && limits::MAX_CREDENTIAL_TOKEN.admits(label.len())
+            && label.chars().count() <= limits::MAX_LABEL_CHARS
             && !label.chars().any(char::is_control);
         if ok {
             Ok(Self(label))
@@ -147,7 +148,7 @@ impl Label {
 
 string_token_serde!(ActionName, "^[a-z0-9_.:]{1,64}$");
 string_token_serde!(PatternValue, "^[!-~]{1,64}$");
-string_token_serde!(Label, "^[^\\u0000-\\u001f\\u007f]{1,64}$");
+string_token_serde!(Label, "^[^\\u0000-\\u001f\\u007f-\\u009f]{1,64}$");
 
 /// What kind of resource a pattern names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
@@ -157,8 +158,6 @@ pub enum ResourceKind {
     Model,
     /// A tool.
     Tool,
-    /// A budget pool.
-    Pool,
     /// A configuration key.
     ConfigKey,
 }
@@ -190,11 +189,12 @@ pub struct ResourcePattern {
 /// One dimension of a scope: everything, or only the listed members.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(rename = "ScopeSetOf{T}")]
 pub enum ScopeSet<T: Ord> {
     /// No restriction in this dimension.
     Any,
     /// Only these members (at most [`limits::MAX_SCOPE_ITEMS`]).
-    Only(BTreeSet<T>),
+    Only(#[schemars(length(max = 8))] BTreeSet<T>),
 }
 
 impl<T: Ord> ScopeSet<T> {
@@ -220,7 +220,7 @@ pub struct Scope {
     pub pockets: ScopeSet<PocketId>,
     /// Budget pools it may reserve from.
     pub pools: ScopeSet<PoolId>,
-    /// After this instant the credential no longer verifies. `None` only for a master.
+    /// From this instant on the credential no longer verifies. `None` only for a master.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<WallTime>,
 }
@@ -314,8 +314,9 @@ pub enum CredentialOp {
         /// The installation's revocation count after this bump (restore guard).
         revocation_seq: RevocationSeq,
     },
-    /// Recovery after a restored data directory finished: every master that was live had been
-    /// revoked, and the journal's revocation count now matches the keychain (ADR-0011 §7).
+    /// Recovery after a restored data directory (ADR-0011 §7): this entry revokes every master
+    /// that is still live, atomically, and raises the journal's revocation count above the
+    /// keychain's.
     RestoreRecovered {
         /// The installation's revocation count after recovery.
         revocation_seq: RevocationSeq,

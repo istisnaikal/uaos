@@ -283,6 +283,18 @@ registry! {
     IDENTITY_UNAVAILABLE = Identity 10, Internal, S2, retryable: false, leak: false,
         "error-identity-unavailable", "Recording an identity change failed; credentials are refused until the state is rebuilt from the journal.",
         "Restart the daemon; if it persists, run `uaos doctor` and `uaos journal verify`.";
+    IDENTITY_KEY_LOST = Identity 11, Security, S2, retryable: false, leak: false,
+        "error-identity-key-lost", "The identity key is missing or malformed in the OS keychain while credentials exist; every credential is refused.",
+        "Restore the keychain entry if you can; otherwise re-issue every key with `uaos key issue`.";
+    IDENTITY_COUNTER_INCONSISTENT = Identity 12, Security, S1, retryable: false, leak: false,
+        "error-identity-counter-inconsistent", "The revocation counter in the OS keychain is behind the journal or implausible; credentials are refused.",
+        "The keychain entry was deleted or altered. Run `uaos doctor`; repairing it requires an approved reset.";
+    IDENTITY_INVALID_REQUEST = Identity 13, User, Info, retryable: false, leak: false,
+        "error-identity-invalid-request", "The credential request is invalid.",
+        "Check the parent, scope and expiry; see `uaos key --help`.";
+    IDENTITY_LIMIT_REACHED = Identity 14, User, Info, retryable: false, leak: false,
+        "error-identity-limit-reached", "Too many live credentials, overall or under one parent.",
+        "Revoke credentials you no longer use.";
 }
 
 /// Looks up the registered specification for a code.
