@@ -31,14 +31,16 @@ logs).
    byte after each match, so an anchor overlapping another anchor's literal is still found. A
    per-format validator then confirms each candidate. Boundaries fail closed:
    - an anchor glued on its left to an **alphanumeric** byte sits inside a longer token and is
-     not reported; any other left neighbour (`_`, `-`, `$`, `:` …) is a separator;
+     not reported; any other left neighbour (`_`, `-`, `$`, `:` …) is a separator, and so is the
+     tail of an escape still encoded in that view (the `n` of `\n`, the `0` of `%20`);
    - a format's body is the **whole** run of its characters, at least the format's minimum. A
      longer run, or one glued to more of the same characters, is covered whole.
 
    Overlapping detections merge into one span; the merged span takes the most specific class, by
    `DataClass` declaration order. Anchors inside a run, private-key block or userinfo window
-   already examined reuse that work, so a scan is linear in its input (a unit test bounds the
-   bytes examined on adversarial inputs).
+   already examined reuse that work: every run computed is indexed by its end, per character
+   class. A scan is therefore linear in its input; a unit test bounds the bytes examined on 16
+   adversarial shapes, each with 3 tails, including the JWT header thrash the V1 review found.
 3. **Classes claimed by v1** (11):
 
    | Class | Format confirmed |
@@ -53,19 +55,23 @@ logs).
    | `stripe_key` | `sk_`/`rk_` + `live_`/`test_` + ≥ 24 alphanumerics |
    | `google_api_key` | `AIza` + ≥ 35 token chars |
    | `aws_access_key_id` | `AKIA`/`ASIA`/`ABIA`/`ACCA` + ≥ 16 `[A-Z0-9]` (the key **id**; secret access keys are not claimed) |
-   | `url_credentials` | the password in `scheme://user:password@host`. The user ends at the first `:` (no `/`, `?`, `#` before it); the password ends at the **last** `@` that a host follows, before a hard stop (whitespace, control, `"`, `<`, `>`, `\`, backtick) or the next `://`. So `/`, `#`, `?`, `'` and `@` inside a password are covered. `host:port/path@x` is not userinfo |
+   | `url_credentials` | the password in `scheme://user:password@host`, within 512 bytes of the `://`. The user ends at the first `:` (no `/`, `?`, `#` before it; placeholders inside it are skipped whole). The password ends at the **last** `@` that a host follows, before a hard stop (whitespace, control, `"`, `<`, `>`, backtick) or the next `://`. So `/`, `#`, `?`, `'`, `\` and `@` inside a password are covered. Not a password: an authority starting with an IPv6 literal; `host:port/path@x`, when the password starts with a port number and `/`, `?` or `#`, and either the user is host-like (dotted, contains `@`, `localhost`) or the rest is a lowercase path; an scp-style path after an email-like user; a template reference (`${NAME}`, `$NAME`, `%(name)s`, `{{name}}`) |
 
 4. **Schema-agnostic JSON.** Every string is scanned after its escapes are decoded: keys and
    values, known and unknown fields, at any depth. A decoded→raw offset map splices each
    placeholder into the original bytes. Strings without a finding are never copied; a body with
    no finding is returned borrowed. Malformed strings, invalid UTF-8 and lone surrogates are
    errors.
-   - **Nested views.** Each string, and each plain text, is scanned in 3 views: as decoded, then
-     with one and two further levels of JSON escapes and ASCII percent escapes decoded. This
-     covers JSON inside a tool call's arguments, a double-escaped `partial_json`, and a
-     form-encoded DSN. Nested decoding is lenient: an invalid escape stays as it is, so ordinary
-     text is scanned, never refused. A finding in a nested view maps back through every view to
-     whole escapes in the raw bytes.
+   - **Views.** Each string, and each plain text, is scanned in 4 views, outermost first:
+     1. as decoded;
+     2. with JSON escapes and ASCII percent escapes decoded once more;
+     3. with form encoding decoded (`%XX` and `+` for a space), for text that has both;
+     4. view 2 decoded once more.
+
+     This covers JSON inside a tool call's arguments, a double-escaped `partial_json`, and
+     percent- or form-encoded bodies. Decoding is lenient: an invalid escape stays as it is, so
+     ordinary text is scanned, never refused. A finding in a nested view maps back through every
+     view to whole escapes in the raw bytes.
 5. **Placeholders.** The format is exactly `[REDACTED:<class>:<tag>]`, with a class this build
    knows and a tag of 16 lowercase hex digits; nothing looser is treated as a placeholder. The
    tag is the first 64 bits of
@@ -79,7 +85,9 @@ logs).
    - **Key provisioning:** the key comes from the pocket keyring (ADR-0007) and is passed in by the
      runtime (P3).
 6. **Fixpoint.** After replacement, each string is scanned again in every view, up to 8 rounds
-   (one round handles one view); if it still has findings, the content is blocked. The output therefore contains no detection, so
+   (one round handles one view). Content that still has findings after 8 rounds is crafted to
+   chain replacements; it is replaced **whole** by one placeholder, which fails closed without
+   wedging every later request that carries it. The output therefore contains no detection, so
    `redact(redact(x)) == redact(x)`. No detector matches a placeholder; the URL rule explicitly
    skips placeholder passwords.
 7. **Final scan.** `FinalScanner` checks the exact outbound bytes:
@@ -87,7 +95,7 @@ logs).
    - every detector over the raw bytes between strings, so text outside quotes in a malformed body
      is covered too;
    - the exact bytes of every known vault secret in both. A known secret must be at least 8 bytes;
-   - each of these in the same 3 views the redactor scans (§4), so the final scan never passes
+   - each of these in the same 4 views the redactor scans (§4), so the final scan never passes
      what redaction would have replaced, and never blocks what it would have left. `check_bytes`
      (non-JSON bodies, headers, JSON Lines) uses the same views.
 
@@ -111,9 +119,11 @@ so no secret-shaped string is committed.
   - nested: inside a tool call's JSON arguments, with the secret's characters `\u`-escaped at
     that inner level;
   - double-nested: that document again inside a `partial_json` string;
-  - percent-encoded.
+  - percent-encoded, or form-encoded with `+` for a space;
+  - slash-escaped, as PHP's `json_encode` writes `/`.
 
-  URL passwords draw from every printable byte an unencoded URL can carry.
+  URL passwords draw from every printable byte an unencoded URL can carry, the backslash
+  included.
 - **Detection criterion:** a positive counts as detected only if all four paths hold.
   - Text redaction removes it from everything a reader can recover. An oracle independent of the
     crate decides that: `serde_json` at any depth plus percent-decoding.
@@ -121,10 +131,11 @@ so no secret-shaped string is committed.
     output passes the final scan.
   - The final scan blocks the unredacted JSON body, naming the class.
   - The final scan blocks the unredacted raw text, naming the class.
-- **Negatives:** 100,000 hard negatives in 38 named families. False positives are counted per
+- **Negatives:** 100,000 hard negatives in 40 named families. False positives are counted per
   class **and per family**, so a family cannot hide in the total. The families include:
   - near-misses of every format, including runs that break before the minimum length;
-  - URLs without a password, and `host:port/path@…`;
+  - URLs without a password, `host:port/path@…` on dotted and single-label service hosts,
+    scp-style git URLs, and templated passwords;
   - JSON-escaped and percent-encoded text without a secret;
   - exact placeholders;
   - hashes, UUIDs, base64, code, prose and printable noise.
@@ -133,7 +144,7 @@ so no secret-shaped string is committed.
 |---|---|---|
 | Recall, every class | 3,000 / 3,000 (0 missed) | ≥ 99.9 % |
 | False positives, every class | 0 / 100,000 | ≤ 0.5 % |
-| False positives, every family | 0 in each of 38 | ≤ 0.5 % |
+| False positives, every family | 0 in each of 40 | ≤ 0.5 % |
 | Class labelled correctly | 3,000 / 3,000 | ≥ 99.9 % |
 
 Zero misses in 3,000 bounds recall above 99.9 % at 95 % confidence (the rule of three). Against
@@ -144,10 +155,10 @@ passwords) and 64.7 % per class. A nightly job runs a fresh seed each night.
 
 | Body | Operation | p50 | p99 |
 |---|---|---|---|
-| 1.70 MB of prose messages (about 400k tokens), 19 secrets | Redacting the whole body | 4.9 ms | 5.3 ms |
-| | Final scan of the whole body | 4.9 ms | 5.6 ms |
-| 1.81 MB, every message carried as a tool call's JSON arguments, so every string has a nested view | Redacting the whole body | 9.2 ms | 12.0 ms |
-| | Final scan of the whole body | 7.7 ms | 8.1 ms |
+| 1.70 MB of prose messages (about 400k tokens), 19 secrets | Redacting the whole body | 5.2 ms | 8.2 ms |
+| | Final scan of the whole body | 5.2 ms | 5.3 ms |
+| 1.81 MB, every message carried as a tool call's JSON arguments, so every string has a nested view | Redacting the whole body | 9.5 ms | 9.7 ms |
+| | Final scan of the whole body | 8.3 ms | 8.6 ms |
 
 In the pipeline, chunk-digest caching (D20) limits redaction to new content. The final scan is
 paid in full on every request. On the nested worst case it exceeds the 6 ms the plan's per-stage
@@ -167,7 +178,16 @@ equals the full scan).
   - a secret split across strings (`"sk-ant-" + rest`) or across stream deltas; the stream relay
     handles deltas in P3;
   - an anchor glued on its left to an alphanumeric byte (`xAKIA…`): by design it reads as part
-    of a longer token.
+    of a longer token;
+  - URL passwords:
+    - containing an unencoded `"`, `<`, `>`, backtick or `://`, which end a URL in text;
+    - with userinfo longer than 512 bytes;
+    - that start with a port number and `/`, `?` or `#` after a host-like user, or continue as a
+      lowercase path;
+    - that look like an scp path after an email-like user;
+    - that are template references.
+
+    Each reads as something else, as URL parsers would read it.
 - **Over-redaction.** A URL whose path contains `@` after a password is redacted up to that
   `@`, host and path included; a key glued to more of its own characters is redacted with them.
   Both fail closed.
@@ -202,7 +222,12 @@ equals the full scan).
   - One test per review finding: URL passwords with any printable byte, glued and over-long
     keys, overlapping anchors, nested JSON at two depths, encodings in raw bytes, exact
     placeholders, and vault secrets through encodings.
-  - Linear work: a unit test bounds the bytes examined on 11 adversarial inputs of 256 KiB.
+  - One test per finding of the V1 review of hardening II: a redacted user does not hide the
+    password, form-encoded keys, escaped left neighbours, a crafted cascade, service URLs and
+    templates, and a backslash inside a password. A further unit test proves the whole-content
+    fallback with a one-round budget.
+  - Linear work: a unit test bounds the bytes examined on 16 adversarial shapes of 256 KiB,
+    each with 3 tails.
   - Fuzzing with real anchors: a property over random concatenations of anchors, separators,
     escapes and placeholders. Redaction reaches a clean fixpoint, and JSON and text redaction
     agree.
@@ -214,7 +239,9 @@ equals the full scan).
 ## Amendment 1 (2026-10-13): the retroactive review
 
 The retroactive review (`docs/reviews/WP2.3-redact.md`) found three High findings and four
-Medium ones in v1 as first merged:
+Medium ones in v1 as first merged. A second fresh-context review of the fixes (the V1 review of
+hardening II, recorded in the same file) found two High and three Medium findings in them, and
+those are fixed here too. The first review's findings were:
 - a vault secret recoverable from `Debug`;
 - URL passwords containing `/#?'` passed;
 - fail-open glue and length bounds;

@@ -540,6 +540,167 @@ proptest! {
     }
 }
 
+/// A JSON `\u` escape of `hex`, built at runtime.
+fn u(hex: &str) -> String {
+    format!("{}u{hex}", '\\')
+}
+
+/// `s` with `~` standing for a backslash.
+fn bs(s: &str) -> String {
+    s.replace('~', "\\")
+}
+
+/// Form encoding as browsers and `quote_plus` produce it: a space becomes `+`.
+fn form_encoded(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"*-._".contains(&b) {
+            out.push(char::from(b));
+        } else if b == b' ' {
+            out.push('+');
+        } else {
+            let _infallible = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
+/// A synthetic secret access key, split so no key-shaped literal is committed.
+const AWS_SECRET: &str = concat!("wJalrXUtnFEMI/K7", "MDENG/bPxRfiCY", "SYNTHETIC0KEY");
+
+/// V1 review of hardening II, H-B: a user redacted in an earlier round (an AWS key id) hid the
+/// password, which a later view would have found; the final scan passed the output.
+#[test]
+fn a_redacted_user_does_not_hide_the_password() {
+    let id = sample(DataClass::AwsAccessKeyId, 30).secret;
+    let escaped = AWS_SECRET.replace('/', &bs("~/"));
+    for text in [
+        format!("s3a://{id}:{escaped}@my-bucket/path"),
+        format!("s3a://{id}%3Asecretpassw0rd@my-bucket"),
+        format!("s3://{id}:pa{}ss-w0rd-1234@bucket", u("0026")),
+    ] {
+        let r = redactor().redact_text(&text).unwrap();
+        assert!(r.classes().contains(&DataClass::UrlCredentials), "{text}");
+        for secret in ["wJalrXUtnFEMI", "secretpassw0rd", "ss-w0rd-1234", id.as_str()] {
+            assert!(!leaks(r.output(), secret), "{text} -> {}", r.output());
+        }
+        assert!(scanner(&[]).check_bytes(r.output().as_bytes()).is_ok());
+    }
+    // The realistic shape: a tool result carrying a PHP-style escaped config.
+    let inner = format!(
+        "{{\"config\":\"s3a:{}{}{}:{escaped}@my-bucket{}path\"}}",
+        bs("~/"),
+        bs("~/"),
+        id,
+        bs("~/")
+    );
+    let body = serde_json::to_vec(&json!({ "messages": [{ "role": "tool", "content": inner }] })).unwrap();
+    let rj = redactor().redact_json(&body).unwrap();
+    let mut recovered = Vec::new();
+    visible_value(&serde_json::from_slice(rj.output()).unwrap(), &mut recovered);
+    assert!(!recovered.iter().any(|v| v.contains("wJalrXUtnFEMI")));
+    assert!(scanner(&[]).check_json(rj.output()).is_ok());
+}
+
+/// V1 review of hardening II, M-A: form encoding writes a space as `+`, so a form-encoded PEM
+/// key passed every path.
+#[test]
+fn form_encoded_keys_are_redacted() {
+    let pem = sample(DataClass::PrivateKey, 31);
+    let form = format!("name=deploy&private_key={}&x=1", form_encoded(&pem.text));
+    assert_every_path_redacts(&form, &pem.secret, DataClass::PrivateKey);
+    let url = sample(DataClass::UrlCredentials, 32);
+    assert_every_path_redacts(
+        &format!("dsn={}", form_encoded(&url.text)),
+        &url.secret,
+        DataClass::UrlCredentials,
+    );
+}
+
+/// V1 review of hardening II, L-B: an escape tail on the left (still encoded three levels deep)
+/// made a plain key look glued, in every view.
+#[test]
+fn escaped_left_neighbours_do_not_hide_keys() {
+    let key = sample(DataClass::AwsAccessKeyId, 33).secret;
+    let gh = sample(DataClass::GithubToken, 34).secret;
+    for (text, secret, class) in [
+        (
+            format!("x{}{key}", bs("~~~~n")),
+            key.as_str(),
+            DataClass::AwsAccessKeyId,
+        ),
+        (format!("id=%252520{key}"), key.as_str(), DataClass::AwsAccessKeyId),
+        (
+            format!("token:{}{gh}", bs("~~~~t")),
+            gh.as_str(),
+            DataClass::GithubToken,
+        ),
+    ] {
+        let r = redactor().redact_text(&text).unwrap();
+        assert!(r.classes().contains(&class), "{text}");
+        assert!(!r.output().contains(secret), "{text}");
+        assert!(scanner(&[]).check_bytes(text.as_bytes()).is_err(), "{text}");
+    }
+    let raw = format!("{{\"messages\":[{{\"content\":\"code{}{key}\"}}]}}", bs("~~~~~~~~n"));
+    let rj = redactor().redact_json(raw.as_bytes()).unwrap();
+    assert!(!String::from_utf8_lossy(rj.output()).contains(key.as_str()));
+    assert!(scanner(&[]).check_json(raw.as_bytes()).is_err());
+}
+
+/// V1 review of hardening II, L-C: replacements that open new windows, chained across views,
+/// exhausted the round budget and wedged every request carrying the text. Such content is now
+/// replaced whole.
+#[test]
+fn a_crafted_cascade_is_replaced_whole_without_wedging() {
+    let nl = "\n";
+    let q = "Q".repeat(16);
+    let pem = |d: &str, n: &str| {
+        let begin = concat!("----BEGIN RSA PRIVATE", " KEY-----");
+        let end = concat!("----END RSA PRIVATE", " KEY-----");
+        format!("{d}{begin}{n}MIIabc{n}{d}{end}")
+    };
+    let parts = [
+        format!("https://u:x{}y@host", pem("-", nl)),
+        format!("https%3A//u:x{}y@host", pem("%2D", "%0A")),
+        format!("https://u:abc%20{}KIA{q}@host", u("0041")),
+        format!("https%253A//u:x{}y@host", pem("%252D", "%250A")),
+        format!("https://u:abc%2520{}{}KIA{q}@host", bs("~"), u("0041")),
+    ];
+    let text = parts.join(nl);
+    let r = redactor().redact_text(&text).unwrap();
+    assert!(!r.is_clean());
+    assert!(scanner(&[]).check_bytes(r.output().as_bytes()).is_ok());
+    let body = serde_json::to_vec(&json!({ "messages": [{ "content": text }] })).unwrap();
+    let rj = redactor().redact_json(&body).unwrap();
+    assert!(scanner(&[]).check_json(rj.output()).is_ok());
+}
+
+/// V1 review of hardening II, M-B: ordinary service URLs, scp paths and templated passwords
+/// are not credentials.
+#[test]
+fn service_urls_and_templates_are_not_redacted() {
+    for text in [
+        "docker://registry:5000/app@sha256:4d2b1f0c9e8a7b6c5d4e3f2a1b0c9d8e",
+        "http://verdaccio:4873/@babel/core",
+        "http://web:8000/?email=bob@example.com",
+        "jdbc:mysql://db:3306/app?user=bob@corp.com",
+        "pip install git+ssh://git@github.com:org/repo.git@v1.0",
+        "DATABASE_URL: postgres://app:${POSTGRES_PASSWORD}@db:5432/app",
+        "REDIS_URL=redis://:$REDIS_PASSWORD@redis:6379/0",
+        "mysql://root:%(password)s@localhost/db",
+    ] {
+        assert!(redactor().redact_text(text).unwrap().is_clean(), "{text}");
+        assert!(scanner(&[]).check_bytes(text.as_bytes()).is_ok(), "{text}");
+    }
+}
+
+/// V1 review of hardening II, L-A: a backslash inside a password is covered.
+#[test]
+fn a_backslash_in_a_password_is_covered() {
+    let text = bs("postgres://app:pa~ss9X@db.example.com/x");
+    assert_every_path_redacts(&text, &bs("pa~ss9X"), DataClass::UrlCredentials);
+}
+
 /// Review WP2.3 H1: a derived `Debug` printed the known-secret automaton, from which a probe
 /// reconstructed the vault secret. Nothing secret-derived may reach `Debug` output.
 #[test]

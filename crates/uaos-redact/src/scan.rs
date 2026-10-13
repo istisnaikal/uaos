@@ -4,9 +4,9 @@
 //!
 //! It runs every detector over every decoded JSON string (so an escaped secret cannot slip
 //! through) and over the raw bytes between strings, and looks for the exact bytes of every known
-//! vault secret in both. Each of these is checked in the same [`MAX_VIEWS`] views the redactor
-//! scans: as it is, then with up to two further levels of JSON or percent escapes decoded
-//! (review M1, M2). Any hit, and any scanner failure, blocks: there is no "send anyway".
+//! vault secret in both. Each of these is checked in the same four views the redactor
+//! scans: as it is, with JSON and percent escapes decoded once and twice, and with form
+//! encoding decoded (review M1, M2). Any hit, and any scanner failure, blocks: there is no "send anyway".
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -17,7 +17,7 @@ use uaos_contracts::error::{ErrorCode, codes};
 use crate::RedactError;
 use crate::class::DataClass;
 use crate::detect::{DetectorSet, DetectorVersion};
-use crate::json::{MAX_VIEWS, Nested, decode, decode_nested, strings};
+use crate::json::{decode, decode_form, decode_nested, strings};
 
 /// Known secrets shorter than this are refused: scanning for them would block ordinary text.
 pub const MIN_KNOWN_SECRET_LEN: usize = 8;
@@ -168,17 +168,18 @@ impl FinalScanner {
         if blocked.is_empty() { Ok(()) } else { Err(blocked) }
     }
 
-    /// Checks `text` and each nested decode of it, [`MAX_VIEWS`] views in all.
+    /// Checks `text` in each of its four views, the same views the redactor scans.
     fn check_views(&self, text: &[u8], blocked: &mut Blocked) {
         self.check(text, blocked);
-        let mut view: Option<Nested> = None;
-        for _ in 1..MAX_VIEWS {
-            let inner = view.as_ref().map_or(text, |v| v.bytes.as_slice());
-            let Some(next) = decode_nested(inner, false) else {
-                break;
-            };
-            self.check(&next.bytes, blocked);
-            view = Some(next);
+        let nested = decode_nested(text, false);
+        if let Some(n) = &nested {
+            self.check(&n.bytes, blocked);
+        }
+        if let Some(f) = decode_form(text, false) {
+            self.check(&f.bytes, blocked);
+        }
+        if let Some(n2) = nested.as_ref().and_then(|n| decode_nested(&n.bytes, false)) {
+            self.check(&n2.bytes, blocked);
         }
     }
 

@@ -7,9 +7,9 @@
 //!
 //! * **schema-agnostic**: every JSON string is scanned (keys and values, at any depth, known
 //!   and unknown fields), after decoding escapes, so `\u`-escaped secrets are found;
-//! * **nested**: each string and text is scanned in three views (as decoded, then two further
-//!   levels of JSON and percent escapes), so a secret in a tool call's JSON arguments, a
-//!   double-escaped `partial_json` or a form-encoded DSN is found;
+//! * **nested**: each string and text is scanned in four views (as decoded, two further levels
+//!   of JSON and percent escapes, and form encoding), so a secret in a tool call's JSON
+//!   arguments, a double-escaped `partial_json` or a form body is found;
 //! * **boundaries fail closed**: a key glued to separators, or longer than its format, is still
 //!   covered whole;
 //! * **byte-preserving**: placeholders are spliced into the original bytes; content without a
@@ -28,7 +28,7 @@
 //! adversarial inputs). Recall is bound to the formats detector set v1 claims, measured on
 //! synthetic corpus v2 (ADR-0009 lists the classes, metrics and limits). Not detected: free-form
 //! passwords outside URL userinfo, AWS secret access keys (only key ids), and encodings beyond
-//! the three views.
+//! the four views. Content that would need more than 8 redaction rounds is replaced whole.
 
 #![deny(missing_docs)]
 #![deny(clippy::indexing_slicing)]

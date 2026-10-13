@@ -9,19 +9,19 @@
 //! error, and every error blocks the content (fail closed).
 //!
 //! A decoded string can itself carry encoded text: JSON inside a tool call's `arguments`, a
-//! double-escaped `partial_json`, a percent-encoded DSN. [`decode_nested`] peels one such level
-//! for scanning, and every consumer looks at [`MAX_VIEWS`] views of a string (review M1, M2).
+//! double-escaped `partial_json`, a percent-encoded DSN, a form body. Redaction and the final
+//! scan therefore look at the same four **views** of every string, outermost first (review M1,
+//! M2; V1 review M-A):
+//! 1. the string itself;
+//! 2. its JSON and percent escapes decoded ([`decode_nested`]);
+//! 3. its form encoding decoded ([`decode_form`]), for text that has one;
+//! 4. view 2 decoded once more.
 
 use std::borrow::Cow;
 use std::fmt;
 use std::ops::Range;
 
 use crate::RedactError;
-
-/// Views of one string that are scanned: the string itself, then up to two nested decodes. This
-/// covers a JSON string inside a JSON string inside the body (a tool call's arguments carrying
-/// an escaped value), and a double-escaped `partial_json` delta.
-pub(crate) const MAX_VIEWS: usize = 3;
 
 /// The raw byte ranges of every string's contents (between its quotes), in order.
 pub(crate) fn strings(raw: &[u8]) -> Strings<'_> {
@@ -223,23 +223,51 @@ impl Nested {
 }
 
 /// Decodes one more level of encoding in `raw`, for scanning: JSON escapes (`\n`, `\"`, `\\`,
-/// `\uXXXX` with surrogate pairs) and ASCII percent escapes (`%41`). Unlike [`decode`] it never
-/// fails: anything that is not a valid escape stays as it is, so text with a stray backslash or
-/// percent sign is scanned, never refused. Output is UTF-8 whenever `raw` is. `None` when there
-/// was nothing to decode. With `mapped`, the result maps back to offsets in `raw`.
+/// `\u` escapes with surrogate pairs) and ASCII percent escapes (`%41`). Unlike [`decode`] it
+/// never fails: anything that is not a valid escape stays as it is, so text with a stray
+/// backslash or percent sign is scanned, never refused. Output is UTF-8 whenever `raw` is.
+/// `None` when there was nothing to decode. With `mapped`, the result maps back to offsets in
+/// `raw`.
 pub(crate) fn decode_nested(raw: &[u8], mapped: bool) -> Option<Nested> {
     memchr::memchr2(b'\\', b'%', raw)?;
+    decode_lenient(raw, mapped, (b'\\', b'%'), |raw, at| match raw.get(at) {
+        Some(b'\\') => nested_escape(raw, at),
+        Some(b'%') => percent(raw, at),
+        _ => None,
+    })
+}
+
+/// Decodes form encoding (`application/x-www-form-urlencoded`): ASCII percent escapes and `+`
+/// as a space, so `-----BEGIN+PRIVATE+KEY-----%0A…` reads as the key it is (V1 review M-A). Only
+/// text with both a `+` and a valid `%XX` escape is decoded; a `+` alone is ordinary text
+/// (base64, arithmetic). JSON escapes are left as they are.
+pub(crate) fn decode_form(raw: &[u8], mapped: bool) -> Option<Nested> {
+    memchr::memchr(b'+', raw)?;
+    let has_escape = memchr::memchr_iter(b'%', raw).any(|at| percent(raw, at).is_some());
+    if !has_escape {
+        return None;
+    }
+    decode_lenient(raw, mapped, (b'+', b'%'), |raw, at| match raw.get(at) {
+        Some(b'+') => Some((' ', 1)),
+        Some(b'%') => percent(raw, at),
+        _ => None,
+    })
+}
+
+/// The shared lenient decoder: `escape` decodes the escape at an offset where one of the two
+/// `markers` sits, or declines and the byte is kept.
+fn decode_lenient(
+    raw: &[u8],
+    mapped: bool,
+    markers: (u8, u8),
+    escape: impl Fn(&[u8], usize) -> Option<(char, usize)>,
+) -> Option<Nested> {
     let mut out = Vec::with_capacity(raw.len());
     let mut map = Vec::with_capacity(if mapped { raw.len() + 1 } else { 0 });
     let mut decoded_any = false;
     let mut i = 0;
-    while let Some(&b) = raw.get(i) {
-        let escape = match b {
-            b'\\' => nested_escape(raw, i),
-            b'%' => percent(raw, i),
-            _ => None,
-        };
-        if let Some((ch, consumed)) = escape {
+    while i < raw.len() {
+        if let Some((ch, consumed)) = escape(raw, i) {
             let mut buf = [0u8; 4];
             for &byte in ch.encode_utf8(&mut buf).as_bytes() {
                 out.push(byte);
@@ -251,12 +279,11 @@ pub(crate) fn decode_nested(raw: &[u8], mapped: bool) -> Option<Nested> {
             decoded_any = true;
             continue;
         }
-        // Copy up to the next possible escape. Both markers are ASCII, so a UTF-8 sequence is
-        // never split.
+        // Copy up to the next marker. Markers are ASCII, so a UTF-8 sequence is never split.
         let rest = raw.get(i..).unwrap_or_default();
         let run = rest
             .get(1..)
-            .and_then(|r| memchr::memchr2(b'\\', b'%', r))
+            .and_then(|r| memchr::memchr2(markers.0, markers.1, r))
             .map_or(rest.len(), |at| at + 1);
         out.extend_from_slice(rest.get(..run).unwrap_or_default());
         if mapped {
