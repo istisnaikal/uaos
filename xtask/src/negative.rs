@@ -177,7 +177,12 @@ pub(crate) fn cases() -> Vec<Case> {
             id: "schema-breaking-change",
             gate: "schema-compat",
             tool: None,
-            seed: replace("crates/uaos-contracts/src/budget.rs", "    pub settled: bool,", "    pub settled: Option<bool>,"),
+            // A retyped reference. (The seed must still compile: `settled` is read by validation.)
+            seed: replace(
+                "crates/uaos-contracts/src/budget.rs",
+                "    pub related_event: Option<EventId>,",
+                "    pub related_event: Option<SessionId>,",
+            ),
             runner: Runner::Xtask(&["schema-check"]),
             expect: "BREAKING",
         },
@@ -271,11 +276,19 @@ pub(crate) fn cases() -> Vec<Case> {
             id: "ledger-reserve-beyond-available",
             gate: "budget-concurrency",
             tool: None,
-            // A ledger that accepts any reservation while the pool is not already in debt.
-            seed: replace(
-                "crates/uaos-ledger/src/state.rs",
-                "if pool.available < amount {",
-                "if pool.available < NanoUsd::ZERO {",
+            // A ledger that accepts any reservation while the pool is not already in debt. The cap
+            // is enforced twice (ledger state and the contract's per-entry rule), so both go.
+            seed: both(
+                replace(
+                    "crates/uaos-ledger/src/state.rs",
+                    "if usable < amount {",
+                    "if usable < NanoUsd::ZERO {",
+                ),
+                replace(
+                    "crates/uaos-contracts/src/budget.rs",
+                    "if matches!(self.kind, K::Reserve | K::TransferOut) && self.balance_after.is_negative() {",
+                    "if matches!(self.kind, K::Reserve | K::TransferOut) && self.balance_after < NanoUsd::new(i64::MIN) {",
+                ),
             ),
             runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-ledger", "--test", "ledger"] },
             expect: "hard cap breached",
