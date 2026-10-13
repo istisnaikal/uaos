@@ -33,6 +33,14 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 - `docs/roadmap.md` (public roadmap), `docs/rfcs/` (process and template), `MAINTAINERS.md` (with
   the single-maintainer risk stated), `docs/research/name-check.md`.
 
+- Proposed ADRs (48 h review windows open):
+  - **ADR-0011:** scoped credentials (`uaos_sk_`), a hierarchy with decidable scope containment,
+    epoch revocation and a guard against restoring an older data directory.
+  - **ADR-0012:** approvals need an OS presence ceremony; peer-credential and containment checks
+    are defence in depth; the first `unsafe` code comes with obligations.
+  - **ADR-0019:** merge integrity with one maintainer: a ruleset with no bypass, an adversarial
+    review per work package, and a selective 24 h cool-off.
+
 - P2 WP2.3 — `uaos-redact` (ADR-0009): schema-agnostic secret detection and redaction with a
   fail-closed final scan. Detector set v1 covers 11 high-risk classes:
   - private keys, JWTs;
@@ -132,3 +140,4 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 - Governance: LICENSE (Apache-2.0), NOTICE, README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT
   (Contributor Covenant 2.1), GOVERNANCE, RELEASING, ADR-0001–0005, threat model v0, privacy
   data flow v0, vision traceability matrix.
+
