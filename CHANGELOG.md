@@ -26,6 +26,17 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     toolchain, `.cargo/`), the ADRs, the threat model, the privacy docs and CODEOWNERS itself.
   - **README** describes the real state (P2) and names the gate behind each claim.
 
+### Security
+
+- `uaos-redact`: `FinalScanner`'s derived `Debug` printed its known-secret automaton, from which
+  a vault secret could be reconstructed exactly. This was found by the retroactive review
+  (`docs/reviews/WP2.3-redact.md`, H1) and breaks red line 2. `FinalScanner`, `DetectorSet` and
+  the crate-private JSON scanners now have manual `Debug` implementations that show only the
+  version, counts and lengths. A canary test proves no 4-byte window of a vault secret reaches
+  `{:?}` or `{:#?}`; against the old code it fails on a 7,741-byte dump. The review's other
+  findings (URL passwords with `/#?'`, fail-open glue and length bounds, nested JSON, encodings,
+  a PEM slowdown) are open and come in the next change.
+
 ### Added
 
 - `docs/decisions.md`: a register of open decisions with class, default and deadline. Decisions

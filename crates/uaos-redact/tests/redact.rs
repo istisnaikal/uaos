@@ -331,3 +331,24 @@ proptest! {
         }
     }
 }
+
+/// Review WP2.3 H1: a derived `Debug` printed the known-secret automaton, from which a probe
+/// reconstructed the vault secret. Nothing secret-derived may reach `Debug` output.
+#[test]
+fn debug_output_carries_no_secret_material() {
+    let canary = b"vault-provider-key-ZQXJ0123456789";
+    let scanner = FinalScanner::new(DetectorVersion::V1, [canary.as_slice()]).unwrap();
+    let shown = format!("{scanner:?} {scanner:#?}");
+    assert!(
+        shown.len() < 200,
+        "Debug output is unexpectedly large: {} bytes",
+        shown.len()
+    );
+    // No 4-byte window of the canary, in any form, appears in the output.
+    let text = String::from_utf8_lossy(canary);
+    for window in text.as_bytes().windows(4) {
+        let w = String::from_utf8_lossy(window);
+        assert!(!shown.contains(w.as_ref()), "Debug output contains {w:?}");
+    }
+    assert!(shown.contains("known_secrets: 1"));
+}

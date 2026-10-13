@@ -11,6 +11,7 @@
 //! A detector set is versioned as a whole and pinned per session: the bytes a session sends must
 //! not change under it (plan §2.5). Changing any rule below requires a new version.
 
+use std::fmt;
 use std::ops::Range;
 
 use aho_corasick::{AhoCorasick, MatchKind};
@@ -210,12 +211,20 @@ fn v1() -> Vec<Anchor> {
     ]
 }
 
-/// A compiled detector set.
-#[derive(Debug)]
+/// A compiled detector set. `Debug` shows the version and the number of anchors only.
 pub struct DetectorSet {
     version: DetectorVersion,
     anchors: Vec<Anchor>,
     automaton: AhoCorasick,
+}
+
+impl fmt::Debug for DetectorSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DetectorSet")
+            .field("version", &self.version)
+            .field("anchors", &self.anchors.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl DetectorSet {
