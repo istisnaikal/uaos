@@ -59,6 +59,17 @@ Three requirements constrain the choice:
 - **I-14:** zero egress in the default configuration, with revocation fetches disclosed.
 - **T11 (local DoS):** bounded bodies, bounded channels, admission control.
 
+## Evidence so far
+
+Spike WP3.0b (branch `spike/wp3.0b-passthrough`, `spikes/passthrough/RESULTS.md`, 2026-10-13)
+measured this shape: collect under a limit, a pooled hyper client, frame-wise relay. With
+1.7 MB bodies the passthrough overhead at p95 was:
+- sequential: 0.75–2.16 ms on all three runner OSes and the reference machine;
+- 8 concurrent clients: at most 8.15 ms.
+
+That is under the 12.5 ms passthrough budget. Concurrency, not body size, dominates, so the P3
+overhead bench must include a concurrent scenario.
+
 ## Verification (WP3.0b, WP3.2)
 
 - Passthrough spike: p95 ≤ 12.5 ms against the mock provider (half the overhead budget).
