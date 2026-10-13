@@ -34,7 +34,7 @@ source = "CLAUDE.md §4 CI merge blocker: fmt/clippy/test"
 lane = "merge"
 status = "active"
 job = "test"
-negative = ["test-failure"]
+negative = ["test-failure", "identity-epoch-check-skipped"]
 
 # ── supply chain and hygiene ─────────────────────────────────────────────────────────────
 [[gate]]

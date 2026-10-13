@@ -312,6 +312,20 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "lack a matching DCO",
         },
         Case {
+
+            id: "identity-epoch-check-skipped",
+            gate: "test",
+            tool: None,
+            // Verification that ignores an ancestor's epoch bump (ADR-0011 §6).
+            seed: replace(
+                "crates/uaos-identity/src/state.rs",
+                "if node.record.parent_epoch != parent.epoch {",
+                "if node.record.parent_epoch != parent.epoch && node.revoked {",
+            ),
+            runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-identity", "--test", "identity"] },
+            expect: "descendant still verifies after epoch bump",
+        },
+        Case {
             id: "contract-without-changelog",
             gate: "docs-contract-sync",
             tool: Some("git"),
