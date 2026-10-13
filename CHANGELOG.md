@@ -16,7 +16,22 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   requests. Before this, a direct push skipped both (plan v2 PD-17). A missing base commit fails
   the job instead of guessing a range.
 
+- Phase-debt records sweep (plan v2 PD-03, -04, -07, -08, -09, -15, -23):
+  - **ADR-0003** now records the measured Windows spike numbers. It states that the Linux, macOS
+    and production-journal numbers are owed (PD-01). The spike report moved to
+    `docs/adr/appendix/`.
+  - **ADR-0002** is amended: the `kernel-tokens` gate activates in P3, not P2, because the tokens
+    bind policy, ledger and egress, which first meet in the runtime. `gates.toml` follows.
+  - **CODEOWNERS** now covers every Ring 0 crate, the build inputs (`Cargo.toml`/`.lock`,
+    toolchain, `.cargo/`), the ADRs, the threat model, the privacy docs and CODEOWNERS itself.
+  - **README** describes the real state (P2) and names the gate behind each claim.
+
 ### Added
+
+- `docs/decisions.md`: a register of open decisions with class, default and deadline. Decisions
+  the next release depends on carry markers, so `xtask decisions --release` sees them.
+- `docs/roadmap.md` (public roadmap), `docs/rfcs/` (process and template), `MAINTAINERS.md` (with
+  the single-maintainer risk stated), `docs/research/name-check.md`.
 
 - P2 WP2.3 — `uaos-redact` (ADR-0009): schema-agnostic secret detection and redaction with a
   fail-closed final scan. Detector set v1 covers 11 high-risk classes:

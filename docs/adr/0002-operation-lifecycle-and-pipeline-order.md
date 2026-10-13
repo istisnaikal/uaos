@@ -48,5 +48,8 @@ strengthened; only the order changes.
 
 - Property tests in `uaos-contracts::operation` (red line 3, Indeterminate provenance,
   settled-state exits, immutability of facts).
-- From P2: `kernel-tokens` gate — egress cannot be called without kernel-issued
+- From P3: `kernel-tokens` gate — egress cannot be called without kernel-issued
   `Authorized{op_id}`, `Reservation{op_id}` and `EgressReady{op_id}` (compile-fail + runtime binding tests).
+  *Amended 2026-10-13 (plan v2 PD-04): originally "from P2". The tokens bind policy, ledger and
+  egress, which first meet in the runtime (P3), so the gate cannot exist earlier. The design is
+  ADR-0010.*
