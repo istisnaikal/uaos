@@ -74,3 +74,16 @@ pub const DEFAULT_FLUSH_WINDOW: Millis = Millis(50);
 /// admits any realistic single message while bounding the memory one read can demand. Larger
 /// content is split by the caller.
 pub const MAX_CHUNK: Bytes = Bytes(16 * 1024 * 1024);
+
+/// Maximum number of members in one dimension of a credential scope (ADR-0011). Scopes are
+/// coarse upper bounds; fine-grained rules belong in Cedar policy. The bound also keeps a
+/// credential record inside [`MAX_INLINE_PAYLOAD`].
+pub const MAX_SCOPE_ITEMS: usize = 8;
+
+/// Maximum number of credentials in one chain, the master included (ADR-0011): master, sub and
+/// two levels of children. Verification walks the chain on every request, so the bound caps its
+/// cost.
+pub const MAX_CREDENTIAL_DEPTH: usize = 4;
+
+/// Maximum length of a credential label, an action name or a resource pattern value.
+pub const MAX_CREDENTIAL_TOKEN: Bytes = Bytes(64);

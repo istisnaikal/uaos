@@ -268,6 +268,30 @@ registry! {
     IDENTITY_SCOPE_EXCEEDS_PARENT = Identity 2, Security, Info, retryable: false, leak: false,
         "error-identity-scope-exceeds-parent", "A child key cannot have more scope than its parent.",
         "Narrow the requested scope.";
+    IDENTITY_UNKNOWN = Identity 3, Security, Info, retryable: false, leak: true,
+        "error-identity-unknown", "The presented credential is not recognised.",
+        "Check the key the agent was given; issue a new one with `uaos key issue`.";
+    IDENTITY_EXPIRED = Identity 4, Security, Info, retryable: false, leak: false,
+        "error-identity-expired", "The credential, or one of its ancestors, has expired.",
+        "Issue a new scoped key with `uaos key issue`.";
+    IDENTITY_STALE_DATA_DIR = Identity 5, Security, S2, retryable: false, leak: false,
+        "error-identity-stale-data-dir", "The data directory is older than the latest revocation; agent credentials are refused.",
+        "A backup was probably restored. Re-issue agent keys with `uaos key issue` to continue (ADR-0011 §7).";
+    IDENTITY_DEPTH_EXCEEDED = Identity 6, User, Info, retryable: false, leak: false,
+        "error-identity-depth-exceeded", "The credential hierarchy would exceed its maximum depth.",
+        "Issue the key from a credential closer to the master.";
+    IDENTITY_MALFORMED = Identity 7, User, Info, retryable: false, leak: true,
+        "error-identity-malformed", "The presented credential is not a well-formed UAOS key.",
+        "Use the key exactly as `uaos key issue` printed it.";
+    IDENTITY_RECORD_TOO_LARGE = Identity 8, User, Info, retryable: false, leak: false,
+        "error-identity-record-too-large", "The requested scope is too broad for one credential record.",
+        "List fewer members per scope dimension; express fine-grained rules in policy instead.";
+    IDENTITY_KEYS_UNAVAILABLE = Identity 9, Internal, S2, retryable: true, leak: false,
+        "error-identity-keys-unavailable", "The identity key could not be read from the OS keychain.",
+        "Run `uaos doctor`; unlock or grant access to the OS keychain.";
+    IDENTITY_UNAVAILABLE = Identity 10, Internal, S2, retryable: false, leak: false,
+        "error-identity-unavailable", "Recording an identity change failed; credentials are refused until the state is rebuilt from the journal.",
+        "Restart the daemon; if it persists, run `uaos doctor` and `uaos journal verify`.";
 }
 
 /// Looks up the registered specification for a code.

@@ -30,6 +30,7 @@ use crate::event::Actor;
 use crate::id::{EventId, PoolId, ReservationId, SessionId};
 use crate::limits;
 use crate::money::NanoUsd;
+use crate::token::string_token_serde;
 
 /// Error returned when a ledger entry is internally inconsistent.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -154,29 +155,6 @@ impl ReasonCode {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-}
-
-macro_rules! string_token_serde {
-    ($name:ident, $pattern:literal) => {
-        impl Serialize for $name {
-            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                serializer.serialize_str(&self.0)
-            }
-        }
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-            }
-        }
-        impl JsonSchema for $name {
-            fn schema_name() -> Cow<'static, str> {
-                stringify!($name).into()
-            }
-            fn json_schema(_: &mut SchemaGenerator) -> Schema {
-                json_schema!({ "type": "string", "pattern": $pattern })
-            }
-        }
-    };
 }
 
 string_token_serde!(IdempotencyKey, "^[A-Za-z0-9_.:-]{1,128}$");

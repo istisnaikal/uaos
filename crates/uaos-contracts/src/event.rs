@@ -191,9 +191,11 @@ pub mod types {
     pub const CHUNK_SHREDDED: EventType = EventType::from_static("chunk.shredded");
     /// One budget ledger entry (`uaos.budget_tx/1` in the inline payload).
     pub const BUDGET_ENTRY: EventType = EventType::from_static("budget.entry");
+    /// One identity entry (`uaos.credential/1` in the inline payload).
+    pub const IDENTITY_ENTRY: EventType = EventType::from_static("identity.entry");
 
     /// All kernel event types, for validation and generated documentation.
-    pub const ALL: [&EventType; 11] = [
+    pub const ALL: [&EventType; 12] = [
         &OP_RESERVED_INTENT,
         &OP_COMMITTED,
         &OP_FAILED,
@@ -205,6 +207,7 @@ pub mod types {
         &REDACT_EXPOSED_SECRET,
         &CHUNK_SHREDDED,
         &BUDGET_ENTRY,
+        &IDENTITY_ENTRY,
     ];
 }
 
