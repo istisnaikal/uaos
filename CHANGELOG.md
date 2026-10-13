@@ -35,6 +35,7 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 - Proposed ADRs (48 h review windows open):
   - **ADR-0011:** scoped credentials (`uaos_sk_`), a hierarchy with decidable scope containment,
     epoch revocation and a guard against restoring an older data directory.
@@ -93,6 +94,21 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     at p99 on a macOS runner today.
 
 >>>>>>> bf7e3b2 (Propose P3 ADRs 0010, 0013, 0014, 0017, 0018)
+||||||| parent of ead8d14 (Gate hardening II: evidence freshness, xtask quick, nightly mutants)
+=======
+- `cargo xtask evidence [--candidate <rev>] [--streak N] [--max-age-hours H]` (plan v2 V5). It
+  checks the nightly runs on `main`. The newest must be green, at most 48 h old, and ran on
+  code identical to the candidate in `crates/`, `xtask/`, the manifests and the toolchain file.
+  `--streak N` requires N consecutive such nights (counted by date, not by run). No evidence
+  is an error, never a pass. It is listed in RELEASING.md with `--streak 7`.
+- `cargo xtask quick` (PD-22): fmt, clippy, unit tests (`--lib --bins`, without the long
+  simulations) and the local structural checks; about 10 s on a warm cache.
+- Nightly `mutants` job (V4): cargo-mutants 27.1.0 on uaos-policy, uaos-ledger, uaos-redact and
+  uaos-state, with caught, missed and timed-out counts and the missed list in the run summary.
+  It is report-only until a per-crate baseline exists; a failing unmutated baseline still fails
+  the job.
+
+>>>>>>> ead8d14 (Gate hardening II: evidence freshness, xtask quick, nightly mutants)
 - P2 WP2.3 — `uaos-redact` (ADR-0009): schema-agnostic secret detection and redaction with a
   fail-closed final scan. Detector set v1 covers 11 high-risk classes:
   - private keys, JWTs;

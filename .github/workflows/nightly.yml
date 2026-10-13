@@ -45,6 +45,7 @@ jobs:
         run: cargo test -p uaos-redact --release --locked --test corpus -- --nocapture
         env:
           UAOS_CORPUS_SEED: ${{ github.run_id }}
+<<<<<<< HEAD
 
   ack-latency:
     # Production journal and chunk-store acknowledgement latency per OS (plan v2 PD-01; ADR-0003
@@ -65,3 +66,46 @@ jobs:
         run: |
           cargo run -q -p uaos-testkit --release --locked --bin journal-ack-bench -- "$RUNNER_TEMP/ack-latency" | tee ack-latency.md
           { echo "Runner: $RUNNER_LABEL"; echo; cat ack-latency.md; } >> "$GITHUB_STEP_SUMMARY"
+||||||| parent of ead8d14 (Gate hardening II: evidence freshness, xtask quick, nightly mutants)
+=======
+
+  mutants:
+    # Mutation testing (plan v2 V4): which deliberate bugs do the tests fail to notice? Report-only
+    # until a per-crate baseline is recorded; a surviving-mutant ratchet then becomes a gate.
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [uaos-policy, uaos-ledger, uaos-redact, uaos-state]
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install cargo-mutants (pinned)
+        run: cargo install cargo-mutants --version 27.1.0 --locked
+      - name: Mutants
+        shell: bash
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          set +e
+          cargo mutants --package "$PACKAGE" --jobs 2 --timeout-multiplier 3 --no-shuffle --output "$RUNNER_TEMP/mutants" -- --lib --tests
+          code=$?
+          set -e
+          out="$RUNNER_TEMP/mutants/mutants.out"
+          {
+            echo "### Mutants: $PACKAGE (cargo-mutants exit $code)"
+            for kind in caught missed timeout unviable; do
+              echo "- $kind: $(wc -l < "$out/$kind.txt" 2>/dev/null || echo 0)"
+            done
+            echo
+            echo "Missed mutants (changes the tests did not notice):"
+            echo '```'
+            head -n 100 "$out/missed.txt" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # 0 all caught, 2 some missed, 3 some timed out: report-only for now. Anything else
+          # (usage error, failing unmutated build or tests) is a real failure.
+          case "$code" in 0|2|3) exit 0 ;; *) exit "$code" ;; esac
+>>>>>>> ead8d14 (Gate hardening II: evidence freshness, xtask quick, nightly mutants)
