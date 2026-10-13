@@ -20,12 +20,15 @@ publish = false
 # Internal
 uaos-contracts = { path = "crates/uaos-contracts" }
 uaos-platform = { path = "crates/uaos-platform" }
+uaos-policy = { path = "crates/uaos-policy" }
 uaos-state = { path = "crates/uaos-state" }
 
 # External — every addition needs a justification in the PR (CONTRIBUTING.md §Dependencies).
 # aws-lc-rs: the single audited crypto family for TLS and primitives (plan D18).
 aws-lc-rs = { version = "1.18.2", default-features = false, features = ["aws-lc-sys", "alloc"] }
 cargo_metadata = "0.23.1"
+# Authorization (plan D8): formally specified, schema-validated, Apache-2.0. No optional extensions.
+cedar-policy = { version = "4.13.0", default-features = false }
 getrandom = "0.4.3"
 # OS keychains (ADR-0007): core API plus one store per platform, passed explicitly (no global store).
 keyring-core = "1.0.1"
