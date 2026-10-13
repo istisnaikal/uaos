@@ -167,29 +167,41 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 - P2 WP2.4: `uaos-identity`, scoped credentials (ADR-0011, proposed; cells C-07, C-08, C-09).
   - **Format:** `uaos_sk_` + 52 Crockford-base32 characters + a CRC-32 checksum. Parsing is
-    strict, and look-alikes are rejected without a lookup.
+    strict, and look-alikes are rejected without a lookup. UAOS's own redaction class for the
+    format follows in WP2.4b.
   - **Storage:** only an HMAC-SHA-256 digest under an identity key kept in the OS keychain. The
-    secret is shown once and never journaled.
-  - **Hierarchy:** master → sub → child, at most four credentials per chain. A scope is
-    exact-or-prefix patterns over actions, resources, pockets and pools, plus an expiry.
-    child ⊆ parent is checked at issuance and on every verification.
+    secret is shown once and never journaled. A missing or malformed key while credentials exist
+    is reported as lost (`UAOS-IDENTITY-0011`), never silently replaced.
+  - **Hierarchy:** master → sub → child, at most four credentials per chain, at most 4,096 live
+    credentials and 256 live children per parent. A scope is exact-or-prefix patterns over
+    actions and resources, plus pockets, pools and an expiry. child ⊆ parent is checked at
+    issuance; records are immutable. Issuing under a chain that is not live, or with an expired
+    scope, is refused. A request that omits a dimension the scope restricts is denied.
   - **Revocation:**
     - revoking one credential, or bumping an epoch to revoke a whole subtree;
-    - both are critical journal entries recorded before they return;
-    - a monotonic counter in the keychain makes a data directory restored from before a
-      revocation fail closed (`UAOS-IDENTITY-0005`) until recovery revokes every live master.
+    - both are critical journal entries recorded before they return; the revocation counter in
+      the OS keychain is raised afterwards.
+  - **Restore guard:**
+    - a keychain counter *ahead* of the journal means a restored data directory: verification
+      and every write fail closed (`UAOS-IDENTITY-0005`) until one atomic `restore_recovered`
+      entry revokes every live master;
+    - *one behind* is an interrupted keychain write, repaired on open;
+    - *further behind* or implausibly large fails closed (`UAOS-IDENTITY-0012`).
   - **Recording failures:** like the ledger, a failed recording poisons the writer until it is
-    replayed from the journal.
-  - **Tests:** property tests, run 256 times per merge and 10,000 nightly. They check that no
-    derivation escapes an ancestor, that replay is exact, and that pattern containment agrees
-    with brute force. Plus revocation, epoch, expiry, restore, poisoning, oversize,
-    journal-crash and secret-canary tests.
-  - **Gate self-test:** a seeded verification that ignores an ancestor's epoch fails the suite
-    (`identity-epoch-check-skipped`).
+    replayed from the journal. Request mistakes are user errors (`UAOS-IDENTITY-0013`), not
+    internal failures.
+  - **Tests:** random hierarchies with revocations and epoch bumps are checked against an
+    independent model, with an independent coverage oracle: anything a credential covers, every
+    ancestor covers. They run 256 times per merge and 10,000 nightly, with an anti-vacuity
+    check. Regression tests cover each finding of the adversarial review
+    (`docs/reviews/WP2.4.md`).
+  - **Gate self-test:** a seeded verification that ignores an ancestor's epoch fails the
+    property (`identity-epoch-check-skipped`).
 - Contract (new): `uaos.credential/1` (draft until RC-1), new kernel event type `identity.entry`,
-  and error codes `UAOS-IDENTITY-0003` to `0010`.
-- `uaos-contracts::limits`: `MAX_SCOPE_ITEMS`, `MAX_CREDENTIAL_DEPTH` and `MAX_CREDENTIAL_TOKEN`.
-  The validated-string serde macro is now shared between contracts.
+  and error codes `UAOS-IDENTITY-0003` to `0014`.
+- `uaos-contracts::limits`: `MAX_SCOPE_ITEMS`, `MAX_CREDENTIAL_DEPTH`, `MAX_CREDENTIAL_TOKEN`,
+  `MAX_LABEL_CHARS`, `MAX_LIVE_CREDENTIALS` and `MAX_LIVE_CHILDREN`. The validated-string serde
+  macro is now shared between contracts.
 
 - P2 WP2.3 — `uaos-redact` (ADR-0009): schema-agnostic secret detection and redaction with a
   fail-closed final scan. Detector set v1 covers 11 high-risk classes:

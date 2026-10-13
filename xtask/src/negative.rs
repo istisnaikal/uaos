@@ -422,6 +422,8 @@ The journal is tamper-proof.
         },
         Case {
 
+
+>>>>>>> aba1a93 (WP2.4: resolve the adversarial review (H1, H2, M1-M7, L1-L5))
             id: "identity-epoch-check-skipped",
             gate: "test",
             tool: None,
@@ -431,8 +433,11 @@ The journal is tamper-proof.
                 "if node.record.parent_epoch != parent.epoch {",
                 "if node.record.parent_epoch != parent.epoch && node.revoked {",
             ),
-            runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-identity", "--test", "identity"] },
-            expect: "descendant still verifies after epoch bump",
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-identity", "--test", "identity", "derivations_match_the_model"],
+            },
+            expect: "verification disagrees with the model",
         },
         Case {
             id: "contract-without-changelog",
