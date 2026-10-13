@@ -18,3 +18,10 @@ before their first code is merged (GOVERNANCE.md §Decisions).
 | [0007](0007-key-storage-and-shred-guarantees.md) | Where keys live, and what "shredded" honestly means | Accepted |
 | [0008](0008-authorization-semantics-over-cedar.md) | Authorization semantics over Cedar | Accepted |
 | [0009](0009-redaction-detectors-placeholders-final-scan.md) | Redaction: detector sets, placeholders and the final scan | Accepted |
+| [0011](0011-scoped-credentials-and-revocation.md) | Scoped credentials, hierarchy and revocation | Proposed |
+| [0012](0012-approval-presence-and-peer-credentials.md) | Approval presence and peer credentials | Proposed |
+| [0019](0019-merge-integrity-with-one-maintainer.md) | Merge integrity with one maintainer | Proposed |
+
+Numbers 0010 and 0013–0018 are reserved for the P3 decisions named in plan v2 §2.8: kernel tokens
+and reachability, the async/HTTP stack, the codec framework, session inference, the pricing
+package, rehydration, and chunk durability. Each is written before its first code.
