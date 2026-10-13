@@ -33,6 +33,13 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 - `docs/roadmap.md` (public roadmap), `docs/rfcs/` (process and template), `MAINTAINERS.md` (with
   the single-maintainer risk stated), `docs/research/name-check.md`.
 
+- `docs/research/beachhead-facts.md` (plan v2 WP3.0a). It records the gateway requirements of
+  Claude Code (16 facts) and Codex (6 facts), each with its source, date and consequence. Codex's
+  Responses-only wire API is confirmed from the official configuration reference. What
+  documentation cannot settle (Responses storage and encrypted reasoning as actually sent, the
+  exact endpoint inventory) is listed as open until a traffic capture, which waits for the
+  maintainer's go-ahead.
+
 - P2 WP2.3 — `uaos-redact` (ADR-0009): schema-agnostic secret detection and redaction with a
   fail-closed final scan. Detector set v1 covers 11 high-risk classes:
   - private keys, JWTs;
@@ -132,3 +139,4 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 - Governance: LICENSE (Apache-2.0), NOTICE, README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT
   (Contributor Covenant 2.1), GOVERNANCE, RELEASING, ADR-0001–0005, threat model v0, privacy
   data flow v0, vision traceability matrix.
+
