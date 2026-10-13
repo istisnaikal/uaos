@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPIKE (plan v2 WP3.0a): a local logging proxy that records the *structure* of what a coding
+# agent sends to its provider, to settle gateway facts that documentation leaves open. Not part
+# of the workspace, not product code; deleted at the end of WP3.0.
+[package]
+name = "spike-capture"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+
+[profile.release]
+debug = false
