@@ -64,6 +64,17 @@ fn append(path: &'static str, text: &'static str) -> Seed {
     })
 }
 
+/// Like [`append`], for text built at run time. Seeds that spell out a guarded attribute are
+/// assembled from parts, so this file never contains the attribute `allow-audit` looks for.
+fn append_owned(path: &'static str, text: String) -> Seed {
+    Box::new(move |ws| {
+        let p = ws.join(path);
+        let mut s = std::fs::read_to_string(&p).map_err(|e| format!("{path}: {e}"))?;
+        s.push_str(&text);
+        std::fs::write(&p, s).map_err(|e| format!("{path}: {e}"))
+    })
+}
+
 fn replace(path: &'static str, old: &'static str, new: &'static str) -> Seed {
     Box::new(move |ws| {
         let p = ws.join(path);
@@ -310,6 +321,78 @@ pub(crate) fn cases() -> Vec<Case> {
             // that resolves a conflict with new content.
             runner: Runner::History(crate::dco::check, dco_merge_history),
             expect: "lack a matching DCO",
+        },
+        Case {
+
+            id: "allow-audit-guarded-lint-outside-owner",
+            gate: "allow-audit",
+            tool: None,
+            // An ambient-clock ban switched off in a crate that does not own the clock.
+            seed: append_owned(
+                LIB,
+                format!(
+                    "
+/// Seeded.
+#[{}({}, reason = \"seeded\")]
+#[must_use]
+pub fn seeded_violation() -> u8 {{
+    1
+}}
+",
+                    "allow", "clippy::disallowed_methods"
+                ),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "outside its owners",
+        },
+        Case {
+            id: "allow-audit-unsafe-outside-owner",
+            gate: "allow-audit",
+            tool: None,
+            // `unsafe_code` re-enabled for one item outside any owner path. The workspace only
+            // denies it, so a local allow would compile; uaos-contracts forbids it outright.
+            seed: append_owned(
+                "crates/uaos-ledger/src/lib.rs",
+                format!(
+                    "
+/// Seeded.
+#[{}({})]
+#[must_use]
+pub fn seeded_violation() -> u8 {{
+    1
+}}
+",
+                    "allow", "unsafe_code"
+                ),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "outside its owners",
+        },
+        Case {
+            id: "vet-ratchet-unnoted-exemption",
+            gate: "vet-ratchet",
+            tool: None,
+            // A new exemption without a `notes` reason.
+            seed: append(
+                "supply-chain/config.toml",
+                "
+[[exemptions.seeded-unaudited-crate]]
+version = \"1.0.0\"
+criteria = \"safe-to-deploy\"
+",
+            ),
+            runner: Runner::Xtask(&["vet-ratchet"]),
+            expect: "without notes",
+        },
+        Case {
+            id: "claims-forbidden-word",
+            gate: "claims-lint",
+            tool: None,
+            seed: append("README.md", "
+The journal is tamper-proof.
+"),
+            runner: Runner::Xtask(&["claims"]),
+            expect: "used as a claim",
         },
         Case {
             id: "contract-without-changelog",

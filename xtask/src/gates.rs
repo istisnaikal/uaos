@@ -44,6 +44,10 @@ const REQUIRED_GATES: &[&str] = &[
     "pricing-reconciliation",
     "kernel-tokens",
     "codeql",
+    // Plan v2 additions (PD-06, PD-19, V6).
+    "allow-audit",
+    "vet-ratchet",
+    "claims-lint",
 ];
 
 /// CLAUDE.md §4 "Required behaviors".

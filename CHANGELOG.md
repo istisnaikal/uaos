@@ -33,6 +33,19 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 - `docs/roadmap.md` (public roadmap), `docs/rfcs/` (process and template), `MAINTAINERS.md` (with
   the single-maintainer risk stated), `docs/research/name-check.md`.
 
+- Three merge gates, each proven to bite by seeded violations (plan v2 PD-06, PD-19, V6):
+  - **`allow-audit`** finds every `#[allow]`/`#[expect]` of `unsafe_code`,
+    `clippy::disallowed_methods` or `clippy::disallowed_types`, including multi-line and
+    `cfg_attr` forms, and skipping literals and comments. It fails unless the file is under an
+    owner path in `arch.toml [allow_audit]`. Today 17 allows exist, all owned; `unsafe_code` has
+    no owner.
+  - **`vet-ratchet`**: cargo-vet exemptions without a `notes` reason may not grow past the
+    baseline (233). When the count drops, the baseline must be lowered in the same change.
+  - **`claims-lint`**: forbidden claim words ("perfect", "zero loss", "tamper-proof",
+    "unobtainable", ...) fail in public documents unless quoted, negated or explicitly exempted
+    with a reason.
+- `docs/claims.md`: the registry of public claims and the gates behind them.
+
 - P2 WP2.3 — `uaos-redact` (ADR-0009): schema-agnostic secret detection and redaction with a
   fail-closed final scan. Detector set v1 covers 11 high-risk classes:
   - private keys, JWTs;
@@ -132,3 +145,4 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 - Governance: LICENSE (Apache-2.0), NOTICE, README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT
   (Contributor Covenant 2.1), GOVERNANCE, RELEASING, ADR-0001–0005, threat model v0, privacy
   data flow v0, vision traceability matrix.
+

@@ -10,7 +10,9 @@
     reason = "xtask is developer tooling: it reads files, spawns cargo/git and reports to the terminal"
 )]
 
+mod allow_audit;
 mod arch;
+mod claims;
 mod dco;
 mod decisions;
 mod docs_sync;
@@ -19,6 +21,7 @@ mod headers;
 mod negative;
 mod schemas;
 mod util;
+mod vet_ratchet;
 
 use std::process::ExitCode;
 
@@ -27,6 +30,9 @@ usage: cargo xtask <command>
 
   ci                     run the local merge fast lane (fmt, clippy, tests, all xtask checks)
   arch-check             enforce dependency direction (arch.toml)
+  allow-audit            fail if a guarded lint is allowed outside its owner paths (arch.toml)
+  vet-ratchet            fail if cargo-vet exemptions without notes grow (or shrink unrecorded)
+  claims                 fail on forbidden claims in public documents (red line 6)
   schemas                regenerate schemas/ from uaos-contracts
   schema-check           fail on schema drift or unversioned breaking changes
   headers                fail on files missing an SPDX license header
@@ -47,6 +53,9 @@ fn main() -> ExitCode {
     let result = match command.as_str() {
         "ci" => ci(),
         "arch-check" => arch::check(&util::workspace_root()),
+        "allow-audit" => allow_audit::check(&util::workspace_root()),
+        "vet-ratchet" => vet_ratchet::check(&util::workspace_root()),
+        "claims" => claims::check(&util::workspace_root()),
         "schemas" => schemas::write(&util::workspace_root()),
         "schema-check" => schemas::check(&util::workspace_root()),
         "headers" => headers::check(&util::workspace_root()),
@@ -96,8 +105,11 @@ fn ci() -> Result<(), String> {
     )?;
     util::run_step(&root, "test", "cargo", &["test", "--workspace", "--locked"])?;
     arch::check(&root)?;
+    allow_audit::check(&root)?;
     schemas::check(&root)?;
     headers::check(&root)?;
+    claims::check(&root)?;
+    vet_ratchet::check(&root)?;
     gates::check(&root, false)?;
     decisions::check(&root, false)?;
     println!("xtask ci: all local gates passed");
