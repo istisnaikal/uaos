@@ -6,6 +6,16 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ## [Unreleased]
 
+### Changed
+
+- `dco` gate: merge commits whose combined diff is empty (GitHub's "Update branch", conflict-free
+  `git merge`) add no content and are exempt. A merge that resolves a conflict with new content
+  still needs a sign-off. This is proven by the new negative case `dco-unsigned-content-merge`.
+  The rule was missing; that is why PR #10 failed on an "Update branch" commit.
+- CI: `dco` and `docs-sync` now run on pushes to `main` and on merge queues as well as on pull
+  requests. Before this, a direct push skipped both (plan v2 PD-17). A missing base commit fails
+  the job instead of guessing a range.
+
 ### Added
 
 - P2 WP2.3 — `uaos-redact` (ADR-0009): schema-agnostic secret detection and redaction with a

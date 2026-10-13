@@ -75,7 +75,7 @@ source = "plan §5 contributions (DCO, no CLA)"
 lane = "merge"
 status = "active"
 job = "dco"
-negative = ["dco-missing-signoff"]
+negative = ["dco-missing-signoff", "dco-unsigned-content-merge"]
 
 [[gate]]
 id = "codeql"

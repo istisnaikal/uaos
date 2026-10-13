@@ -302,6 +302,16 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "lack a matching DCO",
         },
         Case {
+            id: "dco-unsigned-content-merge",
+            gate: "dco",
+            tool: Some("git"),
+            seed: Box::new(|_| Ok(())),
+            // Clean: an unsigned conflict-free merge (exempt). Violating: an unsigned merge
+            // that resolves a conflict with new content.
+            runner: Runner::History(crate::dco::check, dco_merge_history),
+            expect: "lack a matching DCO",
+        },
+        Case {
             id: "contract-without-changelog",
             gate: "docs-contract-sync",
             tool: Some("git"),
@@ -491,6 +501,46 @@ fn dco_history(repo: &Path) -> Result<(String, String), String> {
     git(repo, &["commit", "-q", "--allow-empty", "-s", "-m", "signed"])?;
     git(repo, &["commit", "-q", "--allow-empty", "-m", "unsigned"])?;
     Ok(("HEAD~2..HEAD~1".to_owned(), "HEAD~1..HEAD".to_owned()))
+}
+
+/// Returns `(clean_range, violating_range)`, each spanning one unsigned merge and the signed
+/// commit it brings in: first a content-free merge, then one that resolves a conflict.
+fn dco_merge_history(repo: &Path) -> Result<(String, String), String> {
+    scratch_repo(repo)?;
+    let write = |file: &str, text: &str| std::fs::write(repo.join(file), text).map_err(|e| e.to_string());
+    let trunk = git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    write("a.txt", "base\n")?;
+    git(repo, &["add", "-A"])?;
+    git(repo, &["commit", "-q", "-s", "-m", "base"])?;
+
+    git(repo, &["checkout", "-q", "-b", "side"])?;
+    write("a.txt", "side\n")?;
+    git(repo, &["commit", "-q", "-s", "-am", "side"])?;
+    git(repo, &["checkout", "-q", &trunk])?;
+    write("b.txt", "trunk\n")?;
+    git(repo, &["add", "-A"])?;
+    git(repo, &["commit", "-q", "-s", "-m", "trunk"])?;
+    git(repo, &["merge", "-q", "--no-ff", "--no-edit", "side"])?;
+    let content_free = git(repo, &["rev-parse", "HEAD"])?;
+
+    git(repo, &["checkout", "-q", "-b", "side2"])?;
+    write("a.txt", "side2\n")?;
+    git(repo, &["commit", "-q", "-s", "-am", "side2"])?;
+    git(repo, &["checkout", "-q", &trunk])?;
+    write("a.txt", "trunk2\n")?;
+    git(repo, &["commit", "-q", "-s", "-am", "trunk2"])?;
+    if git(repo, &["merge", "-q", "--no-edit", "side2"]).is_ok() {
+        return Err("expected a merge conflict in the seeded history".to_owned());
+    }
+    write("a.txt", "resolved by hand\n")?;
+    git(repo, &["add", "a.txt"])?;
+    git(repo, &["commit", "-q", "--no-edit"])?;
+    let resolved = git(repo, &["rev-parse", "HEAD"])?;
+
+    Ok((
+        format!("{content_free}^1..{content_free}"),
+        format!("{resolved}^1..{resolved}"),
+    ))
 }
 
 fn docs_sync_history(repo: &Path) -> Result<(String, String), String> {
