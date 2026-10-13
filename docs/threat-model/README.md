@@ -29,7 +29,7 @@ exist before the control can be claimed. Until a control's gate is active, the t
 | # | Threat | Planned control | Proof (gate) | Phase | Status |
 |---|---|---|---|---|---|
 | T1 | Prompt injection via tool output, documents, live hooks, skill/MCP descriptions, memory | provenance labels; tags only from the newest human turn; tool output is data; approvals for dangerous actions; capability blast radius | injection corpus (`prompt-injection-tool-hook-skill`) | P5–P6 | open |
-| T2 | Secret leakage to providers, logs or exports | schema-agnostic detection + exact-bytes final scan, fail-closed; keys never sent to agents; payloads never logged; encrypted chunks; canaries | `redaction-corpus`, canary suite | P2–P3 | open |
+| T2 | Secret leakage to providers, logs or exports | schema-agnostic detection + exact-bytes final scan, fail-closed; keys never sent to agents; payloads never logged; encrypted chunks; canaries | `redaction-corpus`, canary suite | P2–P3 | **detection and final scan active** (P2, ADR-0009: 11 classes, corpus v1); wiring into egress, canaries and rehydration P3 |
 | T3 | Supply chain (dependencies, CI, releases) | cargo-deny, cargo-vet with imported audits, pinned toolchain, SHA-pinned Actions, least-privilege workflow tokens, signed artifacts, SBOM | `cargo-deny`, `cargo-vet`, `secret-scan` | P0 | **controls active** (release signing P3) |
 | T4 | Local privilege escalation | runs as the user, never elevated; data dir owner-only; authenticated IPC | install tests | P1–P3 | open |
 | T5 | SSRF and exfiltration | single egress path; resolve→verify→pin; private/link-local/metadata ranges blocked; redirects re-checked | SSRF suite | P3–P5 | open |

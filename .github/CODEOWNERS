@@ -6,6 +6,7 @@
 /crates/uaos-state/       @istisnaikal
 /crates/uaos-policy/      @istisnaikal
 /crates/uaos-ledger/      @istisnaikal
+/crates/uaos-redact/      @istisnaikal
 /schemas/                 @istisnaikal
 /arch.toml                @istisnaikal
 /clippy.toml              @istisnaikal

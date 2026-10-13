@@ -2384,6 +2384,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "uaos-redact"
+version = "0.0.0"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "proptest",
+ "serde_json",
+ "thiserror",
+ "uaos-contracts",
+ "uaos-platform",
+ "zeroize",
+]
+
+[[package]]
 name = "uaos-state"
 version = "0.0.0"
 dependencies = [
