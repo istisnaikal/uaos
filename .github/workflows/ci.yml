@@ -60,6 +60,10 @@ jobs:
         with:
           tool: cargo-nextest@0.9.148
       - run: cargo nextest run --workspace --locked
+        env:
+          # Exercise the real OS credential store where a runner has one (ADR-0007): Windows
+          # Credential Manager and macOS Keychain. Linux runners have no Secret Service daemon.
+          UAOS_TEST_OS_KEYCHAIN: ${{ matrix.os != 'ubuntu-latest' && '1' || '0' }}
       - run: cargo test --doc --workspace --locked
 
   arch:

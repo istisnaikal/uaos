@@ -18,6 +18,7 @@
 
 pub mod crypto;
 pub mod fs;
+pub mod keychain;
 pub mod real;
 pub mod sim;
 

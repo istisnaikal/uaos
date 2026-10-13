@@ -3,6 +3,7 @@
 //! Real implementations, injected only by the composition root.
 
 pub mod fs;
+pub mod keychain;
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
