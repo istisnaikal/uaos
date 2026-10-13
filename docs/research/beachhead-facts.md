@@ -4,9 +4,10 @@
 re-verified whenever a source changes, and at least before each release; client drift is risk
 B-34. Each fact feeds a decision, and the decision names the fact.
 
-**Status:** documentation-sourced. The endpoint inventory still needs a **traffic capture**:
-running each client through a local logging proxy. That sends real requests with the
-maintainer's own credentials, so it waits for the maintainer's go-ahead (see "Open").
+**Status:**
+- Claude Code: documentation **and a traffic capture** (2026-10-13, approved by the maintainer;
+  see "Captured").
+- Codex: documentation only. Codex is not installed on the reference machine.
 
 ## Claude Code (Anthropic Messages)
 
@@ -51,11 +52,37 @@ shown).
 | CX-5 | `auth.command` can mint bearer tokens and cannot be combined with `env_key` | An option for short-lived `uaos_sk_` child keys (ADR-0011) in a later recipe |
 | CX-6 | `--profile <name>` selects `$CODEX_HOME/<name>.config.toml` | A UAOS profile file instead of editing the user's main config: no permanent change to the user's setup (v1 §7) |
 
+## Captured: Claude Code 2.1.296 through a logging proxy (2026-10-13)
+
+**Method:**
+- The proxy (`spikes/capture` on branch `spike/wp3.0a-capture`) forwarded to `api.anthropic.com`
+  and logged structure only: header names and values with credentials replaced by their length,
+  JSON key and type skeletons, and SSE event counts. No prompt text was logged.
+- One prompt ran with the maintainer's claude.ai login, with
+  `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` and `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`.
+- A first attempt picked up an API-key variable and was rejected; it is kept because it shows
+  the API-key path and the error shape.
+- Logs stay on the maintainer's machine.
+
+| # | Observed | Consequence for UAOS |
+|---|---|---|
+| CAP-1 | `HEAD /api/hello` arrives first, with no credentials and user agent `Bun/…`; the upstream answers 200 | Confirms CC-2: answered locally, no credential required |
+| CAP-2 | `GET /v1/models?limit=1000` was sent **only** in the API-key attempt (`x-api-key`); with the OAuth login, discovery was skipped | Confirms CC-3 and the docs. Discovery needs a key credential |
+| CAP-3 | `POST /v1/messages?beta=true`, header names: `accept`, `accept-encoding` (gzip, deflate, br, zstd), `anthropic-beta`, `anthropic-dangerous-direct-browser-access`, `anthropic-version`, `authorization` **or** `x-api-key`, `content-type`, `user-agent: claude-cli/2.1.296 (external, sdk-cli)`, `x-app`, `x-claude-code-prompt-id`, `x-claude-code-request-class`, `x-claude-code-session-id`, and eight `x-stainless-*` SDK headers (arch, lang, os, package version, retry count, runtime, runtime version, timeout) | Open-list forwarding (CC-4) must include non-`anthropic-*` client headers. The `x-stainless-*` headers disclose the user's OS and runtime **by the client's choice**; UAOS passes them through unchanged (v1 header rule) and lists them in the privacy data flow |
+| CAP-4 | `anthropic-beta` carries 13 values with an API key, and 15 with the claude.ai login (`oauth-2025-04-20` and `extended-cache-ttl-2025-04-11` added) | Confirms CC-5. A codec must never filter beta values |
+| CAP-5 | Body keys: `context_management`, `max_tokens` (128000), `messages`, `metadata` (`user_id`, 186 characters), `model` (`claude-opus-5-5`), `output_config` (`effort: xhigh`), `safeguards`, `stream` (true), `system` (3 blocks), `thinking` (`type: adaptive`), `tools` (29) | The affordability clamp (WP3.5) acts on `max_tokens` = 128,000 by default; it must be dialect-aware, since adaptive thinking has no `budget_tokens`. `context_management` performs server-side thinking clears, which the provider documents as not counting as prefix edits |
+| CAP-6 | `messages` contains a **`role: "system"` message mid-conversation**, with its own `cache_control` (`ttl: 1h`) and per-message `output_config` | Codec role `system_entry` must also cover mid-conversation system messages. They stay where they are (CC-15); "newest human turn" means the newest `user` message |
+| CAP-7 | `system[0]` is a short block (74 characters, the attribution block); the last system block carries `cache_control` (`ttl: 1h`) | Confirms CC-9. Entry 0 is never edited, and `cache_control` passes through |
+| CAP-8 | `safeguards` contains client-side environment metadata: the working directory, the home-directory path length, git state and auto-mode policy lists | The client sends these to the provider itself. For UAOS they are request content: detected and redacted like any other string, and **listed in the privacy data flow** as data the client sends |
+| CAP-9 | **The streaming response is gzip-compressed:** `content-type: text/event-stream` with `content-encoding: gzip`, because the client advertised gzip, br and zstd | **New design input** (ADR-0014, ADR-0017). With nothing to observe or rewrite, UAOS relays compressed bytes untouched. When it must observe or rewrite the stream (rehydration, binding-mismatch SLI, loop detection), it requests `accept-encoding: identity` upstream; that header is not an `anthropic-*` one, so the change is allowed. Decision D-29 |
+| CAP-10 | Subscription responses carry `anthropic-organization-id`, `anthropic-workspace-id` and 12 `anthropic-ratelimit-unified-*` headers (5h and 7d windows, status, utilization, reset, overage status, fallback percentage, representative claim) | D-17′: plan-usage display has real inputs. Organization and workspace ids are account identifiers: journal them only as ids, never in logs or telemetry |
+| CAP-11 | A rejected key gets `401`, `x-should-retry: false`, error `authentication_error` ("invalid x-api-key"), and a `request-id` | Confirms CC-7. Upstream error bodies and headers pass through byte-identical |
+
 ## Open: not verifiable from documentation
 
 | Item | Why it matters | How to settle |
 |---|---|---|
-| Codex: `store`, `previous_response_id` and encrypted reasoning (`reasoning.encrypted_content`) as actually sent | ADR-0005 runs Responses **stateless** (`store=false` enforced, encrypted reasoning passed through) | Traffic capture with the maintainer's go-ahead, or official API docs |
+| Codex: `store`, `previous_response_id` and encrypted reasoning (`reasoning.encrypted_content`) as actually sent | ADR-0005 runs Responses **stateless** (`store=false` enforced, encrypted reasoning passed through) | Capture approved; Codex must first be installed and logged in on the reference machine |
 | Codex: exact paths beyond `/v1/responses` (model listing, compaction, other) | The D-28 inventory | Traffic capture |
-| Claude Code: exact current header set on this machine's version | Drift (B-34) | Traffic capture, then pinned in golden transcripts |
+| Claude Code: behaviour across versions | Drift (B-34) | Re-run the capture per client release; pin in golden transcripts (WP3.8) |
 | Codex: whether `-c key=value` overrides work for `model_providers` | The launch recipe (WP3.7) | Capture, or a local dry run without network |
