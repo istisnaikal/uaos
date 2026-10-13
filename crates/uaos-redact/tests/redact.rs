@@ -347,8 +347,8 @@ fn assert_every_path_redacts(text: &str, secret: &str, class: DataClass) {
     let red = redactor();
     let s = scanner(&[]);
     let r = red.redact_text(text).unwrap();
-    assert!(!leaks(r.output(), secret), "text redaction left the secret: {text}");
-    assert!(r.classes().contains(&class), "{text}");
+    assert!(!leaks(r.output(), secret), "text redaction left a {class} secret");
+    assert!(r.classes().contains(&class), "{class} not found");
     assert!(s.check_bytes(r.output().as_bytes()).is_ok());
 
     let body = serde_json::to_vec(&json!({ "messages": [{ "content": text }] })).unwrap();
@@ -357,7 +357,7 @@ fn assert_every_path_redacts(text: &str, secret: &str, class: DataClass) {
     visible_value(&serde_json::from_slice(rj.output()).unwrap(), &mut recovered);
     assert!(
         !recovered.iter().any(|v| v.contains(secret)),
-        "JSON redaction left the secret: {text}"
+        "JSON redaction left a {class} secret"
     );
     assert!(s.check_json(rj.output()).is_ok());
 
@@ -365,7 +365,7 @@ fn assert_every_path_redacts(text: &str, secret: &str, class: DataClass) {
         s.check_bytes(text.as_bytes()).unwrap_err(),
         s.check_json(&body).unwrap_err(),
     ] {
-        assert!(blocked.classes.contains(&class), "{text}");
+        assert!(blocked.classes.contains(&class), "the final scan missed {class}");
     }
 }
 
@@ -580,9 +580,9 @@ fn a_redacted_user_does_not_hide_the_password() {
         format!("s3://{id}:pa{}ss-w0rd-1234@bucket", u("0026")),
     ] {
         let r = redactor().redact_text(&text).unwrap();
-        assert!(r.classes().contains(&DataClass::UrlCredentials), "{text}");
+        assert!(r.classes().contains(&DataClass::UrlCredentials));
         for secret in ["wJalrXUtnFEMI", "secretpassw0rd", "ss-w0rd-1234", id.as_str()] {
-            assert!(!leaks(r.output(), secret), "{text} -> {}", r.output());
+            assert!(!leaks(r.output(), secret), "a secret survived");
         }
         assert!(scanner(&[]).check_bytes(r.output().as_bytes()).is_ok());
     }
@@ -637,9 +637,12 @@ fn escaped_left_neighbours_do_not_hide_keys() {
         ),
     ] {
         let r = redactor().redact_text(&text).unwrap();
-        assert!(r.classes().contains(&class), "{text}");
-        assert!(!r.output().contains(secret), "{text}");
-        assert!(scanner(&[]).check_bytes(text.as_bytes()).is_err(), "{text}");
+        assert!(r.classes().contains(&class), "{class} not found");
+        assert!(!r.output().contains(secret), "{class} survived");
+        assert!(
+            scanner(&[]).check_bytes(text.as_bytes()).is_err(),
+            "the final scan missed {class}"
+        );
     }
     let raw = format!("{{\"messages\":[{{\"content\":\"code{}{key}\"}}]}}", bs("~~~~~~~~n"));
     let rj = redactor().redact_json(raw.as_bytes()).unwrap();

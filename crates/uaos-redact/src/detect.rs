@@ -369,12 +369,12 @@ impl DetectorSet {
                     .get(at + 1)
                     .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'[' || b == b'_')
             })?;
-        let password = window.get(pass_from..at)?;
-        let not_a_password = password.is_empty()
-            || is_placeholder(password)
-            || port_then_path(user, password)
-            || scp_path(user, password)
-            || is_template(password);
+        let candidate = window.get(pass_from..at)?;
+        let not_a_password = candidate.is_empty()
+            || is_placeholder(candidate)
+            || port_then_path(user, candidate)
+            || scp_path(user, candidate)
+            || is_template(candidate);
         (!not_a_password).then_some(after + pass_from..after + at)
     }
 }
@@ -447,34 +447,34 @@ fn path_like(rest: &[u8]) -> bool {
     })
 }
 
-/// Whether `user:password` is really `host:port/path` (`localhost:3000/@user`,
-/// `web:8000/?email=a@b.c`): the "password" starts with a port number and a `/`, `?` or `#`, and
+/// Whether `user:candidate` is really `host:port/path` (`localhost:3000/@user`,
+/// `web:8000/?email=a@b.c`): the candidate starts with a port number and a `/`, `?` or `#`, and
 /// either the user is host-like (dotted, contains `@`, or `localhost`) or the rest is a
-/// lowercase path. A random password rarely starts with a port and a slash and almost never
+/// lowercase path. A random candidate rarely starts with a port and a slash and almost never
 /// continues as a lowercase path, so recall holds; what is missed is stated in ADR-0009.
-fn port_then_path(user: &[u8], password: &[u8]) -> bool {
-    let digits = password.iter().take_while(|b| b.is_ascii_digit()).count();
+fn port_then_path(user: &[u8], candidate: &[u8]) -> bool {
+    let digits = candidate.iter().take_while(|b| b.is_ascii_digit()).count();
     let port_ok = (1..=5).contains(&digits)
-        && password
+        && candidate
             .get(..digits)
             .and_then(|d| std::str::from_utf8(d).ok())
             .and_then(|d| d.parse::<u32>().ok())
             .is_some_and(|port| port <= 65_535);
-    if !port_ok || !matches!(password.get(digits), Some(b'/' | b'?' | b'#')) {
+    if !port_ok || !matches!(candidate.get(digits), Some(b'/' | b'?' | b'#')) {
         return false;
     }
     let host_like = user.contains(&b'.') || user.contains(&b'@') || user.eq_ignore_ascii_case(b"localhost");
-    host_like || password.get(digits..).is_some_and(path_like)
+    host_like || candidate.get(digits..).is_some_and(path_like)
 }
 
-/// Whether `user:password` is really an scp-style `git@host:org/repo.git` path.
-fn scp_path(user: &[u8], password: &[u8]) -> bool {
-    user.contains(&b'@') && password.contains(&b'/') && path_like(password)
+/// Whether `user:candidate` is really an scp-style `git@host:org/repo.git` path.
+fn scp_path(user: &[u8], candidate: &[u8]) -> bool {
+    user.contains(&b'@') && candidate.contains(&b'/') && path_like(candidate)
 }
 
-/// Whether the password is a template reference, not a value: `${NAME}`, `$NAME` (upper case),
+/// Whether the candidate is a template reference, not a value: `${NAME}`, `$NAME` (upper case),
 /// `%(name)s`, `{{name}}`.
-fn is_template(password: &[u8]) -> bool {
+fn is_template(candidate: &[u8]) -> bool {
     let ident = |b: &[u8], upper: bool| {
         !b.is_empty()
             && b.iter().all(|&c| {
@@ -487,9 +487,9 @@ fn is_template(password: &[u8]) -> bool {
             })
             && !b.first().is_some_and(u8::is_ascii_digit)
     };
-    let inner = |open: &[u8], close: &[u8]| password.strip_prefix(open).and_then(|r| r.strip_suffix(close));
+    let inner = |open: &[u8], close: &[u8]| candidate.strip_prefix(open).and_then(|r| r.strip_suffix(close));
     inner(b"${", b"}").is_some_and(|n| ident(n, false))
-        || password.strip_prefix(b"$").is_some_and(|n| ident(n, true))
+        || candidate.strip_prefix(b"$").is_some_and(|n| ident(n, true))
         || inner(b"%(", b")s").is_some_and(|n| ident(n, false))
         || inner(b"{{", b"}}").is_some_and(|n| ident(n, false))
 }
@@ -736,7 +736,7 @@ mod tests {
             ),
             (format!("STRIPE_KEY_{stripe}"), DataClass::StripeKey, stripe.as_str()),
         ] {
-            assert_eq!(classes(&text), [(class, secret)], "{text}");
+            assert!(classes(&text) == [(class, secret)], "{class}");
         }
     }
 
@@ -766,9 +766,12 @@ mod tests {
     #[test]
     fn url_passwords_cover_every_byte_a_password_can_hold() {
         // Review H2: `/`, `#`, `?` and `'` used to end the password early.
-        for password in ["a/b+c=", "x#y", "q?r", "it's", "p@ss", "a:b", "(x),[y];z"] {
-            let text = format!("postgres://app:{password}@db.example.com:5432/app");
-            assert_eq!(url(&text), [password], "{text}");
+        for (case, expected) in ["a/b+c=", "x#y", "q?r", "it's", "p@ss", "a:b", "(x),[y];z"]
+            .into_iter()
+            .enumerate()
+        {
+            let text = format!("postgres://app:{expected}@db.example.com:5432/app");
+            assert!(url(&text) == [expected], "case {case}");
         }
         assert_eq!(url("redis://:p@ss@cache.local:6379"), ["p@ss"]);
         assert_eq!(url("key = 'mysql://u:pw@h'"), ["pw"]);
@@ -833,7 +836,10 @@ mod tests {
         // `~` stands for a backslash.
         for left in ["x~~n", "x~n", "id=%20", "~u0020"] {
             let text = format!("{}{key}", left.replace('~', "\\"));
-            assert_eq!(classes(&text), [(DataClass::AwsAccessKeyId, key.as_str())], "{text}");
+            assert!(
+                classes(&text) == [(DataClass::AwsAccessKeyId, key.as_str())],
+                "left neighbour {left:?}"
+            );
         }
         assert!(classes(&format!("xn{key}")).is_empty(), "plain glue still counts");
     }
