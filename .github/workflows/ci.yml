@@ -19,6 +19,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Tool versions are pinned exactly: a floating "latest" once reformatted the cargo-vet store
+  # differently in CI than on developer machines. Bump deliberately, everywhere at once.
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   GITLEAKS_VERSION: "8.30.1"
@@ -56,7 +58,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.148
       - run: cargo nextest run --workspace --locked
       - run: cargo test --doc --workspace --locked
 
@@ -99,7 +101,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
       - run: cargo deny --locked check
 
   vet:
@@ -108,7 +110,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
-          tool: cargo-vet
+          tool: cargo-vet@0.10.0
       - run: cargo vet --locked
 
   secrets:
@@ -148,7 +150,15 @@ jobs:
   paths:
     # Founders and users have spaces and non-ASCII characters in their paths (`C:\BLUE SHOT`,
     # Turkish usernames with ü/ş/ı). Build and test from such a path on every change.
+    #
+    # Build output goes to an ASCII directory: aws-lc-sys's prebuilt-NASM wrapper fails when the
+    # target directory contains characters the system ANSI code page cannot represent (ş and ı
+    # are not in code page 1252 used by this runner; Turkish Windows, code page 1254, is not
+    # affected). That is an upstream build limitation documented in CONTRIBUTING.md; the checkout
+    # itself — and therefore everything UAOS reads and writes relative to it — stays non-ASCII.
     runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: 'D:\uaos-target'
     defaults:
       run:
         working-directory: "dir with space ü ş ı/uaos"
@@ -168,7 +178,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
-          tool: cargo-deny,cargo-vet
+          tool: cargo-deny@0.20.2,cargo-vet@0.10.0
       - name: Install gitleaks (checksum-verified)
         run: |
           curl -sSfL -o gitleaks.tar.gz \
