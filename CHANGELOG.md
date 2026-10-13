@@ -46,13 +46,21 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `check_bytes`.
   - **Smaller fixes:** overlapping anchors are found (L2), scanning is linear, with a test bound
     on adversarial inputs (M3), and placeholders follow an exact grammar (L3).
-  - **Gate `redaction-corpus` now measures corpus v2** (M4): five evasion forms, every printable
-    URL password byte, an independent oracle, and false positives per family. It reports 0
-    misses and 0 false positives. The pre-fix detectors scored 24.8–64.7 % recall per class on
-    it. The new negative case `redact-url-password-stops-at-slash` proves the gate catches a
-    one-byte regression.
+  - **Gate `redaction-corpus` now measures corpus v2** (M4): six evasion forms, every printable
+    URL password byte, an independent oracle, and false positives per family (40 families). It
+    reports 0 misses and 0 false positives. The pre-fix detectors scored 24.8–64.7 % recall per
+    class on it. The new negative case `redact-url-password-stops-at-slash` proves the gate
+    catches a one-byte regression.
+  - **A second fresh-context review of these fixes** found 2 High, 3 Medium and 3 Low findings.
+    All are fixed:
+    - JWT scanning went quadratic;
+    - a redacted user hid its password;
+    - form-encoded keys passed;
+    - service URLs and templated passwords were flagged;
+    - an escaped left neighbour hid keys;
+    - a crafted cascade wedged the session (such content is now replaced whole).
   - **Cost** on a 1.8 MB history where every message is a tool call's JSON arguments: final scan
-    p50 7.7 ms. That is above the plan's 6 ms per-stage hypothesis, and is recorded as a WP3.8
+    p50 8.3 ms. That is above the plan's 6 ms per-stage hypothesis, and is recorded as a WP3.8
     input.
 
 ### Added

@@ -71,3 +71,31 @@ these bytes.
 | L4 (copies) | **Accepted** | Decoded views and round buffers that hold a secret are dropped without zeroizing. The request body itself, which the caller owns, holds the same bytes, so wiping the copies gains little until P3 owns the request buffers (they will be zeroized there, plan §2.4) | — |
 | L5 | **Fixed** (encodings) / **scheduled** (incremental) | Known vault secrets are matched in all 3 views. Adding secrets one at a time arrives with the per-session known-secret matcher (ADR-0017, WP3.4) | `known_secrets_are_matched_through_encodings` |
 | L6 | **Accepted** | A lone surrogate blocks the request, which is the correct fail-closed outcome. The way out arrives in P3, where the runtime's error names the message, and in P6A, where @devam can drop it from the next request | — |
+
+## V1 review of hardening II
+
+**Reviewer:** a fresh-context review agent, read-only on the repository. It probed a scratch
+export of `a234c24` (release build) and fuzzed 4.2 M differential cases.
+**Result:** 2 High · 3 Medium · 3 Low.
+**Verdict as reported:** "not yet fit to be the C-53 fail-closed boundary". Two claims were
+wrong as written: "scanning is linear" and "M2 fixed".
+
+| Finding | Status | What changed | Proof |
+|---|---|---|---|
+| H-A The JWT rule made scanning quadratic: one cached run per character class, evicted by the payload and signature runs | **Fixed** | Every run computed is indexed by its end, per class; maximal runs of a class never overlap, so the lookup is exact | `adversarial_inputs_are_scanned_in_linear_work`: 16 shapes × 3 tails, including `_eyJ…` and `-eyJ…` with the reviewer's tails |
+| H-B A user redacted in an earlier round (an AWS key id) hid the password, and the final scan passed the output | **Fixed** | The user scan skips whole placeholders; only an IPv6 literal at the start of the authority means "no userinfo"; a backslash no longer ends the window | `a_redacted_user_does_not_hide_the_password` (the reviewer's four shapes); unit cases for `[svc]` users and placeholder users |
+| M-A A form-encoded PEM key (`+` for a space) passed every path | **Fixed** | A fourth view decodes form encoding for text that has both `+` and a `%XX` escape; corpus v2's percent form now uses form encoding half the time | `form_encoded_keys_are_redacted` |
+| M-B Single-label service URLs and templated passwords were flagged (15 of 18 probes) | **Fixed** | `host:port/path@x` is not userinfo when the rest is a lowercase path, or the user is host-like. scp-style paths and template references are not passwords. The corpus gains the families `url-service-path` and `url-template-password` | `service_urls_and_templates_are_not_redacted`; `urls_without_userinfo_are_not_passwords`; 0 false positives in both new families |
+| L-A URL-rule edges that leaked unredacted | **Fixed** (backslash, bracketed user, `_` host) / **stated** (`"<>`, backtick, `://` inside a password, userinfo over 512 bytes, port-like starts) | The backslash is no longer a hard stop. The remaining edges are listed in ADR-0009 "Limits", because each reads as something else to a URL parser too | `a_backslash_in_a_password_is_covered`; corpus passwords include the backslash |
+| L-B An escaped left neighbour made a plain key look glued in every view | **Fixed** | The tail of an escape still encoded in a view is not glue | `an_escape_tail_on_the_left_is_not_glue`; `escaped_left_neighbours_do_not_hide_keys` (three and four escape levels) |
+| L-C A crafted cascade exhausted the round budget and wedged the session | **Fixed** | Content that does not converge within 8 rounds is replaced whole by one placeholder | `content_that_does_not_converge_is_replaced_whole` (one-round budget); `a_crafted_cascade_is_replaced_whole_without_wedging` (the reviewer's five lines, which now converge) |
+| Claim accuracy | **Fixed** | ADR-0009 §2–§7, "Measured", "Limits" and the crate docs describe the rules above and the measured costs | review of the text |
+
+**After the fixes:**
+- **Corpus v2** (6 forms, 40 families): 0 misses and 0 false positives in every class and
+  family.
+- **Benchmark:**
+  - prose: redaction 5.2 ms, final scan 5.2 ms;
+  - nested worst case: redaction 9.5 ms, final scan 8.3 ms.
+- **Seeded negatives:** both still PROVEN.
+

@@ -19,6 +19,7 @@
 //! not change under it (plan §2.5). Changing any rule below requires a new version once a
 //! release has shipped the set (ADR-0009 §1).
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Range;
 
@@ -289,12 +290,7 @@ impl DetectorSet {
             let Some(anchor) = self.anchors.get(m.pattern().as_usize()) else {
                 return Err(RedactError::DetectorFailure("unknown anchor"));
             };
-            let glued = anchor.glue
-                && m.start()
-                    .checked_sub(1)
-                    .and_then(|i| text.get(i))
-                    .is_some_and(u8::is_ascii_alphanumeric);
-            if glued {
+            if anchor.glue && glued(text, m.start()) {
                 continue;
             }
             if let Some(range) = self.confirm(anchor.rule, text, m.start(), m.end(), memo) {
@@ -331,16 +327,20 @@ impl DetectorSet {
         }
     }
 
-    /// The password of `scheme://user:password@host` (review H2).
+    /// The password of `scheme://user:password@host` (review H2; V1 review of hardening II).
     ///
     /// * The userinfo window runs from the anchor to the first hard stop (whitespace, control,
-    ///   `"`, `<`, `>`, `\`, backtick), at most [`USERINFO_MAX`] bytes, and never into the next
-    ///   `://`.
-    /// * The user ends at the first `:`; a `/`, `?` or `#` before it means there is no userinfo.
+    ///   `"`, `<`, `>`, backtick), at most [`USERINFO_MAX`] bytes, and never into the next `://`.
+    /// * An authority that starts with an IPv6 literal has no userinfo.
+    /// * The user ends at the first `:`, skipping over placeholders (a user redacted in an
+    ///   earlier round still has its password found); a `/`, `?` or `#` before it means there is
+    ///   no userinfo.
     /// * The password ends at the **last** `@` in the window that a host follows, so `/`, `#`,
-    ///   `?`, `'` and `@` inside a password are covered. A path containing `@` is covered too:
+    ///   `?`, `'`, `\` and `@` inside a password are covered. A path containing `@` is covered too:
     ///   over-redaction, never a leak.
-    /// * `host:port/path@x` (a host-like user, then digits and a path) is not userinfo.
+    /// * Not a password: `host:port/path@x` (see [`port_then_path`]), an scp-style path after an
+    ///   email-like user (`git@host:org/repo.git@v1`), and a template reference
+    ///   (`${DB_PASSWORD}`, `$DB_PASSWORD`, `%(password)s`, `{{db_password}}`).
     fn url_password(&self, text: &[u8], start: usize, after: usize, memo: &mut Memo) -> Option<Range<usize>> {
         let has_scheme = start
             .checked_sub(1)
@@ -356,40 +356,142 @@ impl DetectorSet {
         }
         let window = text.get(after..end)?;
         memo.charge(window.len());
-        let user_end = window.iter().position(|&b| matches!(b, b':' | b'/' | b'?' | b'#'))?;
-        let user = window.get(..user_end)?;
-        if window.get(user_end) != Some(&b':') || user.iter().any(|&b| b == b'[' || b == b']') {
+        if starts_with_ipv6_literal(window) {
             return None;
         }
+        let user_end = user_end(window)?;
+        let user = window.get(..user_end)?;
         let pass_from = user_end + 1;
         let at = memchr::memrchr_iter(b'@', window.get(pass_from..)?)
             .map(|i| pass_from + i)
             .find(|&at| {
                 window
                     .get(at + 1)
-                    .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'[')
+                    .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'[' || b == b'_')
             })?;
         let password = window.get(pass_from..at)?;
-        if password.is_empty() || is_placeholder(password) || port_then_path(user, password) {
-            return None;
-        }
-        Some(after + pass_from..after + at)
+        let not_a_password = password.is_empty()
+            || is_placeholder(password)
+            || port_then_path(user, password)
+            || scp_path(user, password)
+            || is_template(password);
+        (!not_a_password).then_some(after + pass_from..after + at)
     }
 }
 
 /// Longest userinfo we inspect.
 const USERINFO_MAX: usize = 512;
 
-/// A URL password never contains these unencoded (they end the URL in text).
+/// A URL never contains these unencoded in text: they end it. A backslash does not: a
+/// JSON-escaped `\/` inside a password must not end it early.
 fn hard_stop(b: u8) -> bool {
-    b.is_ascii_whitespace() || b.is_ascii_control() || matches!(b, b'"' | b'<' | b'>' | b'\\' | b'`')
+    b.is_ascii_whitespace() || b.is_ascii_control() || matches!(b, b'"' | b'<' | b'>' | b'`')
 }
 
-/// Whether `user:password` is really `host:port/path` (`localhost:3000/@user`).
+/// Whether the byte before an anchor at `start` glues it into a longer token: an alphanumeric
+/// byte, unless it is the tail of an escape still encoded in this view (`\n`, `%20`, `\u0041`),
+/// which a deeper view decodes (V1 review L-B).
+fn glued(text: &[u8], start: usize) -> bool {
+    let before = |k: usize| start.checked_sub(k).and_then(|i| text.get(i)).copied();
+    if !before(1).is_some_and(|b| b.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let hex = |k: usize| before(k).is_some_and(|b| b.is_ascii_hexdigit());
+    let escape_tail = before(2) == Some(b'\\')
+        || (before(3) == Some(b'%') && hex(2) && hex(1))
+        || (before(6) == Some(b'\\') && before(5) == Some(b'u') && (1..=4).all(hex));
+    !escape_tail
+}
+
+/// `[hex:.]` at the start of the authority: an IPv6 host, so there is no userinfo.
+fn starts_with_ipv6_literal(window: &[u8]) -> bool {
+    window.first() == Some(&b'[')
+        && memchr::memchr(b']', window)
+            .and_then(|close| window.get(1..close))
+            .is_some_and(|inner| {
+                !inner.is_empty() && inner.iter().all(|&b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+            })
+}
+
+/// End of the user: the first `:`, skipping whole placeholders. `None` if a `/`, `?` or `#`
+/// comes first, or there is no `:`.
+fn user_end(window: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    loop {
+        match *window.get(i)? {
+            b':' => return Some(i),
+            b'/' | b'?' | b'#' => return None,
+            b'[' => i += placeholder_len(window.get(i..)?).unwrap_or(1),
+            _ => i += 1,
+        }
+    }
+}
+
+/// Length of the placeholder at the start of `bytes`, if one is there.
+fn placeholder_len(bytes: &[u8]) -> Option<usize> {
+    let longest = PLACEHOLDER_PREFIX.len() + 32 + PLACEHOLDER_TAG_HEX + 2;
+    let head = bytes.get(..bytes.len().min(longest))?;
+    let close = memchr::memchr(b']', head)?;
+    is_placeholder(head.get(..=close)?).then_some(close + 1)
+}
+
+/// Bytes of a lowercase path or query: what follows `host:port` in a service URL.
+fn path_like(rest: &[u8]) -> bool {
+    rest.iter().all(|&b| {
+        b.is_ascii_lowercase()
+            || b.is_ascii_digit()
+            || matches!(
+                b,
+                b'/' | b'.' | b'_' | b'~' | b'-' | b'?' | b'=' | b'&' | b'#' | b'%' | b'@'
+            )
+    })
+}
+
+/// Whether `user:password` is really `host:port/path` (`localhost:3000/@user`,
+/// `web:8000/?email=a@b.c`): the "password" starts with a port number and a `/`, `?` or `#`, and
+/// either the user is host-like (dotted, contains `@`, or `localhost`) or the rest is a
+/// lowercase path. A random password rarely starts with a port and a slash and almost never
+/// continues as a lowercase path, so recall holds; what is missed is stated in ADR-0009.
 fn port_then_path(user: &[u8], password: &[u8]) -> bool {
-    let host_like = user.contains(&b'.') || user.contains(&b'@') || user.eq_ignore_ascii_case(b"localhost");
     let digits = password.iter().take_while(|b| b.is_ascii_digit()).count();
-    host_like && (1..=5).contains(&digits) && matches!(password.get(digits), Some(b'/' | b'?' | b'#'))
+    let port_ok = (1..=5).contains(&digits)
+        && password
+            .get(..digits)
+            .and_then(|d| std::str::from_utf8(d).ok())
+            .and_then(|d| d.parse::<u32>().ok())
+            .is_some_and(|port| port <= 65_535);
+    if !port_ok || !matches!(password.get(digits), Some(b'/' | b'?' | b'#')) {
+        return false;
+    }
+    let host_like = user.contains(&b'.') || user.contains(&b'@') || user.eq_ignore_ascii_case(b"localhost");
+    host_like || password.get(digits..).is_some_and(path_like)
+}
+
+/// Whether `user:password` is really an scp-style `git@host:org/repo.git` path.
+fn scp_path(user: &[u8], password: &[u8]) -> bool {
+    user.contains(&b'@') && password.contains(&b'/') && path_like(password)
+}
+
+/// Whether the password is a template reference, not a value: `${NAME}`, `$NAME` (upper case),
+/// `%(name)s`, `{{name}}`.
+fn is_template(password: &[u8]) -> bool {
+    let ident = |b: &[u8], upper: bool| {
+        !b.is_empty()
+            && b.iter().all(|&c| {
+                (if upper {
+                    c.is_ascii_uppercase()
+                } else {
+                    c.is_ascii_alphabetic()
+                }) || c.is_ascii_digit()
+                    || c == b'_'
+            })
+            && !b.first().is_some_and(u8::is_ascii_digit)
+    };
+    let inner = |open: &[u8], close: &[u8]| password.strip_prefix(open).and_then(|r| r.strip_suffix(close));
+    inner(b"${", b"}").is_some_and(|n| ident(n, false))
+        || password.strip_prefix(b"$").is_some_and(|n| ident(n, true))
+        || inner(b"%(", b")s").is_some_and(|n| ident(n, false))
+        || inner(b"{{", b"}}").is_some_and(|n| ident(n, false))
 }
 
 /// Work shared by the anchors of one scan: anchors inside a run, a private-key block or a
@@ -397,8 +499,11 @@ fn port_then_path(user: &[u8], password: &[u8]) -> bool {
 /// scan linear (review M3: 1 MB of repeated PEM headers took 860 ms).
 #[derive(Default)]
 struct Memo {
-    /// Per char class and dot rule, the last run computed: `(chars, dots, from, end)`.
-    runs: Vec<(Chars, bool, usize, usize)>,
+    /// Per char class and dot rule, every run computed, by end: `end → from`. Maximal runs of
+    /// one class never overlap, so the first entry ending after a position is the only one that
+    /// can contain it. (One entry per class was not enough: the JWT rule's payload and
+    /// signature runs evicted its header run, and the scan went quadratic; V1 review H-A.)
+    runs: Vec<(Chars, bool, BTreeMap<usize, usize>)>,
     /// The last marker search: `(chars, from, end, start of the marker's last occurrence)`.
     marker: Option<(Chars, usize, usize, Option<usize>)>,
     /// The last hard-stop search: no hard stop in `from..end`, and one at `end` (or the end).
@@ -426,18 +531,26 @@ impl Memo {
         if !text.get(from).is_some_and(|&b| chars.has(b)) {
             return from;
         }
-        if let Some(&(_, _, f, e)) = self.runs.iter().find(|r| r.0 == chars && r.1 == dots)
+        let index = self
+            .runs
+            .iter()
+            .position(|r| r.0 == chars && r.1 == dots)
+            .unwrap_or_else(|| {
+                self.runs.push((chars, dots, BTreeMap::new()));
+                self.runs.len() - 1
+            });
+        let Some((_, _, runs)) = self.runs.get_mut(index) else {
+            return run_end(text, from, chars, dots);
+        };
+        if let Some((&e, &f)) = runs.range(from + 1..).next()
             && f <= from
-            && from < e
         {
             return e;
         }
         let end = run_end(text, from, chars, dots);
+        let earliest = runs.get(&end).map_or(from, |&f| f.min(from));
+        runs.insert(end, earliest);
         self.charge(end - from);
-        match self.runs.iter_mut().find(|r| r.0 == chars && r.1 == dots) {
-            Some(r) => *r = (chars, dots, from, end),
-            None => self.runs.push((chars, dots, from, end)),
-        }
         end
     }
 
@@ -666,6 +779,16 @@ mod tests {
         );
         // Two URLs glued by a comma stay two passwords.
         assert_eq!(url("a://u:p1@h,b://v:p2@k"), ["p1", "p2"]);
+        // V1 review of hardening II, L-A: a backslash (a JSON-escaped `\/`), a bracketed user, a
+        // host starting with `_`.
+        assert_eq!(url(r"s3a://app:wJal\/K7MD@bucket/path"), [r"wJal\/K7MD"]);
+        assert_eq!(url("https://[svc]:hunter2hunter2@host.example.com"), ["hunter2hunter2"]);
+        assert_eq!(url("postgres://app:s3cretpw@_db.local/x"), ["s3cretpw"]);
+        // H-B: a user already redacted in an earlier round still has its password found.
+        let user = "[REDACTED:aws_access_key_id:0123456789abcdef]";
+        assert_eq!(url(&format!("s3a://{user}:wJalrXUtnFEMI@bucket")), ["wJalrXUtnFEMI"]);
+        // A port-like start followed by more than a lowercase path is a password.
+        assert_eq!(url("postgres://app:2024/Winter!@db.example.com/x"), ["2024/Winter!"]);
     }
 
     #[test]
@@ -680,9 +803,39 @@ mod tests {
             "ssh://git@github.com/org/repo.git",
             "http://[::1]:8080/@x",
             "https://registry.example.com/@scope/pkg:1.0@latest",
+            // V1 review of hardening II, M-B: single-label service hosts, scp paths, templates.
+            "docker://registry:5000/app@sha256:4d2b1f0c9e8a7b6c5d4e3f2a1b0c9d8e",
+            "http://verdaccio:4873/@babel/core",
+            "http://web:3000/@alice",
+            "http://web:8000/?email=bob@example.com",
+            "http://api:8080/users/@me",
+            "http://minio:9000/bucket/a@b.txt",
+            "jdbc:mysql://db:3306/app?user=bob@corp.com",
+            "http://keycloak:8080/admin/users?email=a@b.com",
+            "git+ssh://git@github.com:org/repo.git@v1.0",
+            "ssh://git@github.com:org/repo.git#egg=pkg@v1",
+            "http://LOCALHOST:3000/@x",
+            "postgres://app:${POSTGRES_PASSWORD}@db:5432/app",
+            "redis://:$REDIS_PASSWORD@redis:6379/0",
+            "mysql://root:%(password)s@localhost/db",
+            "amqp://guest:{{rabbit_password}}@mq:5672/",
+            "postgresql://{user}:{password}@{host}/{db}",
         ] {
             assert!(url(text).is_empty(), "{text}");
         }
+    }
+
+    /// V1 review of hardening II, L-B: the tail of an escape still encoded in a view (`n` of a
+    /// backslash-n, `0` of `%20`) is not glue.
+    #[test]
+    fn an_escape_tail_on_the_left_is_not_glue() {
+        let key = format!("AKIA{}", "Q".repeat(16));
+        // `~` stands for a backslash.
+        for left in ["x~~n", "x~n", "id=%20", "~u0020"] {
+            let text = format!("{}{key}", left.replace('~', "\\"));
+            assert_eq!(classes(&text), [(DataClass::AwsAccessKeyId, key.as_str())], "{text}");
+        }
+        assert!(classes(&format!("xn{key}")).is_empty(), "plain glue still counts");
     }
 
     #[test]
@@ -728,10 +881,19 @@ mod tests {
             "a://b:c@@".to_owned(),
             "glpat-a.".to_owned(),
             "hooks.slack.com/services/".to_owned(),
+            "_eyJ".to_owned(),
+            "-eyJ".to_owned(),
+            "eyJx.eyJx.".to_owned(),
+            "a://b:".to_owned(),
+            "%25".to_owned(),
         ];
+        // V1 review of hardening II, H-A: a long JWT header run followed by a payload and a
+        // signature evicted the header from a one-entry cache, and every later `eyJ` inside the
+        // header rescanned it.
+        let tails = ["", ".eyJaaaaaaaaaa.b", ".eyJaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbb"];
         let set = set();
-        for pattern in patterns {
-            let text = pattern.repeat(256 * 1024 / pattern.len());
+        for (pattern, tail) in patterns.iter().flat_map(|p| tails.iter().map(move |t| (p, t))) {
+            let text = pattern.repeat(256 * 1024 / pattern.len()) + tail;
             let mut memo = Memo::default();
             set.scan_with(text.as_bytes(), &mut memo).unwrap();
             assert!(
