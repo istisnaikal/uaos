@@ -17,3 +17,4 @@ before their first code is merged (GOVERNANCE.md §Decisions).
 | [0006](0006-aws-lc-prebuilt-nasm-on-windows.md) | aws-lc prebuilt NASM objects on Windows | Accepted |
 | [0007](0007-key-storage-and-shred-guarantees.md) | Where keys live, and what "shredded" honestly means | Accepted |
 | [0008](0008-authorization-semantics-over-cedar.md) | Authorization semantics over Cedar | Accepted |
+| [0009](0009-redaction-detectors-placeholders-final-scan.md) | Redaction: detector sets, placeholders and the final scan | Accepted |

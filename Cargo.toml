@@ -22,11 +22,16 @@ uaos-contracts = { path = "crates/uaos-contracts" }
 uaos-ledger = { path = "crates/uaos-ledger" }
 uaos-platform = { path = "crates/uaos-platform" }
 uaos-policy = { path = "crates/uaos-policy" }
+uaos-redact = { path = "crates/uaos-redact" }
 uaos-state = { path = "crates/uaos-state" }
 
 # External — every addition needs a justification in the PR (CONTRIBUTING.md §Dependencies).
 # aws-lc-rs: the single audited crypto family for TLS and primitives (plan D18).
 aws-lc-rs = { version = "1.18.2", default-features = false, features = ["aws-lc-sys", "alloc"] }
+# Multi-literal search for redaction anchors and known vault secrets (already shipped via regex).
+aho-corasick = "1.1.5"
+# SIMD byte search for the JSON string tokenizer (already shipped via aho-corasick).
+memchr = "2.8.3"
 cargo_metadata = "0.23.1"
 # Authorization (plan D8): formally specified, schema-validated, Apache-2.0. No optional extensions.
 cedar-policy = { version = "4.13.0", default-features = false }

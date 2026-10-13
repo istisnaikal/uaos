@@ -8,6 +8,24 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P2 WP2.3 — `uaos-redact` (ADR-0009): schema-agnostic secret detection and redaction with a
+  fail-closed final scan. Detector set v1 covers 11 high-risk classes:
+  - private keys, JWTs;
+  - Anthropic, OpenAI, Google and AWS keys;
+  - GitHub, GitLab and Slack tokens, Slack webhooks;
+  - Stripe keys;
+  - URL passwords.
+
+  Detector sets are versioned and pinned per session. Every JSON string (keys, unknown fields,
+  any depth) is scanned after decoding escapes, and placeholders are spliced into the original
+  bytes; clean content passes byte for byte. Placeholders `[REDACTED:<class>:<hmac tag>]` are
+  stable per pocket across turns and restarts. Redaction is a fixpoint (`redact∘redact = redact`).
+  `FinalScanner` blocks on any detection, any known vault secret or any scanner failure.
+  `redaction-corpus` gate **active**: synthetic corpus v1 (3,000 positives per class, 100,000 hard
+  negatives, generated at test time) shows 0 misses and 0 false positives. Recall is bound to the
+  claimed formats and this corpus; it is not a real-world rate. The gate is proven to bite by a
+  detector set that drops one AWS prefix. Measured on 1.7 MB (about 400k tokens): full-body
+  redaction p50 4.7 ms, final scan p50 4.7 ms.
 - P2 WP2.2 — `uaos-ledger`: pools, reservations, settlement, transfers and a structural hard cap
   in integer nano-USD (float arithmetic denied). A reservation beyond the available balance is
   refused before anything is recorded. Reservations are typestate tokens: `Held` can be released;

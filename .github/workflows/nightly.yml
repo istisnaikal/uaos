@@ -41,3 +41,7 @@ jobs:
         run: cargo test -p uaos-ledger --release --locked --test ledger simulation
         env:
           UAOS_SIM_CASES: "100000"
+      - name: Redaction corpus (fresh seed; merge runs pin corpus v1)
+        run: cargo test -p uaos-redact --release --locked --test corpus -- --nocapture
+        env:
+          UAOS_CORPUS_SEED: ${{ github.run_id }}

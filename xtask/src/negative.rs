@@ -281,6 +281,19 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "hard cap breached",
         },
         Case {
+            id: "redact-detector-drops-a-format",
+            gate: "redaction-corpus",
+            tool: None,
+            // A detector set that no longer recognises one AWS key prefix.
+            seed: replace(
+                "crates/uaos-redact/src/detect.rs",
+                "        anchor(\"ASIA\", C::AwsAccessKeyId, alnum, AWS),\n",
+                "",
+            ),
+            runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-redact", "--test", "corpus"] },
+            expect: "recall below",
+        },
+        Case {
             id: "dco-missing-signoff",
             gate: "dco",
             tool: Some("git"),
