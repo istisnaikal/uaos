@@ -11,12 +11,16 @@ guide tells you exactly what that bar is so nothing is a surprise at review time
    Build Tools* (C++ workload). Later phases build C dependencies (SQLite, aws-lc) that need a
    C compiler. If your default host is GNU, scope MSVC to this checkout only:
    `rustup override set 1.98.1-x86_64-pc-windows-msvc`.
-3. Developer tools (the same versions CI uses are resolved by `taiki-e/install-action`):
-   `cargo install --locked cargo-nextest cargo-deny cargo-vet`, and
+3. Developer tools, at the exact versions CI pins in `.github/workflows/ci.yml`:
+   `cargo install --locked cargo-nextest@0.9.148 cargo-deny@0.20.2 cargo-vet@0.10.0`, and
    [gitleaks](https://github.com/gitleaks/gitleaks) 8.30.1 (verify its release checksum).
 4. Run `cargo xtask ci` before every push. It runs exactly the merge fast lane CI runs.
 
 Paths with spaces and non-ASCII characters (`ü`, `ş`, `ı`) are supported and tested in CI.
+One upstream exception on Windows: aws-lc-sys cannot build when cargo's **target** directory
+contains characters outside the system ANSI code page (for example `ş` on an English-locale
+machine). If you hit `NASM failed for …chacha-x86_64.asm`, point the build output at an ASCII
+path, e.g. `set CARGO_TARGET_DIR=C:\uaos-target`. Turkish-locale Windows is not affected.
 
 ## The gates
 
