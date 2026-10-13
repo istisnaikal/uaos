@@ -76,6 +76,18 @@ pub enum LedgerError {
     /// An idempotency key was reused for a different entry.
     #[error("idempotency key {0:?} was already used for a different entry")]
     KeyConflict(String),
+    /// A caller-supplied idempotency key uses a form the ledger derives for itself.
+    #[error(
+        "idempotency key {0:?} uses a reserved form (rsv_… or a :in, :reserve, :release, :settle, :overrun suffix)"
+    )]
+    KeyReserved(String),
+    /// The ledger was rebuilt from the journal and must recover before it accepts new work.
+    #[error("the ledger must run recovery before it accepts new work")]
+    RecoveryRequired,
+    /// Recovery runs once, on a ledger rebuilt from the journal. In a running process,
+    /// reservations are closed through their tokens.
+    #[error("recovery runs only on a ledger rebuilt from the journal")]
+    NotReplayed,
     /// The entry was computed from a different balance than the pool holds.
     #[error("entry balance_before does not match the pool's available balance")]
     BalanceMismatch,
@@ -104,7 +116,16 @@ impl LedgerError {
         match self {
             Self::Insufficient { .. } => codes::BUDGET_HARD_STOP,
             Self::Sink(_) | Self::Poisoned => codes::JOURNAL_WRITE_FAILED,
-            _ => codes::BUDGET_SETTLEMENT_OVERRUN,
+            Self::KeyConflict(_) | Self::KeyReserved(_) => codes::BUDGET_KEY_CONFLICT,
+            Self::RecoveryRequired => codes::BUDGET_RECOVERY_REQUIRED,
+            Self::UnknownPool(_)
+            | Self::NotOpen(_)
+            | Self::ReservationReused(_)
+            | Self::BalanceMismatch
+            | Self::Invalid(_)
+            | Self::Inconsistent(_)
+            | Self::Overflow
+            | Self::NotReplayed => codes::BUDGET_LEDGER_INCONSISTENT,
         }
     }
 }
@@ -156,6 +177,31 @@ impl LedgerState {
         self.pending.len()
     }
 
+    /// Money already spent beyond reservations in `pool` whose closing overrun entry is not
+    /// recorded yet. It counts against the cap: a new hold may not use it.
+    fn owed(&self, pool: PoolId) -> Result<NanoUsd, LedgerError> {
+        self.open
+            .values()
+            .filter(|o| o.pool == pool)
+            .try_fold(NanoUsd::ZERO, |acc, o| match o.settled {
+                Some(actual) if actual > o.reserved => add(acc, sub(actual, o.reserved)?),
+                _ => Ok(acc),
+            })
+    }
+
+    /// The cap check for entries that take money out of `available`.
+    fn ensure_affordable(&self, pool_id: PoolId, pool: &PoolState, amount: NanoUsd) -> Result<(), LedgerError> {
+        let usable = sub(pool.available, self.owed(pool_id)?)?;
+        if usable < amount {
+            return Err(LedgerError::Insufficient {
+                pool: pool_id,
+                available: usable,
+                requested: amount,
+            });
+        }
+        Ok(())
+    }
+
     /// The entry previously recorded under `key`, if any.
     #[must_use]
     pub fn entry_for(&self, key: &IdempotencyKey) -> Option<&BudgetTx> {
@@ -174,7 +220,7 @@ impl LedgerState {
                 Err(LedgerError::KeyConflict(tx.idempotency_key.as_str().to_owned()))
             };
         }
-        tx.validate()?;
+        self.validate_entry(tx)?;
         let (pool, _commit) = self.plan(tx)?;
         if pool.available == tx.balance_after {
             Ok(())
@@ -201,7 +247,7 @@ impl LedgerState {
                 Err(LedgerError::KeyConflict(tx.idempotency_key.as_str().to_owned()))
             };
         }
-        tx.validate()?;
+        self.validate_entry(tx)?;
         let (pool, commit) = self.plan(tx)?;
         if pool.available != tx.balance_after {
             return Err(LedgerError::Inconsistent(
@@ -229,6 +275,18 @@ impl LedgerState {
         Ok(())
     }
 
+    /// The contract's per-entry rules. A hold that would leave the balance negative is reported
+    /// as the ledger reports its cap ([`LedgerError::Insufficient`], with the usable balance).
+    fn validate_entry(&self, tx: &BudgetTx) -> Result<(), LedgerError> {
+        match tx.validate() {
+            Err(BudgetTxError::CapExceeded(kind)) => {
+                self.plan(tx)?;
+                Err(LedgerError::Invalid(BudgetTxError::CapExceeded(kind)))
+            }
+            other => other.map_err(LedgerError::Invalid),
+        }
+    }
+
     /// Computes the pool's new balances and the bookkeeping change, without mutating anything.
     #[allow(
         clippy::too_many_lines,
@@ -236,8 +294,8 @@ impl LedgerState {
     )]
     fn plan(&self, tx: &BudgetTx) -> Result<(PoolState, Commit), LedgerError> {
         use BudgetTxKind as K;
-        let pool_exists = self.pools.contains_key(&tx.pool_id);
-        if tx.kind != K::Allocate && tx.kind != K::TransferIn && !pool_exists {
+        // Only an allocation creates a pool; a transfer cannot conjure one into existence.
+        if tx.kind != K::Allocate && !self.pools.contains_key(&tx.pool_id) {
             return Err(LedgerError::UnknownPool(tx.pool_id));
         }
         let mut pool = self.pools.get(&tx.pool_id).copied().unwrap_or_default();
@@ -250,22 +308,19 @@ impl LedgerState {
                 .ok_or(LedgerError::Inconsistent("entry without reservation"))
         };
         let commit = match tx.kind {
-            K::Allocate | K::Refund => {
+            K::Allocate => {
                 pool.available = add(pool.available, amount)?;
                 Commit::None
             }
+            // Nothing produces refunds yet. Accepting them on replay would let a crafted journal
+            // create money without an audit trail; they arrive with their producer.
+            K::Refund => return Err(LedgerError::Inconsistent("refunds have no producer yet")),
             K::Reserve => {
                 let id = reservation()?;
                 if self.open.contains_key(&id) || self.closed.contains(&id) {
                     return Err(LedgerError::ReservationReused(id));
                 }
-                if pool.available < amount {
-                    return Err(LedgerError::Insufficient {
-                        pool: tx.pool_id,
-                        available: pool.available,
-                        requested: amount,
-                    });
-                }
+                self.ensure_affordable(tx.pool_id, &pool, amount)?;
                 pool.available = sub(pool.available, amount)?;
                 pool.held = add(pool.held, amount)?;
                 Commit::Open(
@@ -337,7 +392,10 @@ impl LedgerState {
                     }
                     Commit::Close(id)
                 } else {
-                    Commit::None
+                    // Same as refunds: no producer yet, so replay refuses it.
+                    return Err(LedgerError::Inconsistent(
+                        "adjustments outside an overrun have no producer yet",
+                    ));
                 };
                 pool.available = add(pool.available, amount)?;
                 commit
@@ -349,13 +407,10 @@ impl LedgerState {
                 if to == tx.pool_id {
                     return Err(LedgerError::Inconsistent("transfer to the same pool"));
                 }
-                if pool.available < amount {
-                    return Err(LedgerError::Insufficient {
-                        pool: tx.pool_id,
-                        available: pool.available,
-                        requested: amount,
-                    });
+                if !self.pools.contains_key(&to) {
+                    return Err(LedgerError::UnknownPool(to));
                 }
+                self.ensure_affordable(tx.pool_id, &pool, amount)?;
                 pool.available = sub(pool.available, amount)?;
                 Commit::Pending(
                     tx.idempotency_key.clone(),
