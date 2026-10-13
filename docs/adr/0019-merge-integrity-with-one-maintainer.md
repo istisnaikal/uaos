@@ -31,7 +31,17 @@ and it was not applied.
    - **no bypass actors, including repository admins.**
 
    The ruleset is applied by the maintainer, or with the maintainer's explicit go-ahead, because
-   repository settings are not code.
+   repository settings are not code. The exact configuration is versioned in
+   [`appendix/0019-main-ruleset.json`](appendix/0019-main-ruleset.json) and applied with:
+
+   ```sh
+   gh api -X POST repos/<owner>/<repo>/rulesets --input docs/adr/appendix/0019-main-ruleset.json
+   ```
+
+   Its required checks are the 19 merge-lane jobs of `ci.yml` plus the CodeQL job and code
+   scanning results. "Up to date before merge" is on, so every pull request is tested against
+   the latest `main` before it lands. Merges are rebase-only, which keeps every commit's DCO
+   sign-off. A renamed or added job must be added to this file in the same change.
 2. **Review rule (D-20).**
    - Every work package's pull request carries an **independent adversarial review**: a
      fresh-context reviewer with a fixed checklist (invariants touched, red lines, whether each

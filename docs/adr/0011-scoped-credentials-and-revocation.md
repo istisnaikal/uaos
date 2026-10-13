@@ -50,8 +50,9 @@ Five properties are load-bearing:
 
    **child ⊆ parent** means each dimension is a subset, every child pattern is covered by some
    parent pattern (prefix containment), and the child's expiry is no later than the parent's.
-   The check runs at issue **and on every verify**, because a parent's scope may have been
-   narrowed since. Violations return `UAOS-IDENTITY-0002`.
+   The check runs at issue. Records are immutable, so narrowing a scope means re-issuing; the
+   check is repeated on every verify as defence in depth against a corrupted state. Violations
+   return `UAOS-IDENTITY-0002`. *(Amended 2026-10-13, review M6.)*
 5. **Authorization.** Verify yields `Principal::Agent(cred_id)` plus its effective scope. An
    Operation is allowed only if the scope covers (action, resource, pocket, pool) **and** the
    Cedar policy allows it (ADR-0008). The scope is an upper bound; deny wins; the explanation
@@ -64,12 +65,27 @@ Five properties are load-bearing:
      `epoch`.
    - Verify walks at most 4 links in an in-memory table rebuilt from the journal. The next
      verify after a revocation fails with `UAOS-IDENTITY-0001`.
-7. **Restore guard.**
-   - Every revocation and epoch bump also increments a monotonic counter in the OS keychain
-     (`<installation>/identity/revocation-seq`), and the journal record carries the new value.
-   - On open, if the keychain counter is ahead of the highest value in the journal, the data
-     directory predates a revocation. Agent verification **fails closed** with `UAOS-IDENTITY-0005`
-     until the maintainer re-issues keys.
+7. **Restore guard.** *(Amended 2026-10-13 after the WP2.4 adversarial review,
+   `docs/reviews/WP2.4.md`, findings H1, H2, M3 and M4.)*
+   - **Recording.** Every revocation and epoch bump carries a revocation count of exactly the
+     journal's count plus one. It is **journaled first**; the counter in the OS keychain
+     (`<installation>/identity/revocation-seq`) is raised **afterwards**.
+   - **On every verification and write,** the keychain counter is compared with the journal's
+     count:
+     - **equal:** normal;
+     - **one behind:** a keychain write was interrupted; verification continues and the next
+       open repairs it;
+     - **ahead:** the data directory predates a revocation. Verification **and every write**
+       fail closed with `UAOS-IDENTITY-0005`. An ordinary revoke, bump or issue must not be able
+       to close this gap, because that would silently un-revoke a key;
+     - **further behind, at or above 2^62, or malformed:** the counter was deleted or altered;
+       credentials are refused with `UAOS-IDENTITY-0012` (S1).
+   - **Restore recovery** is one atomic `restore_recovered` entry. It revokes every live master
+     and is the only entry allowed to jump the count to the keychain's. A crash therefore never
+     leaves a half-recovered directory that looks healthy. Recovery is refused when nothing is
+     stale.
+   - **The identity key is created only when no credential exists.** A key that is missing or
+     malformed while credentials exist is `UAOS-IDENTITY-0011` and is never silently replaced.
    - This is honest about its boundary: it detects a restored data directory, not a restored
      keychain.
 8. **Rotation.** Issue a successor with the same position and scope, then revoke the
