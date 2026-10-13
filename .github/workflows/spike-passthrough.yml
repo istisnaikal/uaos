@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Spike WP3.0b on all three runner OSes. Lives only on the spike branch; never merged.
+
+name: spike-passthrough
+
+on:
+  push:
+    branches: ["spike/wp3.0b-passthrough"]
+
+permissions:
+  contents: read
+
+jobs:
+  passthrough:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show active-toolchain || rustup toolchain install
+      - name: Passthrough overhead
+        shell: bash
+        working-directory: spikes/passthrough
+        env:
+          RUNNER_LABEL: ${{ matrix.os }}
+        run: |
+          cargo run --release | tee result.md
+          { echo "Runner: $RUNNER_LABEL"; echo; cat result.md; } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPIKE (plan v2 WP3.0b, hypothesis H2). Throwaway measurement code: not part of the workspace,
+# not product code. Its numbers feed ADR-0013 and the per-stage overhead budget; the code is
+# deleted (or rewritten with tests inside uaos-egress / uaos-api) at the end of WP3.0.
+[package]
+name = "spike-passthrough"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+
+[profile.release]
+debug = false
