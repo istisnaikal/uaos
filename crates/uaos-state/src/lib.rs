@@ -11,4 +11,5 @@
 
 #![deny(missing_docs)]
 
+pub mod chunks;
 pub mod journal;

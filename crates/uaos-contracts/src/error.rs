@@ -25,6 +25,8 @@ use crate::id::{CorrelationId, EventId};
 pub enum ErrorDomain {
     /// Journal and storage.
     Journal,
+    /// Encrypted content store and its keys.
+    Store,
     /// Authorization policy.
     Policy,
     /// Budget ledger.
@@ -47,6 +49,7 @@ impl ErrorDomain {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Journal => "JOURNAL",
+            Self::Store => "STORE",
             Self::Policy => "POLICY",
             Self::Budget => "BUDGET",
             Self::Redact => "REDACT",
@@ -190,6 +193,15 @@ registry! {
     JOURNAL_READER_TOO_OLD = Journal 6, Config, S3, retryable: false, leak: false,
         "error-journal-reader-too-old", "This binary is older than the journal's minimum reader version; it refuses to run instead of risking corruption.",
         "Upgrade, or restore the matching data-directory backup before downgrading.";
+    STORE_CHUNK_UNAVAILABLE = Store 1, User, Info, retryable: false, leak: false,
+        "error-store-chunk-unavailable", "The content is not available: it was never stored here, or it was deliberately shredded.",
+        "Check `uaos trace` for a chunk.shredded event; shredded content cannot be recovered by design.";
+    STORE_CHUNK_CORRUPT = Store 2, Security, S1, retryable: false, leak: false,
+        "error-store-chunk-corrupt", "Stored content failed authentication: it was altered or damaged outside UAOS.",
+        "Preserve the data directory and run `uaos doctor`; report the trace.";
+    STORE_KEYRING_UNAVAILABLE = Store 3, Internal, S2, retryable: true, leak: false,
+        "error-store-keyring-unavailable", "The encryption keys for this pocket could not be loaded, so its content cannot be read or written.",
+        "Run `uaos doctor` to check keychain access.";
     POLICY_DENIED = Policy 1, Policy, Info, retryable: false, leak: false,
         "error-policy-denied", "Policy denied the operation.",
         "Run `uaos policy explain <operation>` to see the matching rules.";
