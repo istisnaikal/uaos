@@ -132,24 +132,74 @@ jobs:
       - run: ./gitleaks git --no-banner --redact --verbose .
 
   dco:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - run: rustup show active-toolchain || rustup toolchain install
-      - run: cargo xtask dco "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+      - name: Commit range of this event
+        id: range
+        # pull_request, merge_group and pushes to main are all checked: a gate that only runs on
+        # pull requests can be skipped by pushing directly (plan v2 PD-17). A missing base fails
+        # closed rather than guessing a range.
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD: ${{ github.event.merge_group.head_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          case "$EVENT" in
+            pull_request) base="$PR_BASE"; head="$PR_HEAD" ;;
+            merge_group) base="$MG_BASE"; head="$MG_HEAD" ;;
+            push) base="$PUSH_BEFORE"; head="$PUSH_AFTER" ;;
+            *) echo "unsupported event: $EVENT" >&2; exit 1 ;;
+          esac
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "no base commit for $EVENT; refusing to guess a range" >&2
+            exit 1
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+      - run: cargo xtask dco "${{ steps.range.outputs.base }}..${{ steps.range.outputs.head }}"
 
   docs-sync:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - run: rustup show active-toolchain || rustup toolchain install
-      - run: cargo xtask docs-sync "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+      - name: Commit range of this event
+        id: range
+        # pull_request, merge_group and pushes to main are all checked: a gate that only runs on
+        # pull requests can be skipped by pushing directly (plan v2 PD-17). A missing base fails
+        # closed rather than guessing a range.
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD: ${{ github.event.merge_group.head_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          case "$EVENT" in
+            pull_request) base="$PR_BASE"; head="$PR_HEAD" ;;
+            merge_group) base="$MG_BASE"; head="$MG_HEAD" ;;
+            push) base="$PUSH_BEFORE"; head="$PUSH_AFTER" ;;
+            *) echo "unsupported event: $EVENT" >&2; exit 1 ;;
+          esac
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "no base commit for $EVENT; refusing to guess a range" >&2
+            exit 1
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+      - run: cargo xtask docs-sync "${{ steps.range.outputs.base }}...${{ steps.range.outputs.head }}"
 
   paths:
     # Founders and users have spaces and non-ASCII characters in their paths (`C:\BLUE SHOT`,
