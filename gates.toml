@@ -145,10 +145,11 @@ negative = ["journal-ack-without-write"]
 
 [[gate]]
 id = "budget-concurrency"
-source = "CLAUDE.md §4 CI merge blocker: budget concurrency"
+source = "CLAUDE.md §4 CI merge blocker: budget concurrency (ledger simulation: 256 schedules per merge, 100,000 nightly; contended threads)"
 lane = "merge"
-status = "pending"
-phase = "P2"
+status = "active"
+job = "test"
+negative = ["ledger-reserve-beyond-available"]
 
 [[gate]]
 id = "redaction-corpus"
@@ -237,9 +238,10 @@ gate = "journal-durability"
 
 [[behavior]]
 id = "budget-double-spend"
-source = "CLAUDE.md §4 required behavior: budget double-spend"
-status = "pending"
+source = "CLAUDE.md §4 required behavior: budget double-spend (single-use reservation ids, one closing entry; uaos-ledger tests)"
+status = "active"
 phase = "P2"
+gate = "budget-concurrency"
 
 [[behavior]]
 id = "pricing-reconciliation"

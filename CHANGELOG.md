@@ -8,6 +8,21 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P2 WP2.2 — `uaos-ledger`: pools, reservations, settlement, transfers and a structural hard cap
+  in integer nano-USD (float arithmetic denied). A reservation beyond the available balance is
+  refused before anything is recorded. Reservations are typestate tokens: `Held` can be released;
+  once `begin` makes it `InFlight` it can only be settled (releasing it does not compile). A
+  reservation id is single-use, so no duplicate token can exist. Every entry is recorded (journal
+  `budget.entry`, critical) before it takes effect. A recording failure poisons the ledger until it
+  is replayed from the journal. Recovery settles open reservations at full cost, marked estimated,
+  and never releases them; it also completes partial settlements and half-recorded transfers.
+  `budget-concurrency` gate **active**: a model-checked simulation runs 256 schedules per merge and
+  100,000 nightly (16.7 s locally), covering crashes and recording failures before and after the
+  write. Contended threads and the journal round trip are also tested. A seeded ledger that skips
+  the cap check proves the gate bites. Required behavior `budget-double-spend` is active.
+- Contract (non-breaking): `uaos.budget_tx/1` gains optional `counterparty_pool`, required by
+  `validate()` for `transfer_out`/`transfer_in` (`BudgetTxError::MissingCounterparty`), so recovery
+  can complete a half-recorded transfer. New kernel event type `budget.entry`.
 - P2 WP2.1 — `uaos-policy`: the reference monitor over Cedar (ADR-0008). Default deny; fail
   closed on any evaluation, request or entity validation error (Cedar alone would skip an erroring
   forbid); `Deny > Ask > Allow` via a validated `@effect("ask")`; strict loading (unique `@id`,
