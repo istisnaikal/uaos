@@ -177,11 +177,11 @@ negative = ["ledger-reserve-beyond-available"]
 
 [[gate]]
 id = "redaction-corpus"
-source = "CLAUDE.md §4 CI merge blocker: redaction corpus (detector set v1 vs synthetic corpus v1: 3,000 positives per class, 100,000 negatives; recall >= 99.9%, FP <= 0.5% per class)"
+source = "CLAUDE.md §4 CI merge blocker: redaction corpus (detector set v1 vs synthetic corpus v2: 3,000 positives per class in five evasion forms, 100,000 negatives in named families; recall >= 99.9% per class, FP <= 0.5% per class and per family)"
 lane = "merge"
 status = "active"
 job = "test"
-negative = ["redact-detector-drops-a-format"]
+negative = ["redact-detector-drops-a-format", "redact-url-password-stops-at-slash"]
 
 [[gate]]
 id = "kernel-tokens"

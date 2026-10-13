@@ -7,9 +7,14 @@
 //! the same on every turn and after every restart (prefix stability), differs between pockets,
 //! and reveals nothing about the secret without the key.
 //!
-//! Each JSON string is redacted to a fixpoint: after the replacements it is scanned again, so
-//! the output contains no detection and `redact(redact(x)) == redact(x)`. Content without a
-//! detection is returned borrowed, byte for byte.
+//! Each JSON string (and each text) is scanned in up to [`MAX_VIEWS`] views: as it is, then
+//! with one and two further levels of JSON or percent escapes decoded, so a secret nested in a
+//! tool call's arguments or a form-encoded DSN is found (review M1, M2). A finding in a nested
+//! view is mapped back through every view and replaced in the original bytes.
+//!
+//! Redaction runs to a fixpoint: after the replacements the content is scanned again, so the
+//! output contains no detection in any view and `redact(redact(x)) == redact(x)`. Content
+//! without a detection is returned borrowed, byte for byte.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,10 +27,11 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::RedactError;
 use crate::class::DataClass;
 use crate::detect::{DetectorSet, DetectorVersion, Finding, PLACEHOLDER_PREFIX};
-use crate::json::{decode, decode_mapped, strings};
+use crate::json::{Decoded, MAX_VIEWS, decode_nested, decode_with, strings};
 
-/// Rounds after which redaction that still finds something gives up (and blocks).
-const MAX_ROUNDS: usize = 4;
+/// Rounds after which redaction that still finds something gives up (and blocks). A round
+/// handles one view, so this leaves room for every view plus re-scans.
+const MAX_ROUNDS: usize = 8;
 /// Domain separation for placeholder tags.
 const PLACEHOLDER_DOMAIN: &[u8] = b"uaos.redact.placeholder/1\0";
 
@@ -204,40 +210,26 @@ impl Redactor {
         out
     }
 
-    /// Redacts plain text.
+    /// Redacts plain text, including secrets inside nested encodings of it (JSON escapes,
+    /// percent escapes; [`MAX_VIEWS`] views).
     ///
     /// # Errors
     /// Any detector failure: the caller must block the content.
     pub fn redact_text<'a>(&self, text: &'a str) -> Result<Redaction<'a, str>, RedactError> {
         let mut replacements = Replacements::default();
-        let mut current: Option<String> = None;
-        for _ in 0..MAX_ROUNDS {
-            let s = current.as_deref().unwrap_or(text);
-            let findings = self.detectors.scan(s.as_bytes())?;
-            if findings.is_empty() {
-                return Ok(Redaction {
-                    output: current.map_or(Cow::Borrowed(text), Cow::Owned),
-                    replacements: replacements.into_vec(),
-                });
-            }
-            let mut next = String::with_capacity(s.len());
-            let mut last = 0;
-            for f in &findings {
-                next.push_str(slice(s, last..f.range.start)?);
-                let secret = slice(s, f.range.clone())?;
-                let placeholder = self.placeholder(f.class, secret);
-                replacements.record(f.class, &placeholder, secret)?;
-                next.push_str(&placeholder);
-                last = f.range.end;
-            }
-            next.push_str(slice(s, last..s.len())?);
-            current = Some(next);
-        }
-        Err(RedactError::Unconverged)
+        let output = match self.fixpoint(text.as_bytes(), plain_view, &mut replacements)? {
+            None => Cow::Borrowed(text),
+            Some(bytes) => Cow::Owned(String::from_utf8(bytes).map_err(|_| RedactError::InvalidUtf8)?),
+        };
+        Ok(Redaction {
+            output,
+            replacements: replacements.into_vec(),
+        })
     }
 
-    /// Redacts every string of a JSON body (keys and values, at any depth, in any field) and
-    /// splices placeholders into the original bytes.
+    /// Redacts every string of a JSON body (keys and values, at any depth, in any field, and
+    /// JSON or percent-encoded text nested inside a string) and splices placeholders into the
+    /// original bytes.
     ///
     /// # Errors
     /// Invalid UTF-8, malformed JSON strings or any detector failure: the caller must block.
@@ -249,7 +241,7 @@ impl Redactor {
         for range in strings(json) {
             let range = range?;
             let content = json.get(range.clone()).ok_or(OUT_OF_BOUNDS)?;
-            if let Some(redacted) = self.redact_json_string(content, &mut replacements)? {
+            if let Some(redacted) = self.fixpoint(content, decode_with, &mut replacements)? {
                 let buf = out.get_or_insert_with(|| Vec::with_capacity(json.len()));
                 buf.extend_from_slice(json.get(copied..range.start).ok_or(OUT_OF_BOUNDS)?);
                 buf.extend_from_slice(&redacted);
@@ -269,36 +261,83 @@ impl Redactor {
         })
     }
 
-    /// Redacts the raw contents of one JSON string to a fixpoint; `None` if nothing was found.
-    fn redact_json_string(
+    /// Redacts `content` to a fixpoint: each round replaces the findings of the outermost view
+    /// that has any, then scans again. `None` if nothing was found.
+    fn fixpoint(
         &self,
         content: &[u8],
+        view: View,
         replacements: &mut Replacements,
     ) -> Result<Option<Vec<u8>>, RedactError> {
         let mut current: Option<Vec<u8>> = None;
         for _ in 0..MAX_ROUNDS {
             let raw = current.as_deref().unwrap_or(content);
-            let findings = self.detectors.scan(decode(raw)?.text.as_bytes())?;
-            if findings.is_empty() {
+            let Some(edits) = self.round(raw, view, replacements)? else {
                 return Ok(current);
-            }
-            let decoded = decode_mapped(raw)?;
+            };
             let mut next = Vec::with_capacity(raw.len());
             let mut last = 0;
-            for f in &findings {
-                let (start, end) = (decoded.raw(f.range.start)?, decoded.raw(f.range.end)?);
-                next.extend_from_slice(raw.get(last..start).ok_or(OUT_OF_BOUNDS)?);
-                let secret = slice(&decoded.text, f.range.clone())?;
-                let placeholder = self.placeholder(f.class, secret);
-                replacements.record(f.class, &placeholder, secret)?;
+            for (range, placeholder) in edits {
+                next.extend_from_slice(raw.get(last..range.start).ok_or(OUT_OF_BOUNDS)?);
                 next.extend_from_slice(placeholder.as_bytes());
-                last = end;
+                last = range.end;
             }
             next.extend_from_slice(raw.get(last..).ok_or(OUT_OF_BOUNDS)?);
             current = Some(next);
         }
         Err(RedactError::Unconverged)
     }
+
+    /// Scans the views of `raw` from the outside in and returns the edits for the first view
+    /// with findings, as raw ranges and placeholders in order. `None` when every view is clean.
+    fn round(&self, raw: &[u8], view: View, replacements: &mut Replacements) -> Result<Option<Vec<Edit>>, RedactError> {
+        // Scanning needs no offset map; it is built only once something is found.
+        let outer = view(raw, false)?;
+        let mut nested: Vec<Decoded<'static>> = Vec::new();
+        let mut findings = self.detectors.scan(outer.text.as_bytes())?;
+        while findings.is_empty() {
+            if nested.len() + 1 >= MAX_VIEWS {
+                return Ok(None);
+            }
+            let inner = nested.last().map_or(outer.text.as_bytes(), |d| d.text.as_bytes());
+            let Some(next) = decode_nested(inner, true) else {
+                return Ok(None);
+            };
+            let next = next.into_decoded()?;
+            findings = self.detectors.scan(next.text.as_bytes())?;
+            nested.push(next);
+        }
+        let outer = view(raw, true)?;
+        let text = nested.last().map_or(&outer.text, |d| &d.text);
+        let mut edits = Vec::with_capacity(findings.len());
+        for f in &findings {
+            let secret = slice(text, f.range.clone())?;
+            let placeholder = self.placeholder(f.class, secret);
+            replacements.record(f.class, &placeholder, secret)?;
+            // Back through each view to the raw bytes. Every map points at the start of the
+            // character or escape that produced a byte, so the range covers whole escapes.
+            let (mut start, mut end) = (f.range.start, f.range.end);
+            for level in nested.iter().rev().chain(std::iter::once(&outer)) {
+                start = level.raw(start)?;
+                end = level.raw(end)?;
+            }
+            edits.push((start..end, placeholder));
+        }
+        Ok(Some(edits))
+    }
+}
+
+/// A raw range and the placeholder that replaces it.
+type Edit = (Range<usize>, String);
+
+/// How the outermost view of some content is decoded: plain text, or a JSON string's contents.
+/// The flag asks for an offset map.
+type View = fn(&[u8], bool) -> Result<Decoded<'_>, RedactError>;
+
+fn plain_view(raw: &[u8], _mapped: bool) -> Result<Decoded<'_>, RedactError> {
+    std::str::from_utf8(raw)
+        .map(Decoded::plain)
+        .map_err(|_| RedactError::InvalidUtf8)
 }
 
 const OUT_OF_BOUNDS: RedactError = RedactError::DetectorFailure("span outside the content");

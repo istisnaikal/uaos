@@ -33,9 +33,27 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   (`docs/reviews/WP2.3-redact.md`, H1) and breaks red line 2. `FinalScanner`, `DetectorSet` and
   the crate-private JSON scanners now have manual `Debug` implementations that show only the
   version, counts and lengths. A canary test proves no 4-byte window of a vault secret reaches
-  `{:?}` or `{:#?}`; against the old code it fails on a 7,741-byte dump. The review's other
-  findings (URL passwords with `/#?'`, fail-open glue and length bounds, nested JSON, encodings,
-  a PEM slowdown) are open and come in the next change.
+  `{:?}` or `{:#?}`; against the old code it fails on a 7,741-byte dump.
+- `uaos-redact` hardening II closes the rest of the retroactive review (ADR-0009 Amendment 1;
+  detector set v1 corrected in place, because no release has shipped it):
+  - **URL passwords** containing `/`, `#`, `?`, `'` or `@` were not redacted (H2). The password
+    now ends at the last `@` that a host follows, before a hard stop.
+  - **Keys glued to separators** (`${KEY:-sk-ant-…}`, `_ghp_…`, `KEY_sk_live_…`), keys followed by
+    more word characters, and runs longer than a format allowed all leaked (H3). They are now
+    covered whole.
+  - **Nested encodings** (M1, M2): JSON inside a JSON string (tool arguments, `partial_json`) and
+    percent-encoded text are scanned in three views by redaction, by `check_json` and by
+    `check_bytes`.
+  - **Smaller fixes:** overlapping anchors are found (L2), scanning is linear, with a test bound
+    on adversarial inputs (M3), and placeholders follow an exact grammar (L3).
+  - **Gate `redaction-corpus` now measures corpus v2** (M4): five evasion forms, every printable
+    URL password byte, an independent oracle, and false positives per family. It reports 0
+    misses and 0 false positives. The pre-fix detectors scored 24.8–64.7 % recall per class on
+    it. The new negative case `redact-url-password-stops-at-slash` proves the gate catches a
+    one-byte regression.
+  - **Cost** on a 1.8 MB history where every message is a tool call's JSON arguments: final scan
+    p50 7.7 ms. That is above the plan's 6 ms per-stage hypothesis, and is recorded as a WP3.8
+    input.
 
 ### Added
 
