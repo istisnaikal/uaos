@@ -121,48 +121,54 @@ pub enum CryptoError {
     Open,
 }
 
-fn aes_key(key: &SecretKey) -> Result<aead::LessSafeKey, CryptoError> {
-    aead::UnboundKey::new(&aead::AES_256_GCM, key.expose_secret())
-        .map(aead::LessSafeKey::new)
-        .map_err(|_| CryptoError::Seal)
+fn aes_key(key: &SecretKey) -> Result<aead::RandomizedNonceKey, CryptoError> {
+    aead::RandomizedNonceKey::new(&aead::AES_256_GCM, key.expose_secret()).map_err(|_| CryptoError::Seal)
 }
 
-/// Encrypts and authenticates `plaintext` with AES-256-GCM, binding `aad`. Returns the
-/// ciphertext followed by the tag. Every (key, nonce) pair must be used once; callers here use
-/// a fresh random key per message, so nonce reuse cannot occur.
+/// Output of [`seal`]: the nonce aws-lc chose, and the ciphertext followed by the tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sealed {
+    /// Nonce generated inside aws-lc for this message. Store it alongside the ciphertext.
+    pub nonce: [u8; NONCE_LEN],
+    /// Ciphertext followed by the authentication tag.
+    pub ciphertext: Vec<u8>,
+}
+
+/// Encrypts and authenticates `plaintext` with AES-256-GCM, binding `aad`.
+///
+/// **UAOS code never chooses a nonce.** aws-lc generates a fresh random nonce inside the AEAD
+/// and returns it, so nonce reuse or a constant nonce cannot be introduced by a caller. (This
+/// is the one randomness source not routed through `uaos_platform::Rng`: nonce generation
+/// belongs to the audited crypto library, and no test depends on nonce values.)
 ///
 /// # Errors
-/// [`CryptoError::Seal`] if the key cannot be set up.
-pub fn seal(key: &SecretKey, nonce: [u8; NONCE_LEN], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+/// [`CryptoError::Seal`] if the key cannot be set up or encryption fails.
+pub fn seal(key: &SecretKey, aad: &[u8], plaintext: &[u8]) -> Result<Sealed, CryptoError> {
     let key = aes_key(key)?;
-    let mut in_out = plaintext.to_vec();
-    key.seal_in_place_append_tag(
-        aead::Nonce::assume_unique_for_key(nonce),
-        aead::Aad::from(aad),
-        &mut in_out,
-    )
-    .map_err(|_| CryptoError::Seal)?;
-    Ok(in_out)
+    let mut ciphertext = plaintext.to_vec();
+    let nonce = key
+        .seal_in_place_append_tag(aead::Aad::from(aad), &mut ciphertext)
+        .map_err(|_| CryptoError::Seal)?;
+    Ok(Sealed {
+        nonce: *nonce.as_ref(),
+        ciphertext,
+    })
 }
 
-/// Verifies and decrypts the output of [`seal`].
+/// Verifies and decrypts the output of [`seal`], given the nonce stored with it.
 ///
 /// # Errors
 /// [`CryptoError::Open`] if the key, nonce or `aad` differ, or the data was altered.
 pub fn open(
     key: &SecretKey,
-    nonce: [u8; NONCE_LEN],
+    nonce: &[u8; NONCE_LEN],
     aad: &[u8],
     ciphertext_and_tag: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     let key = aes_key(key).map_err(|_| CryptoError::Open)?;
     let mut in_out = ciphertext_and_tag.to_vec();
     let plaintext_len = key
-        .open_in_place(
-            aead::Nonce::assume_unique_for_key(nonce),
-            aead::Aad::from(aad),
-            &mut in_out,
-        )
+        .open_in_place(aead::Nonce::from(nonce), aead::Aad::from(aad), &mut in_out)
         .map_err(|_| CryptoError::Open)?
         .len();
     in_out.truncate(plaintext_len);
@@ -213,15 +219,28 @@ mod tests {
     fn aead_round_trip_and_binding() {
         let key = SecretKey::generate(&SimRng::new(1)).unwrap();
         let other = SecretKey::generate(&SimRng::new(2)).unwrap();
-        let sealed = seal(&key, [7; NONCE_LEN], b"ctx", b"hello").unwrap();
-        assert_eq!(sealed.len(), 5 + TAG_LEN);
-        assert_eq!(open(&key, [7; NONCE_LEN], b"ctx", &sealed).unwrap(), b"hello");
-        assert_eq!(open(&key, [7; NONCE_LEN], b"other", &sealed), Err(CryptoError::Open));
-        assert_eq!(open(&key, [8; NONCE_LEN], b"ctx", &sealed), Err(CryptoError::Open));
-        assert_eq!(open(&other, [7; NONCE_LEN], b"ctx", &sealed), Err(CryptoError::Open));
-        let mut tampered = sealed.clone();
+        let sealed = seal(&key, b"ctx", b"hello").unwrap();
+        assert_eq!(sealed.ciphertext.len(), 5 + TAG_LEN);
+        assert_eq!(open(&key, &sealed.nonce, b"ctx", &sealed.ciphertext).unwrap(), b"hello");
+        assert_eq!(
+            open(&key, &sealed.nonce, b"other", &sealed.ciphertext),
+            Err(CryptoError::Open)
+        );
+        let mut wrong_nonce = sealed.nonce;
+        wrong_nonce[0] ^= 1;
+        assert_eq!(
+            open(&key, &wrong_nonce, b"ctx", &sealed.ciphertext),
+            Err(CryptoError::Open)
+        );
+        assert_eq!(
+            open(&other, &sealed.nonce, b"ctx", &sealed.ciphertext),
+            Err(CryptoError::Open)
+        );
+        let mut tampered = sealed.ciphertext.clone();
         tampered[0] ^= 1;
-        assert_eq!(open(&key, [7; NONCE_LEN], b"ctx", &tampered), Err(CryptoError::Open));
+        assert_eq!(open(&key, &sealed.nonce, b"ctx", &tampered), Err(CryptoError::Open));
+        let again = seal(&key, b"ctx", b"hello").unwrap();
+        assert_ne!(again.nonce, sealed.nonce, "every message gets a fresh nonce");
     }
 
     #[test]
