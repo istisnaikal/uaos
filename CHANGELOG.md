@@ -8,6 +8,12 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P2 WP2.1 — `uaos-policy`: the reference monitor over Cedar (ADR-0008). Default deny; fail
+  closed on any evaluation, request or entity validation error (Cedar alone would skip an erroring
+  forbid); `Deny > Ask > Allow` via a validated `@effect("ask")`; strict loading (unique `@id`,
+  known annotations only, strict schema validation against `uaos.cedarschema`); time-bounded
+  grants compiled into scoped permits; per-action slicing proven decision-preserving; explanations
+  for every decision. 1,000 policies: p99 662 µs.
 - P1 WP1.6 — `journal-durability` gate **active**: `uaos-testkit` (dev-only) kills the production
   journal in a real process at random acknowledgement counts and random times, and verifies every
   acknowledged record by sequence and hash. 40 kills per OS per merge, 10,000 per OS nightly
