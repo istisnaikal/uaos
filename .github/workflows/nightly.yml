@@ -45,3 +45,23 @@ jobs:
         run: cargo test -p uaos-redact --release --locked --test corpus -- --nocapture
         env:
           UAOS_CORPUS_SEED: ${{ github.run_id }}
+
+  ack-latency:
+    # Production journal and chunk-store acknowledgement latency per OS (plan v2 PD-01; ADR-0003
+    # "Measured numbers"). The table goes to the run summary; nothing is uploaded elsewhere.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Acknowledgement latency (production journal and chunk store)
+        shell: bash
+        env:
+          RUNNER_LABEL: ${{ matrix.os }}
+        run: |
+          cargo run -q -p uaos-testkit --release --locked --bin journal-ack-bench -- "$RUNNER_TEMP/ack-latency" | tee ack-latency.md
+          { echo "Runner: $RUNNER_LABEL"; echo; cat ack-latency.md; } >> "$GITHUB_STEP_SUMMARY"

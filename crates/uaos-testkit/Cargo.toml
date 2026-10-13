@@ -19,5 +19,10 @@ name = "journal-crash-writer"
 path = "src/bin/journal-crash-writer.rs"
 test = false
 
+[[bin]]
+name = "journal-ack-bench"
+path = "src/bin/journal-ack-bench.rs"
+test = false
+
 [lints]
 workspace = true

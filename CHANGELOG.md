@@ -41,6 +41,21 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **ADR-0019:** merge integrity with one maintainer: a ruleset with no bypass, an adversarial
     review per work package, and a selective 24 h cool-off.
 
+- `journal-ack-bench` (uaos-testkit) and a nightly `ack-latency` job on Linux, macOS and Windows.
+  They measure the production journal's acknowledgement latency (balanced, strict, group flush)
+  and the chunk store's per-chunk write (plan v2 PD-01), and the table goes to the run summary.
+  First local run (Windows 10, entry-level NVMe):
+
+  | Series | p99 | Other |
+  |---|---|---|
+  | Balanced ack | 29 µs | |
+  | Strict ack | 0.91 ms | |
+  | Group flush | 0.68 ms | |
+  | New 4 KiB chunk | 3.5 ms | p99.9 11.9 ms |
+
+  The chunk path is the evidence behind PD-18 / ADR-0018: per-chunk flushes do not fit the
+  overhead budget.
+
 - P2 WP2.3 — `uaos-redact` (ADR-0009): schema-agnostic secret detection and redaction with a
   fail-closed final scan. Detector set v1 covers 11 high-risk classes:
   - private keys, JWTs;
