@@ -1,5 +1,6 @@
 # Security-sensitive paths require security-owner review (GOVERNANCE.md §Reviews).
-# A `@uaos-project/security-owners` team replaces the individual owner once a second security owner exists.
+# A security-owners team replaces the individual owner once the project moves to an organisation
+# and a second security owner exists.
 /crates/uaos-contracts/   @istisnaikal
 /crates/uaos-platform/    @istisnaikal
 /schemas/                 @istisnaikal

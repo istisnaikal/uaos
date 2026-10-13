@@ -67,7 +67,7 @@ All spaces follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 **Private conduct channel.** PENDING-DECISION(D-08): a dedicated conduct address. Until it
 exists, report privately through the repository's private reporting form
-(<https://github.com/uaos-project/uaos/security/advisories/new>) with the title prefix
+(<https://github.com/istisnaikal/uaos/security/advisories/new>) with the title prefix
 `[CONDUCT]`; it reaches maintainers only and is never published. A release cannot be cut while
 this marker exists.
 

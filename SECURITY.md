@@ -5,7 +5,7 @@ UAOS holds API keys and sees agent traffic. We treat its security as the product
 ## Reporting a vulnerability
 
 **Do not open a public issue.** Report privately through GitHub's *private vulnerability
-reporting*: <https://github.com/uaos-project/uaos/security/advisories/new> ("Security" tab →
+reporting*: <https://github.com/istisnaikal/uaos/security/advisories/new> ("Security" tab →
 "Report a vulnerability"). Reports reach the maintainers only.
 
 Please include: affected version or commit, platform, reproduction steps, and impact. Redact any
