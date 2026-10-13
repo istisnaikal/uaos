@@ -5,6 +5,7 @@ No release is cut while any gate is pending or any open decision remains:
 ```sh
 cargo xtask gates --release       # zero pending gates
 cargo xtask decisions --release   # zero open-decision markers
+cargo xtask evidence --streak 7   # nightly proofs green, <= 48 h old, from this exact code
 ```
 
 ## Versioning

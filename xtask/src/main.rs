@@ -14,6 +14,7 @@ mod arch;
 mod dco;
 mod decisions;
 mod docs_sync;
+mod evidence;
 mod gates;
 mod headers;
 mod negative;
@@ -26,6 +27,7 @@ const USAGE: &str = "\
 usage: cargo xtask <command>
 
   ci                     run the local merge fast lane (fmt, clippy, tests, all xtask checks)
+  quick                  the fast subset for contributors: fmt, clippy, unit tests, local checks
   arch-check             enforce dependency direction (arch.toml)
   schemas                regenerate schemas/ from uaos-contracts
   schema-check           fail on schema drift or unversioned breaking changes
@@ -34,6 +36,8 @@ usage: cargo xtask <command>
   decisions [--release]  list PENDING-DECISION markers; --release fails if any exist
   dco <rev-range>        fail if a commit in the range lacks a matching Signed-off-by
   docs-sync <rev-range>  fail if schemas/ changed in the range without a CHANGELOG.md entry
+  evidence [--candidate <rev>] [--streak N] [--max-age-hours H]
+                         fail unless nightly evidence is green, fresh and from the candidate's code
   negative [--require-all-tools] [case...]
                          prove each gate fails on a seeded violation
 ";
@@ -46,6 +50,8 @@ fn main() -> ExitCode {
     };
     let result = match command.as_str() {
         "ci" => ci(),
+        "quick" => quick(),
+        "evidence" => evidence::check(&util::workspace_root(), rest),
         "arch-check" => arch::check(&util::workspace_root()),
         "schemas" => schemas::write(&util::workspace_root()),
         "schema-check" => schemas::check(&util::workspace_root()),
@@ -74,6 +80,41 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The fast subset a contributor runs before pushing (plan v2 PD-22): formatting, lints, unit
+/// tests (`--lib --bins`, so the long simulations under `tests/` are skipped) and every local
+/// structural check. CI still runs the full lane.
+fn quick() -> Result<(), String> {
+    let root = util::workspace_root();
+    util::run_step(&root, "fmt", "cargo", &["fmt", "--all", "--", "--check"])?;
+    util::run_step(
+        &root,
+        "clippy",
+        "cargo",
+        &[
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
+    util::run_step(
+        &root,
+        "unit tests",
+        "cargo",
+        &["test", "--workspace", "--locked", "--lib", "--bins"],
+    )?;
+    arch::check(&root)?;
+    schemas::check(&root)?;
+    headers::check(&root)?;
+    gates::check(&root, false)?;
+    decisions::check(&root, false)?;
+    println!("xtask quick: passed (the full lane is `cargo xtask ci`)");
+    Ok(())
 }
 
 /// The merge fast lane, in the same order CI runs it.
