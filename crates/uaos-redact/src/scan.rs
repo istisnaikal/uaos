@@ -66,10 +66,22 @@ impl fmt::Display for Blocked {
 impl std::error::Error for Blocked {}
 
 /// Scans outbound bytes; built once per configuration (detector version, vault contents).
-#[derive(Debug)]
+///
+/// `Debug` shows the detector version and how many known secrets are loaded, nothing else: the
+/// automaton over known secrets encodes their bytes, and a derived `Debug` would print it.
 pub struct FinalScanner {
     detectors: DetectorSet,
     known: Option<AhoCorasick>,
+    known_count: usize,
+}
+
+impl fmt::Debug for FinalScanner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FinalScanner")
+            .field("version", &self.detectors.version())
+            .field("known_secrets", &self.known_count)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FinalScanner {
@@ -87,6 +99,7 @@ impl FinalScanner {
         if known.iter().any(|s| s.len() < MIN_KNOWN_SECRET_LEN) {
             return Err(RedactError::KnownSecretTooShort);
         }
+        let known_count = known.len();
         let known = if known.is_empty() {
             None
         } else {
@@ -99,6 +112,7 @@ impl FinalScanner {
         Ok(Self {
             detectors: DetectorSet::new(version)?,
             known,
+            known_count,
         })
     }
 

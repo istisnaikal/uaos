@@ -9,6 +9,7 @@
 //! error, and every error blocks the content (fail closed).
 
 use std::borrow::Cow;
+use std::fmt;
 use std::ops::Range;
 
 use crate::RedactError;
@@ -18,10 +19,19 @@ pub(crate) fn strings(raw: &[u8]) -> Strings<'_> {
     Strings { raw, pos: 0 }
 }
 
-#[derive(Debug)]
 pub(crate) struct Strings<'a> {
     raw: &'a [u8],
     pos: usize,
+}
+
+impl fmt::Debug for Strings<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Raw bytes may be secrets: lengths only.
+        f.debug_struct("Strings")
+            .field("len", &self.raw.len())
+            .field("pos", &self.pos)
+            .finish()
+    }
 }
 
 impl Iterator for Strings<'_> {
@@ -54,12 +64,20 @@ impl Iterator for Strings<'_> {
 }
 
 /// A decoded string and the way back to its raw bytes.
-#[derive(Debug)]
 pub(crate) struct Decoded<'a> {
     pub(crate) text: Cow<'a, str>,
     /// For each decoded byte, the raw offset of the character or escape that produced it, plus
     /// one final entry for the raw length. `None` when decoded and raw bytes coincide.
     map: Option<Vec<usize>>,
+}
+
+impl fmt::Debug for Decoded<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The decoded text may be a secret: length only.
+        f.debug_struct("Decoded")
+            .field("len", &self.text.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Decoded<'_> {
