@@ -8,6 +8,12 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P1 WP1.4 — `uaos-state::projection`: SQLite (bundled, WAL) projections of the journal —
+  event index, operation states, cursor — holding metadata only. `catch_up` continues from the
+  cursor and rebuilds automatically when the cursor no longer matches the journal (another
+  journal, rewritten history, damaged cache). Queries: operation state, correlation trace,
+  open intents (the input of crash recovery). Property test: incremental maintenance across
+  journal crashes equals a rebuild from scratch, compared by canonical dump.
 - P1 WP1.3 — `uaos-state::chunks`: encrypted, content-addressed chunk store. References are
   `HMAC-SHA-256(pocket key, content)` (deduplicated per pocket, unlinkable across pockets);
   every chunk has a random AES-256-GCM data key, context-bound to pocket and reference, wrapped
