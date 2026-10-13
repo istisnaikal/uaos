@@ -59,6 +59,18 @@ overhead p95 ≤ 25 ms. Two stores (journal + SQLite) written independently drif
 
 Critical-ack p50/p99 and the window W per OS are measured and recorded here before the P1 gate.
 
+## Production-journal kill results (WP1.6)
+
+The `journal-durability` gate kills the real `Journal` (`OsFs`, system clock, OS randomness) in a
+separate process, alternating kills after *k* acknowledgements and after random delays, and
+checks every acknowledged record by sequence number **and hash**. 40 kills per OS run on every
+merge; 10,000 per OS run nightly.
+
+| OS | Kills | Acknowledged records lost |
+|---|---|---|
+| Windows 10, entry-level NVMe (local, 2026-10-13) | 1,000 | 0 |
+| Linux, macOS, Windows (CI) | 40 per merge, 10,000 nightly | reported by CI |
+
 ## Verification
 
 From P1 (`journal-durability` gate): 10,000 randomized kill -9 / `TerminateProcess` runs per OS

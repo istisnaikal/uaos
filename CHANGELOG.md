@@ -8,6 +8,12 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P1 WP1.6 — `journal-durability` gate **active**: `uaos-testkit` (dev-only) kills the production
+  journal in a real process at random acknowledgement counts and random times, and verifies every
+  acknowledged record by sequence and hash. 40 kills per OS per merge, 10,000 per OS nightly
+  (new `nightly` workflow, which also runs the 20,000-scenario crash simulation). The gate is
+  proven to bite by a seeded journal that acknowledges without writing. Required behavior
+  `disk-full` is active.
 - P1 WP1.5 — OS keychain (ADR-0007): `uaos-platform::keychain` (`OsKeychain` over keyring-core with
   an explicitly passed native store — Windows Credential Manager, macOS Keychain, Secret Service
   over pure-Rust zbus — and a fault-injecting `SimKeychain`); `KeychainKeyring`, the production

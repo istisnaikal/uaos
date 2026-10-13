@@ -1551,6 +1551,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "uaos-testkit"
+version = "0.0.0"
+dependencies = [
+ "uaos-contracts",
+ "uaos-platform",
+ "uaos-state",
+]
+
+[[package]]
 name = "uds_windows"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

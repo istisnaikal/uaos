@@ -137,10 +137,11 @@ negative_exempt = "Environmental: the job itself is the positive proof on Window
 # ── pending: subjects built in later phases ──────────────────────────────────────────────
 [[gate]]
 id = "journal-durability"
-source = "CLAUDE.md §4 CI merge blocker: journal durability"
+source = "CLAUDE.md §4 CI merge blocker: journal durability (40 real kills per OS per merge; 10,000 per OS nightly)"
 lane = "merge"
-status = "pending"
-phase = "P1"
+status = "active"
+job = "test"
+negative = ["journal-ack-without-write"]
 
 [[gate]]
 id = "budget-concurrency"
@@ -229,9 +230,10 @@ phase = "P5"
 # ── required behaviors (CLAUDE.md §4) ────────────────────────────────────────────────────
 [[behavior]]
 id = "disk-full"
-source = "CLAUDE.md §4 required behavior: disk full"
-status = "pending"
+source = "CLAUDE.md §4 required behavior: disk full (journal fails closed and recovers; uaos-state tests)"
+status = "active"
 phase = "P1"
+gate = "journal-durability"
 
 [[behavior]]
 id = "budget-double-spend"

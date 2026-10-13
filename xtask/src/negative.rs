@@ -255,6 +255,19 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "unvetted",
         },
         Case {
+            id: "journal-ack-without-write",
+            gate: "journal-durability",
+            tool: None,
+            // A journal that acknowledges a record without handing it to the OS.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "match self.active.append(&line) {",
+                "match Ok::<(), FsError>(()) {",
+            ),
+            runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-testkit", "--test", "kill"] },
+            expect: "lost or changed",
+        },
+        Case {
             id: "dco-missing-signoff",
             gate: "dco",
             tool: Some("git"),
