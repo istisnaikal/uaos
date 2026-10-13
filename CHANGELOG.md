@@ -8,6 +8,16 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P1 WP1.3 — `uaos-state::chunks`: encrypted, content-addressed chunk store. References are
+  `HMAC-SHA-256(pocket key, content)` (deduplicated per pocket, unlinkable across pockets);
+  every chunk has a random AES-256-GCM data key, context-bound to pocket and reference, wrapped
+  by a versioned pocket KEK. Writes are atomic and durable before acknowledgement. Shredding
+  rotates the KEK first, deletes, re-wraps survivors and destroys old versions, so restored
+  backups of a shredded key are useless; an interrupted rotation is finished on open.
+  `PocketKeyring` interface with an in-memory double (OS keychain in WP1.5).
+- `uaos-platform::crypto`: `SecretKey` (zeroized, never printed), HMAC-SHA-256, AES-256-GCM.
+- Error registry: `STORE` domain (`UAOS-STORE-0001..0003`).
+- `SimFs::fail_sync_after(n)` to aim a flush fault at a specific step.
 - P1 WP1.2 — `uaos-state` journal core: append-only `uaos.event/1` segments chained over exact
   line bytes from a per-journal genesis; atomic manifest with sealed/suspect/active segments;
   one-daemon-per-data-directory lock; crash recovery that verifies the whole chain, flushes

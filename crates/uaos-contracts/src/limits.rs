@@ -69,3 +69,8 @@ pub const JOURNAL_SEGMENT_TARGET: Bytes = Bytes(64 * 1024 * 1024);
 /// stable storage within this time. Spike H1 measured group-fsync p99.9 at 5.9 ms on an
 /// entry-level `NVMe` drive, so 50 ms is reachable with wide margin while batching flushes.
 pub const DEFAULT_FLUSH_WINDOW: Millis = Millis(50);
+
+/// Maximum size of one content chunk. Chunks are individual messages or tool payloads; 16 MiB
+/// admits any realistic single message while bounding the memory one read can demand. Larger
+/// content is split by the caller.
+pub const MAX_CHUNK: Bytes = Bytes(16 * 1024 * 1024);

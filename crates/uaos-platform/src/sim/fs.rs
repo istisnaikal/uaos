@@ -40,7 +40,8 @@ struct State {
     next_id: FileId,
     generation: u64,
     capacity: Option<u64>,
-    fail_next_sync: bool,
+    /// Number of flushes to let through before failing one (`Some(0)` = fail the next).
+    sync_fault_after: Option<u32>,
 }
 
 impl State {
@@ -72,9 +73,23 @@ impl State {
         self.nodes.retain(|id, _| referenced.contains(id));
     }
 
+    /// Consumes one flush from the fault countdown; returns `true` if this flush must fail.
+    fn sync_should_fail(&mut self) -> bool {
+        match self.sync_fault_after {
+            Some(0) => {
+                self.sync_fault_after = None;
+                true
+            }
+            Some(n) => {
+                self.sync_fault_after = Some(n - 1);
+                false
+            }
+            None => false,
+        }
+    }
+
     fn take_sync_fault(&mut self, id: FileId, op: &'static str) -> Result<(), FsError> {
-        if self.fail_next_sync {
-            self.fail_next_sync = false;
+        if self.sync_should_fail() {
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.data.truncate(node.durable_len);
             }
@@ -111,7 +126,12 @@ impl SimFs {
     /// Makes the next flush (`sync_data`, `sync_dir`, `write_atomic`) fail. For file flushes,
     /// the unflushed bytes are discarded.
     pub fn fail_next_sync(&self) {
-        lock(&self.state).fail_next_sync = true;
+        self.fail_sync_after(0);
+    }
+
+    /// Lets `n` flushes succeed, then makes the next one fail (as [`SimFs::fail_next_sync`]).
+    pub fn fail_sync_after(&self, n: u32) {
+        lock(&self.state).sync_fault_after = Some(n);
     }
 
     /// Simulates the process dying: handles become stale and locks are released; everything
@@ -299,8 +319,7 @@ impl Fs for SimFs {
         if !s.dirs.contains(path) {
             return Err(FsError::NotFound { op: "sync_dir" });
         }
-        if s.fail_next_sync {
-            s.fail_next_sync = false;
+        if s.sync_should_fail() {
             return Err(FsError::SyncFailed { op: "sync_dir" });
         }
         let in_dir = |p: &PathBuf| p.parent() == Some(path);

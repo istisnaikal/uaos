@@ -834,6 +834,7 @@ dependencies = [
  "proptest",
  "thiserror",
  "uaos-contracts",
+ "zeroize",
 ]
 
 [[package]]
