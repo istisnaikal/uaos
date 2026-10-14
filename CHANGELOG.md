@@ -12,11 +12,15 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   Amendment 1):
   - **Crafted policy text aborted the process** (about 80 nested parentheses overflowed Cedar's
     parser). Text is now bounded before Cedar sees it: 8 nested brackets, 16 `if`s, 256 operators
-    and 16 KiB per policy, and 4 MiB in all. The bounds were measured against the actual
-    overflow points.
-  - **Approvals could never complete.** A grant is now the approval: it satisfies a matching
-    `@effect("ask")` policy and allows on its own. A forbid still wins over it. Grants are
-    matched natively, and a property proves this equals compiling them to permits.
+    (brackets included) and 16 KiB per policy, and 4 MiB in all. The scanner skips comments
+    exactly as Cedar's lexer does. The bounds were measured against the actual overflow
+    points.
+  - **Approvals could never complete.** A grant is now the approval:
+    - it satisfies the `@effect("ask")` policies it lists, and allows on its own;
+    - it covers nothing riskier than approved (risk tier, data classes);
+    - a forbid still wins over it.
+
+    Grants are matched natively, and a property proves this equals compiling them to permits.
   - **The proofs behind the slicing and fail-closed claims did not hold.** Slicing is now
     checked against the complete loaded set. The fail-closed property always has an erroring
     forbid and a permit both apply.
@@ -316,9 +320,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 - `uaos-policy` decisions slice by exact resource within an action, and grants are indexed. The
   bench measures three mixes:
-  - 1,000 mixed policies: p99 678 µs;
-  - 1,000 policies on one action: p99 419 µs, down from 1.7 ms;
-  - 10,000 grants: p99 176 µs, down from 19 ms.
+  - 1,000 mixed policies: p99 688 µs;
+  - 1,000 policies on one action: p99 514 µs, down from 1.7 ms;
+  - 10,000 grants: p99 226 µs, down from 19 ms.
 - `docs/claims.md`: the authorization, ledger and redaction rows now state exactly what their
   gates prove, as narrowed by the retroactive reviews.
 

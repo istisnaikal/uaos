@@ -240,10 +240,11 @@ impl Decision {
     }
 }
 
-/// A time-bounded capability, usually the recorded result of an approval. It matches only this
-/// principal, action, resource and pocket, and only while `now_ms < expires_at_ms`. It is
-/// equivalent to a Cedar permit with those constraints, and also satisfies a matching ask policy;
-/// a forbid still wins (ADR-0008 Amendment 1).
+/// A time-bounded capability, usually the recorded result of an approval. It covers only this
+/// principal, action, resource and pocket, only while `now_ms < expires_at_ms`, and only
+/// requests no riskier than approved (risk tier, data classes). It is equivalent to a Cedar
+/// permit with those constraints, and it also satisfies the ask policies it lists in
+/// `approves`. A forbid still wins (ADR-0008 Amendment 1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
     /// Identifier, shown in explanations as `grant:<id>`.
@@ -258,4 +259,13 @@ pub struct Grant {
     pub pocket: PocketId,
     /// Unix milliseconds from which on it no longer applies (exclusive end).
     pub expires_at_ms: u64,
+    /// The highest risk tier the approval covered; a riskier request is not covered.
+    pub max_risk_tier: RiskTier,
+    /// The data classes the approved content carried; a request with any other class is not
+    /// covered.
+    pub data_classes: BTreeSet<Name>,
+    /// `@id`s of the ask policies this grant was issued to satisfy. A grant satisfies the asks
+    /// that fire on a request only if it lists every one of them; with none listed, it still
+    /// allows on its own where no permit matches.
+    pub approves: BTreeSet<String>,
 }

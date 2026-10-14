@@ -364,8 +364,8 @@ pub(crate) fn cases() -> Vec<Case> {
             // ADR-0008 Amendment 1: a grant is an approval and must never beat a forbid.
             seed: replace(
                 "crates/uaos-policy/src/engine.rs",
-                "(CedarDecision::Deny, _) if !matched.is_empty() =>",
-                "(CedarDecision::Deny, None) if !matched.is_empty() =>",
+                "CedarDecision::Deny if !matched.is_empty() =>",
+                "CedarDecision::Deny if !matched.is_empty() && grants.is_empty() =>",
             ),
             runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-policy", "--test", "policy"] },
             expect: "a grant must never override a forbid",
