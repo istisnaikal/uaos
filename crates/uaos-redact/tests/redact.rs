@@ -16,7 +16,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use common::{Prng, Sample, embed, prose, secret};
+use common::{Prng, Sample, embed, leaks, percent_encoded, prose, secret, visible_value};
 use proptest::prelude::*;
 use serde_json::{Map, Value, json};
 use uaos_contracts::error::codes;
@@ -106,8 +106,16 @@ fn json_redaction_changes_only_the_secret_bytes() {
 fn escaped_secrets_are_found_and_replaced_whole() {
     let key = sample(DataClass::AnthropicApiKey, 4);
     let body = format!(r#"{{"content":"key: {}"}}"#, fully_escaped(&key.secret));
-    // The raw bytes alone do not show the key; the decoded string does.
-    assert!(scanner(&[]).check_bytes(body.as_bytes()).is_ok());
+    // The raw bytes do not show the key; the decoded string does, and so does the byte check's
+    // nested view (review M2: it used to pass such bytes).
+    assert!(!body.contains(key.secret.as_str()));
+    assert!(
+        scanner(&[])
+            .check_bytes(body.as_bytes())
+            .unwrap_err()
+            .classes
+            .contains(&DataClass::AnthropicApiKey)
+    );
     let blocked = scanner(&[]).check_json(body.as_bytes()).unwrap_err();
     assert!(blocked.classes.contains(&DataClass::AnthropicApiKey));
     let r = redactor().redact_json(body.as_bytes()).unwrap();
@@ -330,4 +338,389 @@ proptest! {
             prop_assert!(scanner(&[]).check_json(r.output()).is_ok());
         }
     }
+}
+
+/// Asserts that every path handles `text` carrying `secret` of `class`: text redaction and JSON
+/// redaction remove it from everything a reader can recover, and both final-scan entry points
+/// block the unredacted content with the class.
+fn assert_every_path_redacts(text: &str, secret: &str, class: DataClass) {
+    let red = redactor();
+    let s = scanner(&[]);
+    let r = red.redact_text(text).unwrap();
+    assert!(!leaks(r.output(), secret), "text redaction left a {class} secret");
+    assert!(r.classes().contains(&class), "{class} not found");
+    assert!(s.check_bytes(r.output().as_bytes()).is_ok());
+
+    let body = serde_json::to_vec(&json!({ "messages": [{ "content": text }] })).unwrap();
+    let rj = red.redact_json(&body).unwrap();
+    let mut recovered = Vec::new();
+    visible_value(&serde_json::from_slice(rj.output()).unwrap(), &mut recovered);
+    assert!(
+        !recovered.iter().any(|v| v.contains(secret)),
+        "JSON redaction left a {class} secret"
+    );
+    assert!(s.check_json(rj.output()).is_ok());
+
+    for blocked in [
+        s.check_bytes(text.as_bytes()).unwrap_err(),
+        s.check_json(&body).unwrap_err(),
+    ] {
+        assert!(blocked.classes.contains(&class), "the final scan missed {class}");
+    }
+}
+
+/// Review WP2.3 H2: a password with `/`, `#`, `?` or `'` passed all three paths.
+#[test]
+fn url_passwords_with_any_printable_byte_are_redacted() {
+    for password in [
+        "Zm9v/YmFy+cXV4=",
+        "a#b",
+        "what?now",
+        "it's",
+        "p@ss/w0rd",
+        "x:y;z,(1)[2]{3}|~^",
+    ] {
+        let text = format!("DATABASE_URL=postgres://app:{password}@db.example.com:5432/app");
+        assert_every_path_redacts(&text, password, DataClass::UrlCredentials);
+    }
+}
+
+/// Review WP2.3 H3: separator glue, word glue on the right and over-long runs hid keys.
+#[test]
+fn glued_and_overlong_keys_are_redacted() {
+    let ant = sample(DataClass::AnthropicApiKey, 20).secret;
+    let gh = sample(DataClass::GithubToken, 21).secret;
+    let stripe = sample(DataClass::StripeKey, 22).secret;
+    let aws = sample(DataClass::AwsAccessKeyId, 23).secret;
+    let cases = [
+        (
+            format!("${{ANTHROPIC_API_KEY:-{ant}}}"),
+            ant.clone(),
+            DataClass::AnthropicApiKey,
+        ),
+        (format!("_{gh}_"), gh.clone(), DataClass::GithubToken),
+        (format!("STRIPE_KEY_{stripe}"), stripe.clone(), DataClass::StripeKey),
+        (format!("{aws}SUFFIX9"), aws.clone(), DataClass::AwsAccessKeyId),
+        (format!("{gh}moreword"), gh.clone(), DataClass::GithubToken),
+        (
+            format!("{stripe}{}", "Q".repeat(300)),
+            stripe.clone(),
+            DataClass::StripeKey,
+        ),
+    ];
+    for (text, secret, class) in cases {
+        assert_every_path_redacts(&text, &secret, class);
+    }
+}
+
+/// Review WP2.3 M1: JSON inside a JSON string was decoded one level only, so a secret escaped
+/// at the inner level (a tool call's arguments, a `partial_json` delta) passed.
+#[test]
+fn secrets_nested_in_json_strings_are_redacted() {
+    let key = sample(DataClass::OpenaiApiKey, 24);
+    let arguments = format!(
+        r#"{{"command":"export OPENAI_API_KEY={}"}}"#,
+        fully_escaped(&key.secret)
+    );
+    assert!(!arguments.contains(key.secret.as_str()));
+    assert_every_path_redacts(&arguments, &key.secret, DataClass::OpenaiApiKey);
+
+    // One more level: the arguments streamed as a `partial_json` delta.
+    let delta = serde_json::to_string(&json!({ "type": "input_json_delta", "partial_json": arguments })).unwrap();
+    assert_every_path_redacts(&delta, &key.secret, DataClass::OpenaiApiKey);
+
+    // The splice keeps the inner document valid JSON.
+    let body = serde_json::to_vec(&json!({ "tool_use": { "input": arguments } })).unwrap();
+    let out: Value = serde_json::from_slice(redactor().redact_json(&body).unwrap().output()).unwrap();
+    let inner: Value = serde_json::from_str(out["tool_use"]["input"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        inner["command"],
+        format!(
+            "export OPENAI_API_KEY={}",
+            redactor().placeholder(DataClass::OpenaiApiKey, &key.secret)
+        )
+    );
+}
+
+/// Review WP2.3 M2: the byte check ignored encodings, so form-encoded DSNs, percent-encoded PEM
+/// headers and `\u`-escaped JSON Lines passed.
+#[test]
+fn encoded_secrets_in_raw_bytes_are_found() {
+    let url = sample(DataClass::UrlCredentials, 25);
+    let form = format!("dsn={}&pool=5", percent_encoded(&url.text));
+    assert_every_path_redacts(&form, &url.secret, DataClass::UrlCredentials);
+
+    let pem = sample(DataClass::PrivateKey, 26);
+    assert_every_path_redacts(&percent_encoded(&pem.text), &pem.secret, DataClass::PrivateKey);
+
+    let token = sample(DataClass::SlackToken, 27);
+    let jsonl = format!("{{\"n\":1}}\n{{\"note\":\"{}\"}}\n", fully_escaped(&token.text));
+    let blocked = scanner(&[]).check_bytes(jsonl.as_bytes()).unwrap_err();
+    assert!(blocked.classes.contains(&DataClass::SlackToken));
+}
+
+/// Review WP2.3 L5 (part): a vault secret is matched in decoded views too.
+#[test]
+fn known_secrets_are_matched_through_encodings() {
+    let vault_key = "custom-provider-secret/0123456789";
+    let s = scanner(&[vault_key.as_bytes()]);
+    for body in [
+        percent_encoded(vault_key),
+        format!("{{\"k\":\"{}\"}}", fully_escaped(vault_key)),
+    ] {
+        assert!(s.check_bytes(body.as_bytes()).unwrap_err().known_secret, "{body}");
+    }
+}
+
+/// Fragments that steer random input toward the detectors' edge cases (review M4: no fuzzing
+/// with real anchors existed).
+const FRAGMENTS: &[&str] = &[
+    "sk-ant-",
+    "sk-",
+    "T3BlbkFJ",
+    "ghp_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "AKIA",
+    "AIza",
+    "eyJ",
+    "-----BEGIN ",
+    "PRIVATE KEY-----",
+    "-----END ",
+    "://",
+    "@",
+    ":",
+    "/",
+    "?",
+    "#",
+    "'",
+    "%",
+    "%40",
+    "%2F",
+    "\\",
+    "\\\\",
+    "\\n",
+    "\\\"",
+    "\"",
+    "[REDACTED:jwt:",
+    "]",
+    ".",
+    "_",
+    "-",
+    " ",
+    "\n",
+    "aaaaaaaaaaaaaaaaaaaa",
+    "ZZZZZZZZZZZZZZZZ",
+    "0123456789",
+    "é",
+    "ş",
+];
+
+fn anchored_text() -> impl Strategy<Value = String> {
+    prop::collection::vec(prop::sample::select(FRAGMENTS), 0..64).prop_map(|parts| parts.concat())
+}
+
+proptest! {
+    #[test]
+    fn anchored_noise_is_redacted_to_a_clean_fixpoint(text in anchored_text()) {
+        let red = redactor();
+        let s = scanner(&[]);
+        let r = red.redact_text(&text).unwrap();
+        prop_assert!(s.check_bytes(r.output().as_bytes()).is_ok(), "the final scan rejects redacted text");
+        prop_assert!(red.redact_text(r.output()).unwrap().is_clean(), "redact(redact(x)) != redact(x)");
+        if r.is_clean() {
+            prop_assert!(s.check_bytes(text.as_bytes()).is_ok(), "clean text must pass the final scan");
+        }
+        let body = serde_json::to_vec(&json!({ "a": text, "b": [text] })).unwrap();
+        let rj = red.redact_json(&body).unwrap();
+        prop_assert!(s.check_json(rj.output()).is_ok());
+        let out: Value = serde_json::from_slice(rj.output()).unwrap();
+        prop_assert_eq!(&out["a"], &Value::String(r.output().to_owned()), "JSON and text redaction agree");
+    }
+}
+
+/// A JSON `\u` escape of `hex`, built at runtime.
+fn u(hex: &str) -> String {
+    format!("{}u{hex}", '\\')
+}
+
+/// `s` with `~` standing for a backslash.
+fn bs(s: &str) -> String {
+    s.replace('~', "\\")
+}
+
+/// Form encoding as browsers and `quote_plus` produce it: a space becomes `+`.
+fn form_encoded(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"*-._".contains(&b) {
+            out.push(char::from(b));
+        } else if b == b' ' {
+            out.push('+');
+        } else {
+            let _infallible = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
+/// A synthetic secret access key, split so no key-shaped literal is committed.
+const AWS_SECRET: &str = concat!("wJalrXUtnFEMI/K7", "MDENG/bPxRfiCY", "SYNTHETIC0KEY");
+
+/// V1 review of hardening II, H-B: a user redacted in an earlier round (an AWS key id) hid the
+/// password, which a later view would have found; the final scan passed the output.
+#[test]
+fn a_redacted_user_does_not_hide_the_password() {
+    let id = sample(DataClass::AwsAccessKeyId, 30).secret;
+    let escaped = AWS_SECRET.replace('/', &bs("~/"));
+    for text in [
+        format!("s3a://{id}:{escaped}@my-bucket/path"),
+        format!("s3a://{id}%3Asecretpassw0rd@my-bucket"),
+        format!("s3://{id}:pa{}ss-w0rd-1234@bucket", u("0026")),
+    ] {
+        let r = redactor().redact_text(&text).unwrap();
+        assert!(r.classes().contains(&DataClass::UrlCredentials));
+        for secret in ["wJalrXUtnFEMI", "secretpassw0rd", "ss-w0rd-1234", id.as_str()] {
+            assert!(!leaks(r.output(), secret), "a secret survived");
+        }
+        assert!(scanner(&[]).check_bytes(r.output().as_bytes()).is_ok());
+    }
+    // The realistic shape: a tool result carrying a PHP-style escaped config.
+    let inner = format!(
+        "{{\"config\":\"s3a:{}{}{}:{escaped}@my-bucket{}path\"}}",
+        bs("~/"),
+        bs("~/"),
+        id,
+        bs("~/")
+    );
+    let body = serde_json::to_vec(&json!({ "messages": [{ "role": "tool", "content": inner }] })).unwrap();
+    let rj = redactor().redact_json(&body).unwrap();
+    let mut recovered = Vec::new();
+    visible_value(&serde_json::from_slice(rj.output()).unwrap(), &mut recovered);
+    assert!(!recovered.iter().any(|v| v.contains("wJalrXUtnFEMI")));
+    assert!(scanner(&[]).check_json(rj.output()).is_ok());
+}
+
+/// V1 review of hardening II, M-A: form encoding writes a space as `+`, so a form-encoded PEM
+/// key passed every path.
+#[test]
+fn form_encoded_keys_are_redacted() {
+    let pem = sample(DataClass::PrivateKey, 31);
+    let form = format!("name=deploy&private_key={}&x=1", form_encoded(&pem.text));
+    assert_every_path_redacts(&form, &pem.secret, DataClass::PrivateKey);
+    let url = sample(DataClass::UrlCredentials, 32);
+    assert_every_path_redacts(
+        &format!("dsn={}", form_encoded(&url.text)),
+        &url.secret,
+        DataClass::UrlCredentials,
+    );
+}
+
+/// V1 review of hardening II, L-B: an escape tail on the left (still encoded three levels deep)
+/// made a plain key look glued, in every view.
+#[test]
+fn escaped_left_neighbours_do_not_hide_keys() {
+    let key = sample(DataClass::AwsAccessKeyId, 33).secret;
+    let gh = sample(DataClass::GithubToken, 34).secret;
+    for (text, secret, class) in [
+        (
+            format!("x{}{key}", bs("~~~~n")),
+            key.as_str(),
+            DataClass::AwsAccessKeyId,
+        ),
+        (format!("id=%252520{key}"), key.as_str(), DataClass::AwsAccessKeyId),
+        (
+            format!("token:{}{gh}", bs("~~~~t")),
+            gh.as_str(),
+            DataClass::GithubToken,
+        ),
+    ] {
+        let r = redactor().redact_text(&text).unwrap();
+        assert!(r.classes().contains(&class), "{class} not found");
+        assert!(!r.output().contains(secret), "{class} survived");
+        assert!(
+            scanner(&[]).check_bytes(text.as_bytes()).is_err(),
+            "the final scan missed {class}"
+        );
+    }
+    let raw = format!("{{\"messages\":[{{\"content\":\"code{}{key}\"}}]}}", bs("~~~~~~~~n"));
+    let rj = redactor().redact_json(raw.as_bytes()).unwrap();
+    assert!(!String::from_utf8_lossy(rj.output()).contains(key.as_str()));
+    assert!(scanner(&[]).check_json(raw.as_bytes()).is_err());
+}
+
+/// V1 review of hardening II, L-C: replacements that open new windows, chained across views,
+/// exhausted the round budget and wedged every request carrying the text. Such content is now
+/// replaced whole.
+#[test]
+fn a_crafted_cascade_is_replaced_whole_without_wedging() {
+    let nl = "\n";
+    let q = "Q".repeat(16);
+    let pem = |d: &str, n: &str| {
+        let begin = concat!("----BEGIN RSA PRIVATE", " KEY-----");
+        let end = concat!("----END RSA PRIVATE", " KEY-----");
+        format!("{d}{begin}{n}MIIabc{n}{d}{end}")
+    };
+    let parts = [
+        format!("https://u:x{}y@host", pem("-", nl)),
+        format!("https%3A//u:x{}y@host", pem("%2D", "%0A")),
+        format!("https://u:abc%20{}KIA{q}@host", u("0041")),
+        format!("https%253A//u:x{}y@host", pem("%252D", "%250A")),
+        format!("https://u:abc%2520{}{}KIA{q}@host", bs("~"), u("0041")),
+    ];
+    let text = parts.join(nl);
+    let r = redactor().redact_text(&text).unwrap();
+    assert!(!r.is_clean());
+    assert!(scanner(&[]).check_bytes(r.output().as_bytes()).is_ok());
+    let body = serde_json::to_vec(&json!({ "messages": [{ "content": text }] })).unwrap();
+    let rj = redactor().redact_json(&body).unwrap();
+    assert!(scanner(&[]).check_json(rj.output()).is_ok());
+}
+
+/// V1 review of hardening II, M-B: ordinary service URLs, scp paths and templated passwords
+/// are not credentials.
+#[test]
+fn service_urls_and_templates_are_not_redacted() {
+    for text in [
+        "docker://registry:5000/app@sha256:4d2b1f0c9e8a7b6c5d4e3f2a1b0c9d8e",
+        "http://verdaccio:4873/@babel/core",
+        "http://web:8000/?email=bob@example.com",
+        "jdbc:mysql://db:3306/app?user=bob@corp.com",
+        "pip install git+ssh://git@github.com:org/repo.git@v1.0",
+        "DATABASE_URL: postgres://app:${POSTGRES_PASSWORD}@db:5432/app",
+        "REDIS_URL=redis://:$REDIS_PASSWORD@redis:6379/0",
+        "mysql://root:%(password)s@localhost/db",
+    ] {
+        assert!(redactor().redact_text(text).unwrap().is_clean(), "{text}");
+        assert!(scanner(&[]).check_bytes(text.as_bytes()).is_ok(), "{text}");
+    }
+}
+
+/// V1 review of hardening II, L-A: a backslash inside a password is covered.
+#[test]
+fn a_backslash_in_a_password_is_covered() {
+    let text = bs("postgres://app:pa~ss9X@db.example.com/x");
+    assert_every_path_redacts(&text, &bs("pa~ss9X"), DataClass::UrlCredentials);
+}
+
+/// Review WP2.3 H1: a derived `Debug` printed the known-secret automaton, from which a probe
+/// reconstructed the vault secret. Nothing secret-derived may reach `Debug` output.
+#[test]
+fn debug_output_carries_no_secret_material() {
+    let canary = b"vault-provider-key-ZQXJ0123456789";
+    let scanner = FinalScanner::new(DetectorVersion::V1, [canary.as_slice()]).unwrap();
+    let shown = format!("{scanner:?} {scanner:#?}");
+    assert!(
+        shown.len() < 200,
+        "Debug output is unexpectedly large: {} bytes",
+        shown.len()
+    );
+    // No 4-byte window of the canary, in any form, appears in the output.
+    let text = String::from_utf8_lossy(canary);
+    for window in text.as_bytes().windows(4) {
+        let w = String::from_utf8_lossy(window);
+        assert!(!shown.contains(w.as_ref()), "Debug output contains {w:?}");
+    }
+    assert!(shown.contains("known_secrets: 1"));
 }

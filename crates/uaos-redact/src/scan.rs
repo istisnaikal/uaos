@@ -4,7 +4,9 @@
 //!
 //! It runs every detector over every decoded JSON string (so an escaped secret cannot slip
 //! through) and over the raw bytes between strings, and looks for the exact bytes of every known
-//! vault secret in both. Any hit, and any scanner failure, blocks: there is no "send anyway".
+//! vault secret in both. Each of these is checked in the same four views the redactor
+//! scans: as it is, with JSON and percent escapes decoded once and twice, and with form
+//! encoding decoded (review M1, M2). Any hit, and any scanner failure, blocks: there is no "send anyway".
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -15,7 +17,7 @@ use uaos_contracts::error::{ErrorCode, codes};
 use crate::RedactError;
 use crate::class::DataClass;
 use crate::detect::{DetectorSet, DetectorVersion};
-use crate::json::{decode, strings};
+use crate::json::{decode, decode_form, decode_nested, strings};
 
 /// Known secrets shorter than this are refused: scanning for them would block ordinary text.
 pub const MIN_KNOWN_SECRET_LEN: usize = 8;
@@ -66,10 +68,22 @@ impl fmt::Display for Blocked {
 impl std::error::Error for Blocked {}
 
 /// Scans outbound bytes; built once per configuration (detector version, vault contents).
-#[derive(Debug)]
+///
+/// `Debug` shows the detector version and how many known secrets are loaded, nothing else: the
+/// automaton over known secrets encodes their bytes, and a derived `Debug` would print it.
 pub struct FinalScanner {
     detectors: DetectorSet,
     known: Option<AhoCorasick>,
+    known_count: usize,
+}
+
+impl fmt::Debug for FinalScanner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FinalScanner")
+            .field("version", &self.detectors.version())
+            .field("known_secrets", &self.known_count)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FinalScanner {
@@ -87,6 +101,7 @@ impl FinalScanner {
         if known.iter().any(|s| s.len() < MIN_KNOWN_SECRET_LEN) {
             return Err(RedactError::KnownSecretTooShort);
         }
+        let known_count = known.len();
         let known = if known.is_empty() {
             None
         } else {
@@ -99,16 +114,18 @@ impl FinalScanner {
         Ok(Self {
             detectors: DetectorSet::new(version)?,
             known,
+            known_count,
         })
     }
 
-    /// Checks non-JSON bytes.
+    /// Checks non-JSON bytes (headers, form bodies, JSON Lines, text), including JSON and percent
+    /// escapes nested in them: a form-encoded DSN or a `\u`-escaped key in a JSON line is found.
     ///
     /// # Errors
     /// [`Blocked`] on any finding or scanner failure.
     pub fn check_bytes(&self, body: &[u8]) -> Result<(), Blocked> {
         let mut blocked = Blocked::default();
-        self.check(body, &mut blocked);
+        self.check_views(body, &mut blocked);
         if blocked.is_empty() { Ok(()) } else { Err(blocked) }
     }
 
@@ -122,7 +139,7 @@ impl FinalScanner {
         let mut blocked = Blocked::default();
         if std::str::from_utf8(body).is_err() {
             // Report what is visible, but such a body can never be cleared.
-            self.check(body, &mut blocked);
+            self.check_views(body, &mut blocked);
             blocked.scanner_failure = true;
             return Err(blocked);
         }
@@ -133,7 +150,7 @@ impl FinalScanner {
                 break;
             };
             let open = range.start.saturating_sub(1);
-            self.check(body.get(raw_from..open).unwrap_or_default(), &mut blocked);
+            self.check_views(body.get(raw_from..open).unwrap_or_default(), &mut blocked);
             let decoded = body
                 .get(range.clone())
                 .ok_or(RedactError::DetectorFailure("string outside the body"))
@@ -144,11 +161,26 @@ impl FinalScanner {
                 raw_from = open;
                 break;
             };
-            self.check(d.text.as_bytes(), &mut blocked);
+            self.check_views(d.text.as_bytes(), &mut blocked);
             raw_from = range.end + 1;
         }
-        self.check(body.get(raw_from.min(body.len())..).unwrap_or_default(), &mut blocked);
+        self.check_views(body.get(raw_from.min(body.len())..).unwrap_or_default(), &mut blocked);
         if blocked.is_empty() { Ok(()) } else { Err(blocked) }
+    }
+
+    /// Checks `text` in each of its four views, the same views the redactor scans.
+    fn check_views(&self, text: &[u8], blocked: &mut Blocked) {
+        self.check(text, blocked);
+        let nested = decode_nested(text, false);
+        if let Some(n) = &nested {
+            self.check(&n.bytes, blocked);
+        }
+        if let Some(f) = decode_form(text, false) {
+            self.check(&f.bytes, blocked);
+        }
+        if let Some(n2) = nested.as_ref().and_then(|n| decode_nested(&n.bytes, false)) {
+            self.check(&n2.bytes, blocked);
+        }
     }
 
     fn check(&self, text: &[u8], blocked: &mut Blocked) {

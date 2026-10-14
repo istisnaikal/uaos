@@ -1,18 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Synthetic corpus v1: generators for secrets of every claimed class, the contexts they appear
-//! in, and hard negatives.
+//! Synthetic corpus v2: generators for secrets of every claimed class, the contexts and evasion
+//! forms they appear in, and hard negatives in named families.
 //!
 //! Everything is generated at test time from a seed: no secret-shaped string is ever committed,
 //! so secret scanning of the repository stays meaningful. The generator code plus the seed *is*
 //! the corpus version; changing either changes the corpus and must be recorded in ADR-0009.
+//!
+//! v2 (review WP2.3 M4): URL passwords draw from every printable byte a URL can carry; positives
+//! come in five forms (plain, glued, nested JSON, double-nested JSON, percent-encoded); negatives
+//! carry a family name so false positives are counted per family, not diluted across all of them.
 
 #![allow(dead_code, reason = "shared by several test crates; each uses a subset")]
 
+use std::fmt::Write as _;
+
 use uaos_redact::DataClass;
 
-/// Seed of corpus v1 (merge runs). Nightly runs override it to explore further.
-pub(crate) const CORPUS_V1_SEED: u64 = 0x5541_4F53_5244_0001;
+/// Seed of corpus v2 (merge runs). Nightly runs override it to explore further.
+pub(crate) const CORPUS_SEED: u64 = 0x5541_4F53_5244_0002;
 
 /// `SplitMix64`: tiny, deterministic, good enough for corpus generation (not for cryptography).
 #[derive(Debug, Clone)]
@@ -72,7 +78,10 @@ pub(crate) const BASE32: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 pub(crate) const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 pub(crate) const TOKEN: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 pub(crate) const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-pub(crate) const PASSWORD: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!$%^*()_+~=-.";
+/// Every printable byte a password in an unencoded URL can hold: all of them except whitespace,
+/// `"`, `<`, `>` and the backtick, which end a URL in text (`@` is inserted separately).
+pub(crate) const PASSWORD: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&'()*+,-./:;=?[]^_{|}~\\";
 
 /// A secret as it appears (`text`) and the part that must not survive redaction (`secret`).
 #[derive(Debug, Clone)]
@@ -191,6 +200,9 @@ pub(crate) const WORDS: &[&str] = &[
     "None",
     "Some(x)",
 ];
+
+/// Lowercase words for generated paths.
+pub(crate) const WORDS_LOWER: &[&str] = &["org", "repo", "tools", "kernel", "app", "lib", "web", "infra"];
 
 pub(crate) fn prose(rng: &mut Prng) -> String {
     let n = rng.range(3, 20);
@@ -444,55 +456,283 @@ pub(crate) fn pem(rng: &mut Prng, private: bool) -> String {
     format!("-----BEGIN {label}-----{nl}{body}{nl}-----END {label}-----")
 }
 
+/// How a positive is presented (corpus v2, review WP2.3 M4). Plain and glued forms test the
+/// detectors' boundaries; the nested and percent forms test the decoded views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Form {
+    /// Embedded in a context as it is.
+    Plain,
+    /// With separator glue on the left and word glue on the right (`${KEY:-…}`, `KEY_…_prod`).
+    Glued,
+    /// Inside a JSON document carried as a string (a tool call's arguments), with the secret's
+    /// characters `\u`-escaped at that inner level.
+    Nested,
+    /// The nested document again inside a JSON string (a double-escaped `partial_json` delta).
+    DoubleNested,
+    /// Percent-encoded (a query string), or form-encoded with `+` for a space (a form body).
+    Percent,
+    /// Every `/` JSON-escaped as `\/` (and every backslash as two), as PHP's `json_encode`
+    /// writes it.
+    SlashEscaped,
+}
+
+impl Form {
+    pub(crate) fn pick(rng: &mut Prng) -> Self {
+        match rng.below(10) {
+            0..=2 => Self::Plain,
+            3..=4 => Self::Glued,
+            5..=6 => Self::Nested,
+            7 => Self::DoubleNested,
+            8 => Self::Percent,
+            _ => Self::SlashEscaped,
+        }
+    }
+}
+
+/// Left glue that is not part of a token: a separator, so the secret must still be found.
+const GLUE_LEFT: &[&str] = &["_", "-", "$", "=", ":-", "${KEY:-", "KEY_", "x.", "/", "+"];
+/// Right glue: more of the same characters (covered with the secret) or a separator.
+const GLUE_RIGHT: &[&str] = &["_prod", "xyz", "}", "_", "ZZ9", "-1", ";", ".", "+x"];
+/// Stands in for the secret while a nested document is built.
+const MARK: &str = "@@SECRET@@";
+
+/// `text` presented in `form`.
+pub(crate) fn present(rng: &mut Prng, text: &str, form: Form) -> String {
+    match form {
+        Form::Plain => embed(rng, text),
+        Form::Glued => {
+            let left = rng.pick(GLUE_LEFT);
+            let right = rng.pick(GLUE_RIGHT);
+            embed(rng, &format!("{left}{text}{right}"))
+        }
+        Form::Nested => nested_json(rng, text),
+        Form::DoubleNested => {
+            let inner = nested_json(rng, text);
+            serde_json::to_string(&serde_json::json!({ "type": "input_json_delta", "partial_json": inner })).unwrap()
+        }
+        Form::Percent => {
+            let encoded = if rng.chance(50) {
+                percent_encoded(text)
+            } else {
+                form_encoded(text)
+            };
+            embed(rng, &encoded)
+        }
+        Form::SlashEscaped => {
+            // A JSON encoder escapes the backslash itself first, then the slash.
+            let escaped = text.replace('\\', "\\\\").replace('/', "\\/");
+            embed(rng, &escaped)
+        }
+    }
+}
+
+/// A tool call's arguments as JSON text, with `text` inside a string and escaped there.
+fn nested_json(rng: &mut Prng, text: &str) -> String {
+    let context = embed(rng, MARK);
+    let tool = rng.pick(&["bash", "write_file", "http_request"]);
+    let doc = serde_json::json!({ "tool": tool, "arguments": { "input": context } });
+    let escaped = escaped_for_json(rng, text);
+    serde_json::to_string(&doc).unwrap().replace(MARK, &escaped)
+}
+
+/// `text` as JSON string content with characters `\u`-escaped: all of them, or every
+/// non-alphanumeric one and a random half of the rest.
+fn escaped_for_json(rng: &mut Prng, text: &str) -> String {
+    let all = rng.chance(50);
+    let mut out = String::new();
+    for c in text.chars() {
+        if all || !c.is_ascii_alphanumeric() || rng.chance(50) {
+            for unit in c.encode_utf16(&mut [0; 2]) {
+                let _infallible = write!(out, "\\u{unit:04x}");
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Every byte that is not alphanumeric as `%XX`.
+pub(crate) fn percent_encoded(text: &str) -> String {
+    let mut out = String::new();
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() {
+            out.push(char::from(b));
+        } else {
+            let _infallible = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
+/// Form encoding: every byte that is not alphanumeric or `*-._` as `%XX`, a space as `+`.
+pub(crate) fn form_encoded(text: &str) -> String {
+    let mut out = String::new();
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || b"*-._".contains(&b) {
+            out.push(char::from(b));
+        } else if b == b' ' {
+            out.push('+');
+        } else {
+            let _infallible = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
+/// Test oracle, independent of the crate: `%XX` decoded (any byte), everything else kept.
+pub(crate) fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Test oracle, independent of the crate: what a reader can recover from `text`. That is the
+/// text, its percent- and form-decoding, its JSON string unescaping, and, when it is JSON,
+/// every string in it, recursively.
+pub(crate) fn visible(text: &str, out: &mut Vec<String>) {
+    out.push(text.to_owned());
+    out.push(percent_decoded(text));
+    out.push(percent_decoded(&text.replace('+', " ")));
+    out.push(text.replace("\\/", "/"));
+    if let Ok(serde_json::Value::String(s)) = serde_json::from_str(&format!("\"{text}\"")) {
+        out.push(s);
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+        visible_value(&v, out);
+    }
+}
+
+/// [`visible`] for every key and string of a JSON value.
+pub(crate) fn visible_value(v: &serde_json::Value, out: &mut Vec<String>) {
+    use serde_json::Value;
+    match v {
+        Value::String(s) => visible(s, out),
+        Value::Array(items) => items.iter().for_each(|i| visible_value(i, out)),
+        Value::Object(map) => {
+            for (k, v) in map {
+                visible(k, out);
+                visible_value(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `secret` can be recovered from `text` (see [`visible`]).
+pub(crate) fn leaks(text: &str, secret: &str) -> bool {
+    let mut out = Vec::new();
+    visible(text, &mut out);
+    out.iter().any(|s| s.contains(secret))
+}
+
 /// A string that contains no secret of any claimed class, built to look as close to one as
-/// possible.
+/// possible, and the name of its family (false positives are counted per family).
 #[allow(clippy::too_many_lines, reason = "one near-miss family per arm")]
-pub(crate) fn negative(rng: &mut Prng) -> String {
-    let core = match rng.below(40) {
-        0..=5 => return prose(rng),
-        6..=7 => code_line(rng),
-        8 => format!("sk-ant-{}", rng.chars_in(TOKEN, 5, 31)),
-        9 => format!("sk-{}", rng.chars_in(ALNUM, 20, 80)),
-        10 => "sk-learn-pipeline-estimator-transformer-grid-search-cross-validation".to_owned(),
-        11 => format!("{}{}", rng.pick(&["AKIA", "ASIA"]), rng.chars_of(BASE32, &[12, 15])),
-        12 => format!(
-            "{}{}{}",
-            rng.pick(&["AKIA", "ASIA"]),
-            rng.chars(BASE32, 16),
-            rng.chars(ALNUM, 1)
+pub(crate) fn negative(rng: &mut Prng) -> (&'static str, String) {
+    let (family, core) = match rng.below(46) {
+        0..=5 => return ("prose", prose(rng)),
+        6..=7 => ("code", code_line(rng)),
+        8 => ("anthropic-short", format!("sk-ant-{}", rng.chars_in(TOKEN, 5, 31))),
+        9 => ("openai-unmarked", format!("sk-{}", rng.chars_in(ALNUM, 20, 80))),
+        10 => (
+            "openai-sk-learn",
+            "sk-learn-pipeline-estimator-transformer-grid-search-cross-validation".to_owned(),
         ),
-        13 => format!("akia{}", rng.chars(BASE32, 16)),
-        14 => format!("AKIB{}", rng.chars(BASE32, 16)),
-        15 => format!("ghp_{}", rng.chars_of(ALNUM, &[20, 35])),
-        16 => format!("ghp_{}", rng.chars(ALNUM, 37)),
-        17 => format!("{}_{}", rng.pick(&["ghx", "GHP", "ghq"]), rng.chars(ALNUM, 36)),
-        18 => format!("github_pat_{}", rng.chars(ALNUM, 30)),
-        19 => format!("glpat-{}", rng.chars_in(TOKEN, 5, 19)),
-        20 => format!("{}{}", rng.pick(&["glpat_", "glxat-"]), rng.chars(TOKEN, 20)),
-        21 => format!("xoxb-{}", rng.chars_in(ALNUM, 5, 14)),
-        22 => format!("{}{}", rng.pick(&["xoxz-", "xox-"]), rng.chars(ALNUM, 30)),
-        23 => format!("sk_live_{}", rng.chars_in(ALNUM, 5, 23)),
-        24 => format!("pk_live_{}", rng.chars_in(ALNUM, 24, 99)),
-        25 => format!("sk_prod_{}", rng.chars(ALNUM, 30)),
-        26 => format!("AIza{}", rng.chars_of(ALNUM, &[20, 34])),
-        27 => format!("{}{}", rng.pick(&["aiza", "AIzb"]), rng.chars(TOKEN, 35)),
-        28 => pem(rng, false),
-        29 => format!("eyJ{}", rng.chars_in(TOKEN, 20, 60)),
-        30 => format!("eyJ{}.eyJ{}", rng.chars(TOKEN, 20), rng.chars(TOKEN, 30)),
-        31 => format!(
-            "eyJ{}.eyJ{}.{}",
-            rng.chars(TOKEN, 20),
-            rng.chars(TOKEN, 30),
-            rng.chars(TOKEN, 8)
+        11 => (
+            "aws-short",
+            format!("{}{}", rng.pick(&["AKIA", "ASIA"]), rng.chars_of(BASE32, &[12, 15])),
         ),
-        32 => format!(
-            "eyJ{}.{}.{}",
-            rng.chars(TOKEN, 20),
-            rng.chars(TOKEN, 30),
-            rng.chars(TOKEN, 43)
+        // The run of `[A-Z0-9]` breaks before 16 characters.
+        12 => (
+            "aws-broken-run",
+            format!(
+                "{}{}{}{}",
+                rng.pick(&["AKIA", "ASIA"]),
+                rng.chars_in(BASE32, 4, 15),
+                rng.pick(&["a", "_", "-", "."]),
+                rng.chars(BASE32, 16)
+            ),
         ),
-        33 => rng
-            .pick(&[
+        13 => ("aws-lowercase", format!("akia{}", rng.chars(BASE32, 16))),
+        14 => ("aws-wrong-prefix", format!("AKIB{}", rng.chars(BASE32, 16))),
+        15 => ("github-short", format!("ghp_{}", rng.chars_of(ALNUM, &[20, 35]))),
+        16 => (
+            "github-broken-run",
+            format!(
+                "ghp_{}{}{}",
+                rng.chars_in(ALNUM, 10, 35),
+                rng.pick(&["_", "-", "."]),
+                rng.chars(ALNUM, 20)
+            ),
+        ),
+        17 => (
+            "github-wrong-prefix",
+            format!("{}_{}", rng.pick(&["ghx", "GHP", "ghq"]), rng.chars(ALNUM, 36)),
+        ),
+        18 => ("github-pat-short", format!("github_pat_{}", rng.chars(ALNUM, 30))),
+        19 => ("gitlab-short", format!("glpat-{}", rng.chars_in(TOKEN, 5, 19))),
+        20 => (
+            "gitlab-wrong-prefix",
+            format!("{}{}", rng.pick(&["glpat_", "glxat-"]), rng.chars(TOKEN, 20)),
+        ),
+        21 => ("slack-short", format!("xoxb-{}", rng.chars_in(ALNUM, 5, 14))),
+        22 => (
+            "slack-wrong-prefix",
+            format!("{}{}", rng.pick(&["xoxz-", "xox-"]), rng.chars(ALNUM, 30)),
+        ),
+        23 => ("stripe-short", format!("sk_live_{}", rng.chars_in(ALNUM, 5, 23))),
+        24 => ("stripe-publishable", format!("pk_live_{}", rng.chars_in(ALNUM, 24, 99))),
+        25 => ("stripe-wrong-mode", format!("sk_prod_{}", rng.chars(ALNUM, 30))),
+        26 => ("google-short", format!("AIza{}", rng.chars_of(ALNUM, &[20, 34]))),
+        27 => (
+            "google-wrong-prefix",
+            format!("{}{}", rng.pick(&["aiza", "AIzb"]), rng.chars(TOKEN, 35)),
+        ),
+        28 => ("pem-public", pem(rng, false)),
+        29 => ("jwt-one-part", format!("eyJ{}", rng.chars_in(TOKEN, 20, 60))),
+        30 => (
+            "jwt-two-parts",
+            format!("eyJ{}.eyJ{}", rng.chars(TOKEN, 20), rng.chars(TOKEN, 30)),
+        ),
+        31 => (
+            "jwt-short-signature",
+            format!(
+                "eyJ{}.eyJ{}.{}",
+                rng.chars(TOKEN, 20),
+                rng.chars(TOKEN, 30),
+                rng.chars(TOKEN, 8)
+            ),
+        ),
+        32 => (
+            "jwt-payload-not-json",
+            format!(
+                "eyJ{}.{}.{}",
+                rng.chars(TOKEN, 20),
+                rng.chars(TOKEN, 30),
+                rng.chars(TOKEN, 43)
+            ),
+        ),
+        33 => (
+            "url-no-password",
+            rng.pick(&[
                 "https://example.com/path?x=1",
                 "https://user@host.example.com/repo",
                 "https://host.example.com:8443/x",
@@ -504,19 +744,113 @@ pub(crate) fn negative(rng: &mut Prng) -> String {
                 "ftp://anonymous@ftp.example.com/pub",
             ])
             .to_owned(),
-        34 => uuid(rng),
-        35 => rng.chars_of(HEX, &[40, 64]),
-        36 => rng.chars_in(B64, 16, 200),
-        37 => rng.chars_in(UPPER_DIGIT, 10, 40),
+        ),
+        34 => ("uuid", uuid(rng)),
+        35 => ("hex-digest", rng.chars_of(HEX, &[40, 64])),
+        36 => ("base64", rng.chars_in(B64, 16, 200)),
+        37 => ("upper-digit", rng.chars_in(UPPER_DIGIT, 10, 40)),
         38 => {
             let n = rng.range(20, 200);
-            (0..n)
+            let noise = (0..n)
                 .map(|_| char::from(u8::try_from(rng.range(32, 126)).unwrap()))
-                .collect()
+                .collect();
+            ("printable-noise", noise)
         }
-        _ => format!("the {} header starts with BEGIN PRIVATE KEY", rng.pick(WORDS)),
+        39 => (
+            "pem-prose",
+            format!("the {} header starts with BEGIN PRIVATE KEY", rng.pick(WORDS)),
+        ),
+        // A host and port followed by a path containing `@`: not userinfo (review H2's rule).
+        40 => {
+            let host = rng.pick(&[
+                "localhost",
+                "api.example.com",
+                "10.0.0.5",
+                "[::1]",
+                "registry.npmjs.org",
+            ]);
+            let path = format!("{}/@{}", rng.pick(WORDS), rng.pick(&["user", "scope", "me", "v2"]));
+            let tail = rng.pick(&["", "/profile", "?tab=repos", "#top"]);
+            (
+                "url-port-path",
+                format!(
+                    "{}://{host}:{}/{path}{tail}",
+                    rng.pick(&["http", "https"]),
+                    rng.range(1, 65535)
+                ),
+            )
+        }
+        // Escaped text with no secret in any view.
+        41 => {
+            let doc = serde_json::json!({ "path": "C:\\new\\tools", "text": prose(rng), "regex": "\\d+\\s*" });
+            let text = serde_json::to_string(&doc).unwrap();
+            let twice = serde_json::to_string(&serde_json::json!({ "partial_json": text })).unwrap();
+            ("escaped-text", if rng.chance(50) { text } else { twice })
+        }
+        // A percent-encoded query string with no secret.
+        42 => (
+            "percent-query",
+            format!(
+                "https://example.com/search?q={}&redirect={}",
+                percent_encoded(&prose(rng)),
+                percent_encoded("https://example.com/a?b=c@d")
+            ),
+        ),
+        // Single-label service hosts with a port and a lowercase path containing `@`, scp-style
+        // git URLs (V1 review of hardening II, M-B).
+        43 => {
+            let svc = rng.pick(&["web", "api", "db", "verdaccio", "minio", "keycloak", "my-svc"]);
+            let path = rng.pick(&[
+                "/@alice",
+                "/@babel/core",
+                "/users/@me",
+                "/?email=bob@example.com",
+                "/app?user=bob@corp.com",
+                "/bucket/a@b.txt",
+                "/app@sha256:4d2b1f0c9e8a",
+            ]);
+            let url = if rng.chance(15) {
+                format!(
+                    "git+ssh://git@github.com:{}/{}.git@v1.{}",
+                    rng.pick(WORDS_LOWER),
+                    rng.pick(WORDS_LOWER),
+                    rng.below(9)
+                )
+            } else {
+                format!(
+                    "{}://{svc}:{}{path}",
+                    rng.pick(&["http", "https", "jdbc:mysql"]),
+                    rng.range(1, 65535)
+                )
+            };
+            ("url-service-path", url)
+        }
+        // Templated passwords in configuration files.
+        44 => {
+            let var = rng.pick(&["POSTGRES_PASSWORD", "DB_PASS", "REDIS_PASSWORD", "MQ_SECRET"]);
+            let password = match rng.below(4) {
+                0 => format!("${{{var}}}"),
+                1 => format!("${var}"),
+                2 => format!("%({})s", var.to_lowercase()),
+                _ => format!("{{{{{}}}}}", var.to_lowercase()),
+            };
+            let scheme = rng.pick(&["postgres", "redis", "mysql", "amqp"]);
+            (
+                "url-template-password",
+                format!("{scheme}://app:{password}@db:5432/app"),
+            )
+        }
+        // Already redacted: an exact placeholder is never a finding.
+        _ => (
+            "placeholder",
+            format!(
+                "postgres://app:[REDACTED:url_credentials:{}]@db.example.com/app [REDACTED:jwt:{}]",
+                rng.chars(HEX, 16),
+                rng.chars(HEX, 16)
+            ),
+        ),
     };
-    embed(rng, &core)
+    (family, embed(rng, &core))
 }
 
 fn uuid(rng: &mut Prng) -> String {

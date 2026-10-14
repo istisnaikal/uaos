@@ -50,6 +50,43 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **Accepted, with a reason:** the journal does not yet mark when execution began. That
     arrives with the runtime (WP3.3).
 
+### Security
+
+- `uaos-redact`: `FinalScanner`'s derived `Debug` printed its known-secret automaton, from which
+  a vault secret could be reconstructed exactly. This was found by the retroactive review
+  (`docs/reviews/WP2.3-redact.md`, H1) and breaks red line 2. `FinalScanner`, `DetectorSet` and
+  the crate-private JSON scanners now have manual `Debug` implementations that show only the
+  version, counts and lengths. A canary test proves no 4-byte window of a vault secret reaches
+  `{:?}` or `{:#?}`; against the old code it fails on a 7,741-byte dump.
+- `uaos-redact` hardening II closes the rest of the retroactive review (ADR-0009 Amendment 1;
+  detector set v1 corrected in place, because no release has shipped it):
+  - **URL passwords** containing `/`, `#`, `?`, `'` or `@` were not redacted (H2). The password
+    now ends at the last `@` that a host follows, before a hard stop.
+  - **Keys glued to separators** (`${KEY:-sk-ant-…}`, `_ghp_…`, `KEY_sk_live_…`), keys followed by
+    more word characters, and runs longer than a format allowed all leaked (H3). They are now
+    covered whole.
+  - **Nested encodings** (M1, M2): JSON inside a JSON string (tool arguments, `partial_json`) and
+    percent-encoded text are scanned in three views by redaction, by `check_json` and by
+    `check_bytes`.
+  - **Smaller fixes:** overlapping anchors are found (L2), scanning is linear, with a test bound
+    on adversarial inputs (M3), and placeholders follow an exact grammar (L3).
+  - **Gate `redaction-corpus` now measures corpus v2** (M4): six evasion forms, every printable
+    URL password byte, an independent oracle, and false positives per family (40 families). It
+    reports 0 misses and 0 false positives. The pre-fix detectors scored 24.8–64.7 % recall per
+    class on it. The new negative case `redact-url-password-stops-at-slash` proves the gate
+    catches a one-byte regression.
+  - **A second fresh-context review of these fixes** found 2 High, 3 Medium and 3 Low findings.
+    All are fixed:
+    - JWT scanning went quadratic;
+    - a redacted user hid its password;
+    - form-encoded keys passed;
+    - service URLs and templated passwords were flagged;
+    - an escaped left neighbour hid keys;
+    - a crafted cascade wedged the session (such content is now replaced whole).
+  - **Cost** on a 1.8 MB history where every message is a tool call's JSON arguments: final scan
+    p50 8.3 ms. That is above the plan's 6 ms per-stage hypothesis, and is recorded as a WP3.8
+    input.
+
 ### Added
 
 - `docs/decisions.md`: a register of open decisions with class, default and deadline. Decisions
@@ -57,10 +94,6 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 - `docs/roadmap.md` (public roadmap), `docs/rfcs/` (process and template), `MAINTAINERS.md` (with
   the single-maintainer risk stated), `docs/research/name-check.md`.
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
 - Proposed ADRs (48 h review windows open):
   - **ADR-0011:** scoped credentials (`uaos_sk_`), a hierarchy with decidable scope containment,
     epoch revocation and a guard against restoring an older data directory.
@@ -88,8 +121,6 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - the slowest group flush is 29.5 ms (p99.9), so W = 50 ms stands;
   - a new chunk costs **28.5 ms at p99 on macOS**, more than the entire 25 ms overhead SLO.
 
-||||||| parent of e8f2691 (Gate hardening I: allow-audit, vet-ratchet and claims-lint)
-=======
 - Three merge gates, each proven to bite by seeded violations (plan v2 PD-06, PD-19, V6):
   - **`allow-audit`** finds every `#[allow]`/`#[expect]` of `unsafe_code`,
     `clippy::disallowed_methods` or `clippy::disallowed_types`, including multi-line and
@@ -103,9 +134,6 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     with a reason.
 - `docs/claims.md`: the registry of public claims and the gates behind them.
 
->>>>>>> e8f2691 (Gate hardening I: allow-audit, vet-ratchet and claims-lint)
-||||||| parent of bf7e3b2 (Propose P3 ADRs 0010, 0013, 0014, 0017, 0018)
-=======
 - Proposed ADRs for P3 (48 h review windows open):
   - **ADR-0010:** kernel tokens: a pipeline typestate in a private runtime module, plus
     reachability enforced by `arch.toml`, a `surface` check and a Ring 1 closure ban.
@@ -118,9 +146,6 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **ADR-0018:** chunks join the journal's durability classes. One new chunk costs 28.5 ms
     at p99 on a macOS runner today.
 
->>>>>>> bf7e3b2 (Propose P3 ADRs 0010, 0013, 0014, 0017, 0018)
-||||||| parent of ead8d14 (Gate hardening II: evidence freshness, xtask quick, nightly mutants)
-=======
 - `cargo xtask evidence [--candidate <rev>] [--streak N] [--max-age-hours H]` (plan v2 V5). It
   checks the nightly runs on `main`. The newest must be green, at most 48 h old, and ran on
   code identical to the candidate in `crates/`, `xtask/`, the manifests and the toolchain file.
@@ -133,9 +158,6 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   It is report-only until a per-crate baseline exists; a failing unmutated baseline still fails
   the job.
 
->>>>>>> ead8d14 (Gate hardening II: evidence freshness, xtask quick, nightly mutants)
-||||||| parent of 576ec35 (WP3.0a: record the beachhead gateway facts with sources)
-=======
 - `docs/research/beachhead-facts.md` (plan v2 WP3.0a). It records the gateway requirements of
   Claude Code (16 facts) and Codex (6 facts), each with its source, date and consequence. Codex's
   Responses-only wire API is confirmed from the official configuration reference. What
@@ -143,7 +165,6 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   exact endpoint inventory) is listed as open until a traffic capture, which waits for the
   maintainer's go-ahead.
 
->>>>>>> 576ec35 (WP3.0a: record the beachhead gateway facts with sources)
 - P2 WP2.3 — `uaos-redact` (ADR-0009): schema-agnostic secret detection and redaction with a
   fail-closed final scan. Detector set v1 covers 11 high-risk classes:
   - private keys, JWTs;

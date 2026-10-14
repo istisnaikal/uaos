@@ -7,6 +7,10 @@
 //! Run: `cargo bench -p uaos-redact --bench redact`. Prints p50/p99 for redacting the whole body
 //! (the worst case: in the pipeline, chunk-digest caching limits this to new content) and for the
 //! final scan of the whole redacted body (always paid in full, on every request).
+//!
+//! Two bodies are measured: prose messages, and the same history with every message carried as
+//! a tool call's JSON arguments, so every string has a nested view to decode and scan (the
+//! worst case for the nested views of review M1).
 //! Dependency-free on purpose (`harness = false`).
 
 #![allow(
@@ -29,7 +33,7 @@ use uaos_redact::{DataClass, DetectorVersion, FinalScanner, Redactor};
 const TARGET_BYTES: usize = 1_600_000;
 const ITERATIONS: usize = 60;
 
-fn history() -> Vec<u8> {
+fn history(nested: bool) -> Vec<u8> {
     let mut rng = Prng::new(11);
     let mut messages = Vec::new();
     let mut size = 0;
@@ -49,7 +53,12 @@ fn history() -> Vec<u8> {
         }
         size += text.len();
         let role = if n.is_multiple_of(2) { "user" } else { "assistant" };
-        messages.push(json!({ "role": role, "content": text }));
+        let content = if nested {
+            serde_json::to_string(&json!({ "command": "run", "input": text })).unwrap()
+        } else {
+            text
+        };
+        messages.push(json!({ "role": role, "content": content }));
         n += 1;
     }
     serde_json::to_vec(&json!({ "model": "m", "max_tokens": 4096, "messages": Value::Array(messages) })).unwrap()
@@ -61,12 +70,8 @@ fn percentiles(mut samples: Vec<Duration>) -> (Duration, Duration) {
     (at(50), at(99))
 }
 
-fn main() {
-    let body = history();
-    let redactor = Redactor::new(DetectorVersion::V1, SecretKey::from_bytes([1; 32])).unwrap();
-    let scanner = FinalScanner::new(DetectorVersion::V1, [b"vault-provider-key-0123456789abcdef".as_slice()]).unwrap();
-
-    let redacted = redactor.redact_json(&body).unwrap();
+fn measure(name: &str, body: &[u8], redactor: &Redactor, scanner: &FinalScanner) {
+    let redacted = redactor.redact_json(body).unwrap();
     let replaced = redacted.replacements().len();
     let output = redacted.into_output().into_owned();
     scanner.check_json(&output).unwrap();
@@ -75,7 +80,7 @@ fn main() {
     let mut scan = Vec::with_capacity(ITERATIONS);
     for _ in 0..ITERATIONS {
         let t = Instant::now();
-        let r = redactor.redact_json(&body).unwrap();
+        let r = redactor.redact_json(body).unwrap();
         redact.push(t.elapsed());
         assert_eq!(r.replacements().len(), replaced);
         let t = Instant::now();
@@ -85,7 +90,14 @@ fn main() {
     let (r50, r99) = percentiles(redact);
     let (s50, s99) = percentiles(scan);
     let mb = f64::from(u32::try_from(body.len()).unwrap()) / 1_000_000.0;
-    println!("body: {mb:.2} MB JSON, {replaced} distinct secrets replaced");
-    println!("redact_json (full body): p50 {r50:?}  p99 {r99:?}");
-    println!("final scan  (full body): p50 {s50:?}  p99 {s99:?}");
+    println!("{name}: {mb:.2} MB JSON, {replaced} distinct secrets replaced");
+    println!("  redact_json (full body): p50 {r50:?}  p99 {r99:?}");
+    println!("  final scan  (full body): p50 {s50:?}  p99 {s99:?}");
+}
+
+fn main() {
+    let redactor = Redactor::new(DetectorVersion::V1, SecretKey::from_bytes([1; 32])).unwrap();
+    let scanner = FinalScanner::new(DetectorVersion::V1, [b"vault-provider-key-0123456789abcdef".as_slice()]).unwrap();
+    measure("prose history", &history(false), &redactor, &scanner);
+    measure("tool-call history (nested views)", &history(true), &redactor, &scanner);
 }

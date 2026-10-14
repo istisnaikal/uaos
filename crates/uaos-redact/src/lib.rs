@@ -7,6 +7,11 @@
 //!
 //! * **schema-agnostic**: every JSON string is scanned (keys and values, at any depth, known
 //!   and unknown fields), after decoding escapes, so `\u`-escaped secrets are found;
+//! * **nested**: each string and text is scanned in four views (as decoded, two further levels
+//!   of JSON and percent escapes, and form encoding), so a secret in a tool call's JSON
+//!   arguments, a double-escaped `partial_json` or a form body is found;
+//! * **boundaries fail closed**: a key glued to separators, or longer than its format, is still
+//!   covered whole;
 //! * **byte-preserving**: placeholders are spliced into the original bytes; content without a
 //!   detection is returned borrowed, byte for byte;
 //! * **stable placeholders**: `[REDACTED:<class>:<tag>]`, where the tag is HMAC-SHA-256 under the
@@ -18,9 +23,12 @@
 //!   the caller must turn into a block, and [`FinalScanner`] blocks on any detection or known
 //!   vault secret in the exact outbound bytes.
 //!
-//! This crate performs no I/O and never logs: neither secrets nor content can reach a log
-//! through it. Recall is bound to the formats detector set v1 claims (see ADR-0009 for the
-//! classes and the corpus metrics); free-form passwords outside URL userinfo are not detected.
+//! This crate performs no I/O and never logs, and no type in it shows content or secret-derived
+//! structure in `Debug` output. Scanning is linear in the input (a test bounds the work on
+//! adversarial inputs). Recall is bound to the formats detector set v1 claims, measured on
+//! synthetic corpus v2 (ADR-0009 lists the classes, metrics and limits). Not detected: free-form
+//! passwords outside URL userinfo, AWS secret access keys (only key ids), and encodings beyond
+//! the four views. Content that would need more than 8 redaction rounds is replaced whole.
 
 #![deny(missing_docs)]
 #![deny(clippy::indexing_slicing)]

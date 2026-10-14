@@ -311,8 +311,21 @@ pub(crate) fn cases() -> Vec<Case> {
             // A detector set that no longer recognises one AWS key prefix.
             seed: replace(
                 "crates/uaos-redact/src/detect.rs",
-                "        anchor(\"ASIA\", C::AwsAccessKeyId, alnum, AWS),\n",
+                "        anchor(\"ASIA\", C::AwsAccessKeyId, true, AWS),\n",
                 "",
+            ),
+            runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-redact", "--test", "corpus"] },
+            expect: "recall below",
+        },
+        Case {
+            id: "redact-url-password-stops-at-slash",
+            gate: "redaction-corpus",
+            tool: None,
+            // Review WP2.3 H2, one byte wide: a URL password ends at its first `/` again.
+            seed: replace(
+                "crates/uaos-redact/src/detect.rs",
+                r#"matches!(b, b'"' | b'<' | b'>' | b'`')"#,
+                r#"matches!(b, b'"' | b'<' | b'>' | b'`' | b'/')"#,
             ),
             runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-redact", "--test", "corpus"] },
             expect: "recall below",
