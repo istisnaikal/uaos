@@ -6,8 +6,8 @@
 //! `uaos.budget_tx/1` entry. The journal acknowledges only after the OS holds the record
 //! (ADR-0003), so a reservation is crash-durable before its Operation can execute.
 
-use uaos_contracts::budget::BudgetTx;
-use uaos_contracts::event::{Actor, Durability, InlinePayload, Metadata, types};
+use uaos_contracts::budget::{BudgetTx, BudgetTxKind};
+use uaos_contracts::event::{Durability, InlinePayload, Metadata, types};
 use uaos_contracts::id::{CorrelationId, OperationId};
 use uaos_contracts::operation::{RiskTier, SideEffectClass};
 use uaos_contracts::wire::ConfigVersion;
@@ -15,13 +15,13 @@ use uaos_state::journal::{EventDraft, Journal, VerifiedRecord};
 
 use crate::ledger::LedgerSink;
 
-/// Records entries as `budget.entry` journal records for one correlated action.
+/// Records entries as `budget.entry` journal records for one correlated action. The event's
+/// actor is the entry's own principal, so the two can never disagree.
 #[derive(Debug)]
 pub struct JournalSink<'a> {
     journal: &'a mut Journal,
     correlation: CorrelationId,
     operation: Option<OperationId>,
-    actor: Actor,
     config_version: ConfigVersion,
 }
 
@@ -31,14 +31,12 @@ impl<'a> JournalSink<'a> {
         journal: &'a mut Journal,
         correlation: CorrelationId,
         operation: Option<OperationId>,
-        actor: Actor,
         config_version: ConfigVersion,
     ) -> Self {
         Self {
             journal,
             correlation,
             operation,
-            actor,
             config_version,
         }
     }
@@ -54,14 +52,20 @@ impl LedgerSink for JournalSink<'_> {
             request_id: None,
             correlation_id: self.correlation,
             parent_id: None,
-            actor: self.actor.clone(),
+            actor: tx.principal.clone(),
             event_type: types::BUDGET_ENTRY,
             payload_ref: None,
             payload_inline: Some(InlinePayload::new(payload).map_err(|e| e.to_string())?),
             cost_estimate: None,
             compensable: false,
             side_effect_class: SideEffectClass::None,
-            risk_tier: RiskTier::new(0).map_err(|e| e.to_string())?,
+            // An overrun (spend beyond the reservation) is an S1 condition: journaled at the
+            // highest risk tier so that it surfaces, never as routine bookkeeping.
+            risk_tier: if tx.kind == BudgetTxKind::Adjust {
+                RiskTier::MAX
+            } else {
+                RiskTier::new(0).map_err(|e| e.to_string())?
+            },
             durability: Durability::Critical,
             config_version: self.config_version,
             metadata: Metadata::default(),

@@ -283,12 +283,15 @@ fn idempotent_retries_record_nothing_new_and_conflicts_are_refused() {
         LedgerError::KeyConflict("fund".to_owned())
     );
     ledger
+        .allocate(&mut sink, pool(1), usd(0), &sys(), key("open1"))
+        .unwrap();
+    ledger
         .transfer(&mut sink, pool(0), pool(1), usd(40), &sys(), key("move"))
         .unwrap();
     ledger
         .transfer(&mut sink, pool(0), pool(1), usd(40), &sys(), key("move"))
         .unwrap();
-    assert_eq!(sink.entries.len(), 3, "a retried transfer moves money once");
+    assert_eq!(sink.entries.len(), 4, "a retried transfer moves money once");
     assert_eq!(balances(&ledger, 0).0, 60);
     assert_eq!(balances(&ledger, 1).0, 40);
     assert!(matches!(
@@ -357,10 +360,13 @@ fn a_recording_failure_poisons_until_rebuilt() {
 fn transfers_move_money_and_recovery_completes_a_half_recorded_one() {
     let (mut ledger, mut sink) = funded(100);
     ledger
+        .allocate(&mut sink, pool(1), usd(0), &sys(), key("open1"))
+        .unwrap();
+    ledger
         .transfer(&mut sink, pool(0), pool(1), usd(25), &sys(), key("t1"))
         .unwrap();
     assert_eq!((balances(&ledger, 0).0, balances(&ledger, 1).0), (75, 25));
-    let pair: Vec<_> = sink.entries[1..]
+    let pair: Vec<_> = sink.entries[2..]
         .iter()
         .map(|tx| (tx.kind, tx.counterparty_pool))
         .collect();
@@ -374,7 +380,7 @@ fn transfers_move_money_and_recovery_completes_a_half_recorded_one() {
 
     // Crash between the halves: the out half is recorded, the in half is not.
     let mut half = sink.entries.clone();
-    let mut out = half[1].clone();
+    let mut out = half[2].clone();
     out.idempotency_key = key("t2");
     out.balance_before = usd(75);
     out.balance_after = usd(50);
@@ -396,10 +402,20 @@ fn transfers_move_money_and_recovery_completes_a_half_recorded_one() {
 #[test]
 fn transfer_rules() {
     let (mut ledger, mut sink) = funded(10);
+    ledger
+        .allocate(&mut sink, pool(1), usd(0), &sys(), key("open1"))
+        .unwrap();
     assert!(matches!(
         ledger.transfer(&mut sink, pool(0), pool(0), usd(1), &sys(), key("self")),
-        Err(LedgerError::Inconsistent(_))
+        Err(LedgerError::Invalid(_))
     ));
+    assert_eq!(
+        ledger
+            .transfer(&mut sink, pool(0), pool(3), usd(1), &sys(), key("conjure"))
+            .unwrap_err(),
+        LedgerError::UnknownPool(pool(3)),
+        "a transfer cannot create a pool"
+    );
     assert!(matches!(
         ledger.transfer(&mut sink, pool(0), pool(1), usd(11), &sys(), key("big")),
         Err(LedgerError::Insufficient { .. })
@@ -410,7 +426,7 @@ fn transfer_rules() {
             .unwrap_err(),
         LedgerError::UnknownPool(pool(2))
     );
-    assert_eq!(sink.entries.len(), 1);
+    assert_eq!(sink.entries.len(), 2);
 }
 
 #[test]
@@ -430,7 +446,8 @@ fn recovery_settles_open_reservations_and_never_releases_them() {
         Recovery {
             settled_estimated: 2,
             completed: 0,
-            transfers_completed: 0
+            transfers_completed: 0,
+            stuck: Vec::new(),
         }
     );
     assert_eq!(balances(&rebuilt, 0), (70, 0, 30));
@@ -457,7 +474,9 @@ fn recovery_completes_a_partial_settlement_with_the_reported_amount() {
         countdown: Some(1),
     };
     assert!(matches!(
-        ledger.settle(&mut sink, in_flight, Usage::Reported(usd(12)), &sys()),
+        ledger
+            .settle(&mut sink, in_flight, Usage::Reported(usd(12)), &sys())
+            .map_err(LedgerError::from),
         Err(LedgerError::Sink(_))
     ));
     let mut rebuilt = Ledger::replay(&sink.inner.entries).unwrap();
@@ -623,13 +642,7 @@ impl JournalWorld {
 }
 
 fn journal_sink(journal: &mut Journal) -> JournalSink<'_> {
-    JournalSink::new(
-        journal,
-        CorrelationId::from_parts(1, [3; 10]),
-        None,
-        sys(),
-        ConfigVersion(1),
-    )
+    JournalSink::new(journal, CorrelationId::from_parts(1, [3; 10]), None, ConfigVersion(1))
 }
 
 #[test]
@@ -647,6 +660,9 @@ fn journal_entries_survive_a_crash_and_replay_to_the_live_ledger() {
             .settle(&mut sink, held.begin(), Usage::Reported(usd(25)), &sys())
             .unwrap();
         ledger
+            .allocate(&mut sink, pool(1), usd(0), &sys(), key("open1"))
+            .unwrap();
+        ledger
             .transfer(&mut sink, pool(0), pool(1), usd(10), &sys(), key("move"))
             .unwrap();
         // Left open when the process dies.
@@ -661,7 +677,7 @@ fn journal_entries_survive_a_crash_and_replay_to_the_live_ledger() {
 
     let mut journal = world.open();
     let entries = world.entries().unwrap();
-    assert_eq!(entries.len(), 7);
+    assert_eq!(entries.len(), 8);
     let mut rebuilt = Ledger::replay(&entries).unwrap();
     assert_eq!(rebuilt.state(), &live, "every critical entry survived the crash");
     let report = rebuilt.recover(&mut journal_sink(&mut journal), &sys()).unwrap();
@@ -979,11 +995,11 @@ impl Sim {
                     let r = self.ledger.release(&mut self.sink, held, &sys());
                     match surviving(arm, 1) {
                         None => {
-                            r.map_err(unexpected)?;
+                            r.map_err(|e| unexpected(e.into()))?;
                             self.released(id);
                         }
                         Some(kept) => {
-                            prop_assert!(matches!(r, Err(LedgerError::Sink(_))));
+                            prop_assert!(matches!(r.map_err(LedgerError::from), Err(LedgerError::Sink(_))));
                             poisons = true;
                             if kept >= 1 {
                                 self.released(id);
@@ -1010,7 +1026,7 @@ impl Sim {
                     let r = self.ledger.settle(&mut self.sink, token, usage, &sys());
                     match surviving(arm, records) {
                         None => {
-                            let s = r.map_err(unexpected)?;
+                            let s = r.map_err(|e| unexpected(e.into()))?;
                             prop_assert_eq!(
                                 s,
                                 Settlement {
@@ -1023,7 +1039,7 @@ impl Sim {
                             self.settled(id, actual);
                         }
                         Some(kept) => {
-                            prop_assert!(matches!(r, Err(LedgerError::Sink(_))));
+                            prop_assert!(matches!(r.map_err(LedgerError::from), Err(LedgerError::Sink(_))));
                             poisons = true;
                             if kept >= 1 {
                                 // The recorded Settle carries the actual spend; recovery closes it.
@@ -1043,6 +1059,10 @@ impl Sim {
                     .transfer(&mut self.sink, pool(from), pool(to), usd(amount), &sys(), k);
                 match self.pools[from] {
                     None => prop_assert_eq!(r.err(), Some(LedgerError::UnknownPool(pool(from)))),
+                    // A transfer cannot create its destination (review L2).
+                    Some(_) if self.pools[to].is_none() => {
+                        prop_assert_eq!(r.err(), Some(LedgerError::UnknownPool(pool(to))));
+                    }
                     Some(b) if b.available < amount => prop_assert_eq!(
                         r.err(),
                         Some(LedgerError::Insufficient {
@@ -1130,6 +1150,7 @@ impl Sim {
             settled_estimated: self.open.len(),
             completed: std::mem::take(&mut self.partial_settles),
             transfers_completed: std::mem::take(&mut self.partial_transfers),
+            stuck: Vec::new(),
         };
         for (_, (p, amount)) in std::mem::take(&mut self.open) {
             let b = self.bal(p);
@@ -1254,4 +1275,318 @@ proptest! {
         prop_assert_eq!(sim.ledger.state().open_reservations(), 0);
         sim.check_closure()?;
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Regressions for the retroactive review (docs/reviews/WP2.2-ledger.md)
+// ---------------------------------------------------------------------------------------------
+
+/// Fund 100, reserve 30, settle 80 (overrun 50) and fail the closing overrun entry: the journal
+/// holds the Settle but not the Adjust.
+fn unclosed_overrun() -> Vec<BudgetTx> {
+    let (mut ledger, inner) = funded(100);
+    let mut sink = FailAt { inner, countdown: None };
+    let in_flight = ledger
+        .reserve(&mut sink, pool(0), rid(1), usd(30), &sys())
+        .unwrap()
+        .begin();
+    sink.countdown = Some(1); // the Settle is recorded, the overrun Adjust fails
+    assert!(
+        ledger
+            .settle(&mut sink, in_flight, Usage::Reported(usd(80)), &sys())
+            .is_err()
+    );
+    sink.inner.entries
+}
+
+#[test]
+fn a_rebuilt_ledger_refuses_new_work_until_recovered() {
+    // Review H1.
+    let entries = unclosed_overrun();
+    let mut rebuilt = Ledger::replay(&entries).unwrap();
+    assert!(rebuilt.needs_recovery());
+    let mut sink = MemorySink {
+        entries: entries.clone(),
+        fail_next: None,
+    };
+    assert_eq!(
+        rebuilt
+            .reserve(&mut sink, pool(0), rid(2), usd(70), &sys())
+            .unwrap_err(),
+        LedgerError::RecoveryRequired
+    );
+    assert_eq!(
+        rebuilt
+            .allocate(&mut sink, pool(0), usd(1), &sys(), key("more"))
+            .unwrap_err(),
+        LedgerError::RecoveryRequired
+    );
+    // The unclosed overrun counts against the cap even before recovery closes it.
+    let mut crafted = sink.entries.last().unwrap().clone();
+    crafted.idempotency_key = key("crafted");
+    crafted.kind = BudgetTxKind::Reserve;
+    crafted.reservation_id = Some(rid(9));
+    crafted.amount = usd(70);
+    crafted.balance_before = usd(70);
+    crafted.balance_after = usd(0);
+    crafted.settled = false;
+    crafted.estimated = false;
+    assert!(matches!(
+        rebuilt.state().check(&crafted),
+        Err(LedgerError::Insufficient { .. })
+    ));
+
+    let report = rebuilt.recover(&mut sink, &sys()).unwrap();
+    assert_eq!(report.completed, 1);
+    assert!(!rebuilt.needs_recovery());
+    assert_eq!(balances(&rebuilt, 0), (20, 0, 80), "the overrun is charged");
+    assert!(matches!(
+        rebuilt.reserve(&mut sink, pool(0), rid(2), usd(70), &sys()),
+        Err(LedgerError::Insufficient { .. })
+    ));
+    let _held = rebuilt.reserve(&mut sink, pool(0), rid(3), usd(20), &sys()).unwrap();
+}
+
+#[test]
+fn caller_keys_cannot_collide_with_derived_keys() {
+    // Review H2.
+    let (mut ledger, mut sink) = funded(100);
+    ledger
+        .allocate(&mut sink, pool(1), usd(0), &sys(), key("open1"))
+        .unwrap();
+    for reserved in [
+        "move:in",
+        "rsv_anything",
+        "x:reserve",
+        "x:release",
+        "x:settle",
+        "x:overrun",
+    ] {
+        assert_eq!(
+            ledger
+                .allocate(&mut sink, pool(0), usd(1), &sys(), key(reserved))
+                .unwrap_err()
+                .code(),
+            codes::BUDGET_KEY_CONFLICT,
+            "{reserved}"
+        );
+        assert!(matches!(
+            ledger.transfer(&mut sink, pool(0), pool(1), usd(1), &sys(), key(reserved)),
+            Err(LedgerError::KeyReserved(_))
+        ));
+    }
+    assert_eq!(sink.entries.len(), 2, "nothing was recorded");
+}
+
+#[test]
+fn recovery_reports_a_stuck_item_and_still_closes_the_rest() {
+    // Review H2: one bad item must not block recovery of everything else.
+    let (mut ledger, mut sink) = funded(100);
+    ledger
+        .allocate(&mut sink, pool(1), usd(0), &sys(), key("open1"))
+        .unwrap();
+    ledger
+        .transfer(&mut sink, pool(0), pool(1), usd(10), &sys(), key("t"))
+        .unwrap();
+    let _open = ledger.reserve(&mut sink, pool(0), rid(1), usd(5), &sys()).unwrap();
+    // A crafted journal: drop the transfer's second half, and make its key collide.
+    let mut entries = sink.entries.clone();
+    let transfer_in = entries.remove(3);
+    let mut collider = entries[1].clone();
+    collider.idempotency_key = transfer_in.idempotency_key.clone();
+    collider.amount = usd(0);
+    collider.balance_before = usd(0);
+    collider.balance_after = usd(0);
+    entries.insert(2, collider);
+    let mut rebuilt = Ledger::replay(&entries).unwrap();
+    let mut sink = MemorySink {
+        entries,
+        fail_next: None,
+    };
+    let report = rebuilt.recover(&mut sink, &sys()).unwrap();
+    assert_eq!(report.settled_estimated, 1, "the open reservation was still closed");
+    assert_eq!(report.stuck.len(), 1, "{:?}", report.stuck);
+    assert!(
+        rebuilt.needs_recovery(),
+        "a stuck item keeps the ledger closed for new work"
+    );
+}
+
+#[test]
+fn recovery_is_boot_only_and_rejected_closes_hand_the_token_back() {
+    // Review M1.
+    let (mut ledger, mut sink) = funded(100);
+    let held = ledger.reserve(&mut sink, pool(0), rid(1), usd(30), &sys()).unwrap();
+    assert_eq!(
+        ledger.recover(&mut sink, &sys()).unwrap_err(),
+        LedgerError::NotReplayed,
+        "recovery must not settle a reservation whose token is still live"
+    );
+    let in_flight = held.begin();
+    let token = match ledger.settle(&mut sink, in_flight, Usage::Reported(usd(-5)), &sys()) {
+        Err(uaos_ledger::CloseError::Rejected { reservation, .. }) => reservation,
+        other => panic!("expected the token back, got {other:?}"),
+    };
+    let s = ledger
+        .settle(&mut sink, token, Usage::Reported(usd(30)), &sys())
+        .unwrap();
+    assert_eq!(s.spent, usd(30));
+
+    let held = ledger.reserve(&mut sink, pool(0), rid(2), usd(10), &sys()).unwrap();
+    sink.fail_next = Some("disk full".to_owned());
+    assert!(
+        ledger
+            .allocate(&mut sink, pool(0), usd(1), &sys(), key("poison"))
+            .is_err()
+    );
+    assert!(ledger.is_poisoned());
+    assert!(matches!(
+        ledger.release(&mut sink, held, &sys()),
+        Err(uaos_ledger::CloseError::Rejected {
+            error: LedgerError::Poisoned,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn replay_enforces_every_reservation_and_transfer_rule() {
+    // Review M4: the four rules that seeded mutants showed no test exercised.
+    let (mut ledger, inner) = funded(100);
+    let mut sink = FailAt { inner, countdown: None };
+    ledger
+        .allocate(&mut sink, pool(1), usd(5), &sys(), key("open1"))
+        .unwrap();
+    let in_flight = ledger
+        .reserve(&mut sink, pool(0), rid(1), usd(30), &sys())
+        .unwrap()
+        .begin();
+    sink.countdown = Some(1); // the Settle (12 of 30) is recorded, its Release is not
+    assert!(
+        ledger
+            .settle(&mut sink, in_flight, Usage::Reported(usd(12)), &sys())
+            .is_err()
+    );
+    let base = sink.inner.entries.clone();
+    let settle = base.last().unwrap().clone();
+    assert_eq!(settle.kind, BudgetTxKind::Settle);
+
+    // (1) A second Settle on a partly settled reservation.
+    let mut twice = base.clone();
+    let mut again = settle.clone();
+    again.idempotency_key = key("again");
+    twice.push(again);
+    assert!(Ledger::replay(&twice).is_err(), "second settle accepted");
+
+    // (2) A Settle against another pool.
+    let mut other_pool = base[..base.len() - 1].to_vec();
+    let mut wrong = settle.clone();
+    wrong.pool_id = pool(1);
+    wrong.balance_before = usd(5);
+    wrong.balance_after = usd(5);
+    other_pool.push(wrong);
+    assert!(
+        Ledger::replay(&other_pool).is_err(),
+        "settle against another pool accepted"
+    );
+
+    // (3) A TransferIn whose amount differs from its TransferOut.
+    let (mut l2, mut s2) = funded(100);
+    l2.allocate(&mut s2, pool(1), usd(0), &sys(), key("open1")).unwrap();
+    l2.transfer(&mut s2, pool(0), pool(1), usd(10), &sys(), key("t"))
+        .unwrap();
+    let mut inflated = s2.entries.clone();
+    let transfer_in = inflated.last_mut().unwrap();
+    transfer_in.amount = usd(11);
+    transfer_in.balance_after = usd(11);
+    assert!(
+        Ledger::replay(&inflated).is_err(),
+        "transfer_in creating money accepted"
+    );
+
+    // (4) A Release that does not close its reservation.
+    let (mut l3, mut s3) = funded(100);
+    let held = l3.reserve(&mut s3, pool(0), rid(1), usd(30), &sys()).unwrap();
+    l3.release(&mut s3, held, &sys()).unwrap();
+    let mut open_release = s3.entries.clone();
+    open_release.last_mut().unwrap().settled = false;
+    assert!(
+        Ledger::replay(&open_release).is_err(),
+        "release without settled accepted"
+    );
+}
+
+#[test]
+fn replay_refuses_money_without_a_producer() {
+    // Review L3.
+    let (_, sink) = funded(100);
+    let fund = sink.entries[0].clone();
+    let mut refund = fund.clone();
+    refund.idempotency_key = key("refund");
+    refund.kind = BudgetTxKind::Refund;
+    refund.balance_before = usd(100);
+    refund.balance_after = usd(200);
+    assert!(Ledger::replay(&[fund.clone(), refund]).is_err());
+    let mut adjust = fund.clone();
+    adjust.idempotency_key = key("adjust");
+    adjust.kind = BudgetTxKind::Adjust;
+    adjust.balance_before = usd(100);
+    adjust.balance_after = usd(200);
+    assert!(Ledger::replay(&[fund, adjust]).is_err());
+}
+
+#[test]
+fn a_retry_must_match_every_field_and_errors_have_their_own_codes() {
+    // Review L4 and M5.
+    let (mut ledger, mut sink) = funded(100);
+    let other = Actor::Module {
+        name: uaos_contracts::event::ModuleName::new("mod-x").unwrap(),
+    };
+    let err = ledger
+        .allocate(&mut sink, pool(0), usd(100), &other, key("fund"))
+        .unwrap_err();
+    assert_eq!(
+        err,
+        LedgerError::KeyConflict("fund".to_owned()),
+        "another principal is not a retry"
+    );
+    assert_eq!(err.code(), codes::BUDGET_KEY_CONFLICT);
+    assert_eq!(LedgerError::Inconsistent("x").code(), codes::BUDGET_LEDGER_INCONSISTENT);
+    assert_eq!(LedgerError::RecoveryRequired.code(), codes::BUDGET_RECOVERY_REQUIRED);
+    assert_eq!(
+        LedgerError::Insufficient {
+            pool: pool(0),
+            available: usd(0),
+            requested: usd(1)
+        }
+        .code(),
+        codes::BUDGET_HARD_STOP
+    );
+}
+
+#[test]
+fn an_overrun_is_journaled_at_the_highest_risk_tier() {
+    // Review M5: an overrun is an S1 condition, not routine bookkeeping.
+    let world = JournalWorld::new();
+    let mut journal = world.open();
+    let mut ledger = Ledger::default();
+    {
+        let mut sink = journal_sink(&mut journal);
+        ledger
+            .allocate(&mut sink, pool(0), usd(100), &sys(), key("fund"))
+            .unwrap();
+        let held = ledger.reserve(&mut sink, pool(0), rid(1), usd(10), &sys()).unwrap();
+        let s = ledger
+            .settle(&mut sink, held.begin(), Usage::Reported(usd(25)), &sys())
+            .unwrap();
+        assert_eq!(s.overrun, usd(15));
+    }
+    let (records, _) = read_verified(&world.fs, &Path::new("/data").join(JOURNAL_DIR)).unwrap();
+    let tiers: Vec<_> = records
+        .iter()
+        .filter(|r| r.envelope.event_type == types::BUDGET_ENTRY)
+        .map(|r| r.envelope.risk_tier)
+        .collect();
+    assert_eq!(tiers.last(), Some(&RiskTier::MAX));
+    assert!(tiers[..tiers.len() - 1].iter().all(|t| *t != RiskTier::MAX));
 }

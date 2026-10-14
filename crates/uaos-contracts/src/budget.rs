@@ -49,6 +49,22 @@ pub enum BudgetTxError {
     /// An idempotency key or reason code is malformed.
     #[error("idempotency keys are 1..=128 bytes of [A-Za-z0-9_.:-]; reason codes 1..=64 bytes of [a-z0-9_]")]
     MalformedToken,
+    /// A field is set on a kind that does not use it (reservation, counterparty, `settled`,
+    /// `estimated`), or a counterparty names the entry's own pool.
+    #[error("{field} is not allowed on {kind:?} entries")]
+    FieldNotAllowed {
+        /// The offending field.
+        field: &'static str,
+        /// The entry kind.
+        kind: BudgetTxKind,
+    },
+    /// A hold or outgoing transfer would leave the available balance negative: no entry that
+    /// takes money out of `available` may exceed it (the hard cap, checked per entry).
+    #[error("{0:?} would leave the available balance negative")]
+    CapExceeded(BudgetTxKind),
+    /// A release that does not close its reservation, or a zero adjustment.
+    #[error("{0:?} entry is incomplete")]
+    Incomplete(BudgetTxKind),
 }
 
 /// The kind of ledger entry.
@@ -242,22 +258,41 @@ impl BudgetTx {
     /// # Errors
     /// Returns the first violated invariant.
     pub fn validate(&self) -> Result<(), BudgetTxError> {
+        use BudgetTxKind as K;
+        let not_allowed = |field| BudgetTxError::FieldNotAllowed { field, kind: self.kind };
         if self.kind.requires_reservation() && self.reservation_id.is_none() {
             return Err(BudgetTxError::MissingReservation(self.kind));
         }
-        if matches!(self.kind, BudgetTxKind::TransferOut | BudgetTxKind::TransferIn) && self.counterparty_pool.is_none()
-        {
-            return Err(BudgetTxError::MissingCounterparty(self.kind));
+        if self.reservation_id.is_some() && !matches!(self.kind, K::Reserve | K::Settle | K::Release | K::Adjust) {
+            return Err(not_allowed("reservation_id"));
+        }
+        let transfer = matches!(self.kind, K::TransferOut | K::TransferIn);
+        match self.counterparty_pool {
+            None if transfer => return Err(BudgetTxError::MissingCounterparty(self.kind)),
+            Some(_) if !transfer => return Err(not_allowed("counterparty_pool")),
+            Some(other) if other == self.pool_id => return Err(not_allowed("counterparty_pool equal to pool_id")),
+            _ => {}
+        }
+        if self.settled && !matches!(self.kind, K::Settle | K::Release | K::Adjust) {
+            return Err(not_allowed("settled"));
+        }
+        if self.estimated && self.kind != K::Settle {
+            return Err(not_allowed("estimated"));
+        }
+        if (self.kind == K::Release && !self.settled) || (self.kind == K::Adjust && self.amount == NanoUsd::ZERO) {
+            return Err(BudgetTxError::Incomplete(self.kind));
         }
         let expected = self
             .balance_before
             .checked_add(self.effect()?)
             .ok_or(BudgetTxError::Conservation)?;
-        if expected == self.balance_after {
-            Ok(())
-        } else {
-            Err(BudgetTxError::Conservation)
+        if expected != self.balance_after {
+            return Err(BudgetTxError::Conservation);
         }
+        if matches!(self.kind, K::Reserve | K::TransferOut) && self.balance_after.is_negative() {
+            return Err(BudgetTxError::CapExceeded(self.kind));
+        }
+        Ok(())
     }
 }
 
@@ -280,9 +315,14 @@ mod tests {
             balance_after: NanoUsd::new(after),
             reason_code: ReasonCode::new("model_call").unwrap(),
             related_event: None,
-            reservation_id: Some(ReservationId::from_parts(1, [2; 10])),
-            counterparty_pool: None,
-            settled: false,
+            reservation_id: matches!(
+                kind,
+                BudgetTxKind::Reserve | BudgetTxKind::Settle | BudgetTxKind::Release | BudgetTxKind::Adjust
+            )
+            .then(|| ReservationId::from_parts(1, [2; 10])),
+            counterparty_pool: matches!(kind, BudgetTxKind::TransferOut | BudgetTxKind::TransferIn)
+                .then(|| PoolId::from_parts(1, [3; 10])),
+            settled: matches!(kind, BudgetTxKind::Release | BudgetTxKind::Adjust),
             estimated: false,
         }
     }
@@ -309,6 +349,50 @@ mod tests {
     }
 
     #[test]
+    fn fields_are_only_allowed_where_they_mean_something() {
+        use BudgetTxKind as K;
+        let not_allowed = |e: Result<(), BudgetTxError>| matches!(e, Err(BudgetTxError::FieldNotAllowed { .. }));
+        let mut allocate = entry(K::Allocate, 10, 0, 10);
+        assert!(allocate.validate().is_ok());
+        allocate.reservation_id = Some(ReservationId::from_parts(1, [2; 10]));
+        assert!(not_allowed(allocate.validate()));
+        let mut allocate = entry(K::Allocate, 10, 0, 10);
+        allocate.settled = true;
+        assert!(not_allowed(allocate.validate()));
+        let mut allocate = entry(K::Allocate, 10, 0, 10);
+        allocate.counterparty_pool = Some(PoolId::from_parts(1, [3; 10]));
+        assert!(not_allowed(allocate.validate()));
+        let mut reserve = entry(K::Reserve, 10, 20, 10);
+        reserve.estimated = true;
+        assert!(not_allowed(reserve.validate()));
+        let mut out = entry(K::TransferOut, 10, 20, 10);
+        out.counterparty_pool = Some(out.pool_id);
+        assert!(not_allowed(out.validate()));
+        let mut release = entry(K::Release, 5, 70, 75);
+        release.settled = false;
+        assert_eq!(release.validate(), Err(BudgetTxError::Incomplete(K::Release)));
+        assert_eq!(
+            entry(K::Adjust, 0, 5, 5).validate(),
+            Err(BudgetTxError::Incomplete(K::Adjust))
+        );
+    }
+
+    #[test]
+    fn a_hold_can_never_take_the_balance_below_zero() {
+        // The hard cap, checked on every entry: replay cannot accept an over-reservation.
+        assert_eq!(
+            entry(BudgetTxKind::Reserve, 50, 30, -20).validate(),
+            Err(BudgetTxError::CapExceeded(BudgetTxKind::Reserve))
+        );
+        assert_eq!(
+            entry(BudgetTxKind::TransferOut, 50, 30, -20).validate(),
+            Err(BudgetTxError::CapExceeded(BudgetTxKind::TransferOut))
+        );
+        // An overrun adjustment may go negative: that money was already spent.
+        assert!(entry(BudgetTxKind::Adjust, -50, 30, -20).validate().is_ok());
+    }
+
+    #[test]
     fn tokens_reject_malformed_input() {
         assert!(IdempotencyKey::new("").is_err());
         assert!(IdempotencyKey::new("a b").is_err());
@@ -318,7 +402,8 @@ mod tests {
 
     proptest! {
         #[test]
-        fn wire_round_trip_preserves_validity(amount in 0i64..1_000_000_000, before in 0i64..1_000_000_000) {
+        fn wire_round_trip_preserves_validity(amount in 0i64..1_000_000_000, extra in 0i64..1_000_000_000) {
+            let before = amount + extra;
             let e = entry(BudgetTxKind::Reserve, amount, before, before - amount);
             prop_assert!(e.validate().is_ok());
             let back: BudgetTx = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
