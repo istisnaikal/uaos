@@ -151,7 +151,9 @@ pub struct Request {
     pub risk_tier: RiskTier,
     /// Data classes detected in the content (e.g. `secret.aws`, `pii.email`).
     pub data_classes: BTreeSet<Name>,
-    /// Evaluation time, Unix milliseconds, from the caller's clock.
+    /// Evaluation time, Unix milliseconds, from the trusted platform clock (`uaos_platform::Clock`).
+    /// The engine refuses a request whose clock is more than
+    /// [`CLOCK_TOLERANCE_MS`](crate::CLOCK_TOLERANCE_MS) behind the latest one it has seen.
     pub now_ms: u64,
 }
 
@@ -173,6 +175,9 @@ pub enum Basis {
     Permitted,
     /// A matching permit requires approval.
     ApprovalRequired,
+    /// A live grant matched: it allows on its own, and it is the approval any matching ask
+    /// policy requires (ADR-0008 Amendment 1). Never overrides a forbid.
+    Granted,
     /// A forbid matched.
     Forbidden,
     /// No permit matched: default deny.
@@ -188,8 +193,11 @@ pub struct Decision {
     pub effect: Effect,
     /// Why.
     pub basis: Basis,
-    /// `@id`s of the policies that determined the decision (grant policies are `grant:<id>`).
+    /// `@id`s of the policies that determined the decision, sorted; a grant is `grant:<id>`
+    /// and comes first, followed by the ask policies it satisfied.
     pub policies: Vec<String>,
+    /// `<@id>: <@reason>` for each of those policies that gives a reason.
+    pub reasons: Vec<String>,
     /// Evaluation errors, if any (they always force `Deny`).
     pub errors: Vec<String>,
 }
@@ -200,6 +208,7 @@ impl Decision {
             effect: Effect::Deny,
             basis: Basis::EvaluationError,
             policies: Vec::new(),
+            reasons: Vec::new(),
             errors: vec![error.into()],
         }
     }
@@ -212,10 +221,16 @@ impl Decision {
         } else {
             format!(" by {}", self.policies.join(", "))
         };
+        let why = if self.reasons.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", self.reasons.join("; "))
+        };
         match self.basis {
-            Basis::Permitted => format!("allowed{by}"),
-            Basis::ApprovalRequired => format!("approval required{by}"),
-            Basis::Forbidden => format!("denied{by}"),
+            Basis::Permitted => format!("allowed{by}{why}"),
+            Basis::ApprovalRequired => format!("approval required{by}{why}"),
+            Basis::Granted => format!("allowed{by}: the grant is the approval{why}"),
+            Basis::Forbidden => format!("denied{by}{why}"),
             Basis::NoMatchingPermit => "denied: no policy permits this (default deny)".to_owned(),
             Basis::EvaluationError => format!(
                 "denied: evaluation failed, so UAOS fails closed ({})",
@@ -225,8 +240,10 @@ impl Decision {
     }
 }
 
-/// A time-bounded capability: compiled into a Cedar permit that matches only this principal,
-/// action, resource and pocket, and only before `expires_at_ms`.
+/// A time-bounded capability, usually the recorded result of an approval. It matches only this
+/// principal, action, resource and pocket, and only while `now_ms < expires_at_ms`. It is
+/// equivalent to a Cedar permit with those constraints, and also satisfies a matching ask policy;
+/// a forbid still wins (ADR-0008 Amendment 1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
     /// Identifier, shown in explanations as `grant:<id>`.
@@ -239,6 +256,6 @@ pub struct Grant {
     pub resource: Resource,
     /// Where.
     pub pocket: PocketId,
-    /// Unix milliseconds after which it no longer applies.
+    /// Unix milliseconds from which on it no longer applies (exclusive end).
     pub expires_at_ms: u64,
 }

@@ -6,27 +6,27 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ## [Unreleased]
 
-### Changed
-
-- `dco` gate: merge commits whose combined diff is empty (GitHub's "Update branch", conflict-free
-  `git merge`) add no content and are exempt. A merge that resolves a conflict with new content
-  still needs a sign-off. This is proven by the new negative case `dco-unsigned-content-merge`.
-  The rule was missing; that is why PR #10 failed on an "Update branch" commit.
-- CI: `dco` and `docs-sync` now run on pushes to `main` and on merge queues as well as on pull
-  requests. Before this, a direct push skipped both (plan v2 PD-17). A missing base commit fails
-  the job instead of guessing a range.
-
-- Phase-debt records sweep (plan v2 PD-03, -04, -07, -08, -09, -15, -23):
-  - **ADR-0003** now records the measured Windows spike numbers. It states that the Linux, macOS
-    and production-journal numbers are owed (PD-01). The spike report moved to
-    `docs/adr/appendix/`.
-  - **ADR-0002** is amended: the `kernel-tokens` gate activates in P3, not P2, because the tokens
-    bind policy, ledger and egress, which first meet in the runtime. `gates.toml` follows.
-  - **CODEOWNERS** now covers every Ring 0 crate, the build inputs (`Cargo.toml`/`.lock`,
-    toolchain, `.cargo/`), the ADRs, the threat model, the privacy docs and CODEOWNERS itself.
-  - **README** describes the real state (P2) and names the gate behind each claim.
-
 ### Security
+
+- `uaos-policy` hardening after the retroactive review (`docs/reviews/WP2.1-policy.md`; ADR-0008
+  Amendment 1):
+  - **Crafted policy text aborted the process** (about 80 nested parentheses overflowed Cedar's
+    parser). Text is now bounded before Cedar sees it: 8 nested brackets, 16 `if`s, 256 operators
+    and 16 KiB per policy, and 4 MiB in all. The bounds were measured against the actual
+    overflow points.
+  - **Approvals could never complete.** A grant is now the approval: it satisfies a matching
+    `@effect("ask")` policy and allows on its own. A forbid still wins over it. Grants are
+    matched natively, and a property proves this equals compiling them to permits.
+  - **The proofs behind the slicing and fail-closed claims did not hold.** Slicing is now
+    checked against the complete loaded set. The fail-closed property always has an erroring
+    forbid and a permit both apply.
+  - **Also:**
+    - action groups are honoured by slicing;
+    - `@id`s are plain (they cannot pose as explanations);
+    - templates are refused;
+    - a provider name with `/` fails closed;
+    - a request clock running more than 5 s backwards is refused;
+    - `@reason` texts are returned.
 
 - Ledger hardening after the retroactive adversarial review (`docs/reviews/WP2.2-ledger.md`),
   which found two overspend paths in merged code:
@@ -86,6 +86,10 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     input.
 
 ### Added
+
+- Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
+  unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a
+  forbid.
 
 - `docs/decisions.md`: a register of open decisions with class, default and deadline. Decisions
   the next release depends on carry markers, so `xtask decisions --release` sees them.
@@ -307,4 +311,32 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 - Governance: LICENSE (Apache-2.0), NOTICE, README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT
   (Contributor Covenant 2.1), GOVERNANCE, RELEASING, ADR-0001–0005, threat model v0, privacy
   data flow v0, vision traceability matrix.
+
+### Changed
+
+- `uaos-policy` decisions slice by exact resource within an action, and grants are indexed. The
+  bench measures three mixes:
+  - 1,000 mixed policies: p99 678 µs;
+  - 1,000 policies on one action: p99 419 µs, down from 1.7 ms;
+  - 10,000 grants: p99 176 µs, down from 19 ms.
+- `docs/claims.md`: the authorization, ledger and redaction rows now state exactly what their
+  gates prove, as narrowed by the retroactive reviews.
+
+- `dco` gate: merge commits whose combined diff is empty (GitHub's "Update branch", conflict-free
+  `git merge`) add no content and are exempt. A merge that resolves a conflict with new content
+  still needs a sign-off. This is proven by the new negative case `dco-unsigned-content-merge`.
+  The rule was missing; that is why PR #10 failed on an "Update branch" commit.
+- CI: `dco` and `docs-sync` now run on pushes to `main` and on merge queues as well as on pull
+  requests. Before this, a direct push skipped both (plan v2 PD-17). A missing base commit fails
+  the job instead of guessing a range.
+
+- Phase-debt records sweep (plan v2 PD-03, -04, -07, -08, -09, -15, -23):
+  - **ADR-0003** now records the measured Windows spike numbers. It states that the Linux, macOS
+    and production-journal numbers are owed (PD-01). The spike report moved to
+    `docs/adr/appendix/`.
+  - **ADR-0002** is amended: the `kernel-tokens` gate activates in P3, not P2, because the tokens
+    bind policy, ledger and egress, which first meet in the runtime. `gates.toml` follows.
+  - **CODEOWNERS** now covers every Ring 0 crate, the build inputs (`Cargo.toml`/`.lock`,
+    toolchain, `.cargo/`), the ADRs, the threat model, the privacy docs and CODEOWNERS itself.
+  - **README** describes the real state (P2) and names the gate behind each claim.
 

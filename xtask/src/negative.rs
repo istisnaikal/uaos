@@ -331,6 +331,46 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "recall below",
         },
         Case {
+            id: "policy-slicing-drops-unconstrained",
+            gate: "policy-semantics",
+            tool: None,
+            // Review WP2.1 H1: slicing that loses action-unconstrained policies, so a forbid
+            // without an action constraint stops applying.
+            seed: replace(
+                "crates/uaos-policy/src/engine.rs",
+                "ActionConstraint::Any => true,",
+                "ActionConstraint::Any => false,",
+            ),
+            runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-policy", "--test", "policy"] },
+            expect: "unconstrained forbid skipped",
+        },
+        Case {
+            id: "policy-error-fails-open",
+            gate: "policy-semantics",
+            tool: None,
+            // Review WP2.1 M1: an engine that, like plain Cedar, skips an erroring policy.
+            seed: replace(
+                "crates/uaos-policy/src/engine.rs",
+                "if !errors.is_empty() {",
+                "if errors.is_empty() && !errors.is_empty() {",
+            ),
+            runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-policy", "--test", "policy"] },
+            expect: "an erroring policy failed open",
+        },
+        Case {
+            id: "policy-grant-overrides-forbid",
+            gate: "policy-semantics",
+            tool: None,
+            // ADR-0008 Amendment 1: a grant is an approval and must never beat a forbid.
+            seed: replace(
+                "crates/uaos-policy/src/engine.rs",
+                "(CedarDecision::Deny, _) if !matched.is_empty() =>",
+                "(CedarDecision::Deny, None) if !matched.is_empty() =>",
+            ),
+            runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-policy", "--test", "policy"] },
+            expect: "a grant must never override a forbid",
+        },
+        Case {
             id: "dco-missing-signoff",
             gate: "dco",
             tool: Some("git"),
