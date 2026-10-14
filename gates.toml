@@ -184,6 +184,14 @@ job = "test"
 negative = ["redact-detector-drops-a-format", "redact-url-password-stops-at-slash"]
 
 [[gate]]
+id = "policy-semantics"
+source = "CLAUDE.md §4 property-based: policy; review WP2.1 M2. Default deny, fail closed on evaluation errors, Deny > Ask > Allow, grants as approvals that never beat a forbid, slicing checked against the complete set, bounded policy text"
+lane = "merge"
+status = "active"
+job = "test"
+negative = ["policy-slicing-drops-unconstrained", "policy-error-fails-open", "policy-grant-overrides-forbid"]
+
+[[gate]]
 id = "kernel-tokens"
 source = "plan §1.2 secure path is the only one that compiles (trybuild); moved P2 -> P3 by plan v2 PD-04 (ADR-0002 amendment, ADR-0010)"
 lane = "merge"

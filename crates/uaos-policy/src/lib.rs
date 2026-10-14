@@ -3,8 +3,9 @@
 //! # UAOS reference monitor
 //!
 //! Authorization for every Operation: default deny, fail closed on any evaluation error,
-//! `Deny > Ask > Allow`, time-bounded grants, and an explanation for every decision. Built on
-//! Cedar (plan D8); pure and synchronous, so a decision never waits on I/O.
+//! `Deny > Ask > Allow`, time-bounded grants that act as approvals, bounded policy text, and an
+//! explanation for every decision. Built on Cedar (plan D8; ADR-0008 and its Amendment 1); pure
+//! and synchronous, so a decision never waits on I/O.
 //!
 //! ```text
 //! @id("anthropic-for-agents")
@@ -24,5 +25,5 @@
 mod engine;
 mod model;
 
-pub use engine::{PolicyEngine, PolicyError};
+pub use engine::{CLOCK_TOLERANCE_MS, PolicyEngine, PolicyError};
 pub use model::{Action, Basis, Decision, Effect, Grant, Name, NameError, Principal, Request, Resource};
