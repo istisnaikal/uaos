@@ -91,6 +91,16 @@ pub enum PolicyError {
 /// What a grant matches exactly: action, principal, resource and pocket.
 type GrantKey = (Action, String, String, String);
 
+/// A live grant in the index, with what its approval covered.
+#[derive(Debug)]
+struct GrantEntry {
+    label: String,
+    expires_at_ms: u64,
+    max_risk_tier: u8,
+    data_classes: BTreeSet<String>,
+    approves: BTreeSet<String>,
+}
+
 /// The policies one action evaluates: those for any resource, and those pinned to one resource
 /// by `resource == …` (review WP2.1 M3: 1,000 policies on one action took p99 1.7 ms).
 #[derive(Debug, Default)]
@@ -113,8 +123,8 @@ pub struct PolicyEngine {
     reasons: BTreeMap<String, String>,
     /// Cedar policy ids of permits annotated `@effect("ask")`.
     asks: BTreeSet<String>,
-    /// Live grants by what they match: `(expiry, explanation label)`.
-    grants: BTreeMap<GrantKey, Vec<(u64, String)>>,
+    /// Live grants by what they match, sorted by label.
+    grants: BTreeMap<GrantKey, Vec<GrantEntry>>,
     /// The latest `now_ms` any request carried.
     clock_high_water: AtomicU64,
 }
@@ -186,12 +196,19 @@ impl Grant {
         let resource = resource_uid(&self.resource)?;
         let action = action_uid(self.action)?;
         let expires = i64::try_from(self.expires_at_ms).map_err(|_| "expiry out of range".to_owned())?;
+        let classes = if self.data_classes.is_empty() {
+            "context.data_classes.isEmpty()".to_owned()
+        } else {
+            let list: Vec<String> = self.data_classes.iter().map(|c| format!("\"{c}\"")).collect();
+            format!("[{}].containsAll(context.data_classes)", list.join(", "))
+        };
         Ok(format!(
-            "@id(\"{id}\")\npermit(principal == {}, action == {}, resource == {})\nwhen {{ context.pocket == \"{}\" && context.now_ms < {expires} }};",
+            "@id(\"{id}\")\npermit(principal == {}, action == {}, resource == {})\nwhen {{ context.pocket == \"{}\" && context.now_ms < {expires} && context.risk_tier <= {} && {classes} }};",
             cedar_ref(&principal),
             cedar_ref(&action),
             cedar_ref(&resource),
             self.pocket,
+            self.max_risk_tier.get(),
         ))
     }
 }
@@ -205,7 +222,28 @@ impl PolicyEngine {
     /// rule, or fails strict schema validation, or if a grant names something that cannot be
     /// named. Nothing is partially loaded.
     pub fn load(policies: &str, grants: &[Grant], now_ms: u64) -> Result<Self, PolicyError> {
-        let schema = schema()?;
+        Self::load_with(schema()?, policies, grants, now_ms)
+    }
+
+    /// Like [`PolicyEngine::load`] with another Cedar schema in place of the UAOS one. For tests
+    /// of schema-dependent behaviour (action groups), never for production.
+    ///
+    /// # Errors
+    /// As [`PolicyEngine::load`], or [`PolicyError::Schema`] if `schema_src` does not parse.
+    #[doc(hidden)]
+    pub fn load_with_schema(
+        schema_src: &str,
+        policies: &str,
+        grants: &[Grant],
+        now_ms: u64,
+    ) -> Result<Self, PolicyError> {
+        let schema = Schema::from_cedarschema_str(schema_src)
+            .map(|(schema, _warnings)| schema)
+            .map_err(|e| PolicyError::Schema(e.to_string()))?;
+        Self::load_with(schema, policies, grants, now_ms)
+    }
+
+    fn load_with(schema: Schema, policies: &str, grants: &[Grant], now_ms: u64) -> Result<Self, PolicyError> {
         check_bounds(policies)?;
         let parsed = PolicySet::from_str(policies).map_err(|e| PolicyError::Parse(e.to_string()))?;
         if let Some(template) = parsed.templates().next() {
@@ -238,7 +276,7 @@ impl PolicyEngine {
             return Err(PolicyError::Invalid(errors.join("; ")));
         }
 
-        let mut index: BTreeMap<GrantKey, Vec<(u64, String)>> = BTreeMap::new();
+        let mut index: BTreeMap<GrantKey, Vec<GrantEntry>> = BTreeMap::new();
         for grant in grants.iter().filter(|g| g.expires_at_ms > now_ms) {
             let label = format!("{GRANT_PREFIX}{}", grant.id);
             let key = grant_key(
@@ -251,7 +289,16 @@ impl PolicyEngine {
                 policy: label.clone(),
                 problem,
             })?;
-            index.entry(key).or_default().push((grant.expires_at_ms, label));
+            index.entry(key).or_default().push(GrantEntry {
+                label,
+                expires_at_ms: grant.expires_at_ms,
+                max_risk_tier: grant.max_risk_tier.get(),
+                data_classes: grant.data_classes.iter().map(ToString::to_string).collect(),
+                approves: grant.approves.clone(),
+            });
+        }
+        for entries in index.values_mut() {
+            entries.sort_by(|a, b| a.label.cmp(&b.label));
         }
 
         let actions = schema
@@ -320,20 +367,31 @@ impl PolicyEngine {
         self.labels.get(id).cloned().unwrap_or_else(|| id.to_owned())
     }
 
-    /// The label of a live grant that matches the request exactly, if any.
-    fn matching_grant(&self, request: &Request) -> Result<Option<String>, String> {
+    /// The live grants, sorted by label, that cover the request: same principal, action,
+    /// resource and pocket, not expired at `now_ms`, a risk tier no higher than approved, and
+    /// only data classes the approval saw.
+    fn matching_grants(&self, request: &Request, now_ms: u64) -> Result<Vec<&GrantEntry>, String> {
         let key = grant_key(
             request.action,
             &request.principal,
             &request.resource,
             &request.pocket.to_string(),
         )?;
-        Ok(self.grants.get(&key).and_then(|live| {
-            live.iter()
-                .filter(|(expiry, _)| request.now_ms < *expiry)
-                .map(|(_, label)| label.clone())
-                .min()
-        }))
+        let tier = request.risk_tier.get();
+        Ok(self
+            .grants
+            .get(&key)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|g| {
+                        now_ms < g.expires_at_ms
+                            && tier <= g.max_risk_tier
+                            && request.data_classes.iter().all(|c| g.data_classes.contains(c.as_str()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     fn decision(&self, effect: Effect, basis: Basis, policies: Vec<String>) -> Decision {
@@ -353,18 +411,20 @@ impl PolicyEngine {
     /// Evaluates `sets` and merges the answers as one set would give them: any error denies,
     /// any matching forbid denies, otherwise any matching permit allows.
     fn authorize_with(&self, request: &Request, sets: &[&PolicySet]) -> Decision {
+        // Validate the whole request first: a malformed one must not move the clock mark.
+        let (cedar_request, entities) = match self.build(request) {
+            Ok(built) => built,
+            Err(e) => return Decision::deny_error(e),
+        };
         let latest = self.clock_high_water.fetch_max(request.now_ms, Ordering::Relaxed);
         if request.now_ms.saturating_add(CLOCK_TOLERANCE_MS) < latest {
             return Decision::deny_error(
                 "the request clock is behind a clock already seen; refusing a decision that could revive an expired grant",
             );
         }
-        let grant = match self.matching_grant(request) {
-            Ok(grant) => grant,
-            Err(e) => return Decision::deny_error(e),
-        };
-        let (cedar_request, entities) = match self.build(request) {
-            Ok(built) => built,
+        // Grants are judged at the latest clock seen, so the tolerance never extends one.
+        let grants = match self.matching_grants(request, latest.max(request.now_ms)) {
+            Ok(grants) => grants,
             Err(e) => return Decision::deny_error(e),
         };
         let responses: Vec<_> = sets
@@ -415,22 +475,26 @@ impl PolicyEngine {
         };
         let mut labels: Vec<String> = matched.iter().map(|id| self.label(id)).collect();
         labels.sort();
-        match (decision, grant) {
-            (CedarDecision::Deny, _) if !matched.is_empty() => self.decision(Effect::Deny, Basis::Forbidden, labels),
-            (CedarDecision::Deny, None) => self.decision(Effect::Deny, Basis::NoMatchingPermit, Vec::new()),
-            (CedarDecision::Deny, Some(grant)) => self.decision(Effect::Allow, Basis::Granted, vec![grant]),
-            (CedarDecision::Allow, grant) => {
+        match decision {
+            CedarDecision::Deny if !matched.is_empty() => self.decision(Effect::Deny, Basis::Forbidden, labels),
+            CedarDecision::Deny => match grants.first() {
+                Some(grant) => self.decision(Effect::Allow, Basis::Granted, vec![grant.label.clone()]),
+                None => self.decision(Effect::Deny, Basis::NoMatchingPermit, Vec::new()),
+            },
+            CedarDecision::Allow => {
                 let mut asking: Vec<String> = matched
                     .iter()
                     .filter(|id| self.asks.contains(*id))
                     .map(|id| self.label(id))
                     .collect();
                 asking.sort();
-                match grant {
-                    _ if asking.is_empty() => self.decision(Effect::Allow, Basis::Permitted, labels),
-                    // The grant is the approval the ask policies require.
+                if asking.is_empty() {
+                    return self.decision(Effect::Allow, Basis::Permitted, labels);
+                }
+                // A grant satisfies the asks only if its approval named every one of them.
+                match grants.iter().find(|g| asking.iter().all(|a| g.approves.contains(a))) {
                     Some(grant) => {
-                        let mut by = vec![grant];
+                        let mut by = vec![grant.label.clone()];
                         by.extend(asking);
                         self.decision(Effect::Allow, Basis::Granted, by)
                     }
@@ -585,13 +649,19 @@ fn check_bounds(text: &str) -> Result<(), PolicyError> {
                 continue;
             }
             b'/' if bytes.get(i + 1) == Some(&b'/') => {
-                i = memchr_newline(bytes, i);
+                i = comment_end(bytes, i);
                 continue;
             }
             b'(' | b'[' | b'{' => {
                 current.depth += 1;
                 if current.depth > MAX_NESTING {
                     return Err(too(index, format!("brackets nest deeper than {MAX_NESTING}")));
+                }
+                // An opening bracket is also an operator: `x["a"]["b"]…`, calls and literals
+                // deepen the expression even when their depth goes back down (V1 review H-1).
+                current.operators += 1;
+                if current.operators > MAX_OPERATORS {
+                    return Err(too(index, format!("a policy has more than {MAX_OPERATORS} operators")));
                 }
             }
             b')' | b']' | b'}' => current.depth = current.depth.saturating_sub(1),
@@ -641,11 +711,12 @@ fn check_bounds(text: &str) -> Result<(), PolicyError> {
     Ok(())
 }
 
-/// Offset of the next newline at or after `from`, or the end.
-fn memchr_newline(bytes: &[u8], from: usize) -> usize {
+/// End of a `//` comment starting at `from`: the next `\n` or `\r`, as in Cedar's lexer
+/// (`//[^\n\r]*`), or the end of the text.
+fn comment_end(bytes: &[u8], from: usize) -> usize {
     bytes
         .get(from..)
-        .and_then(|rest| rest.iter().position(|&b| b == b'\n'))
+        .and_then(|rest| rest.iter().position(|&b| b == b'\n' || b == b'\r'))
         .map_or(bytes.len(), |at| from + at)
 }
 

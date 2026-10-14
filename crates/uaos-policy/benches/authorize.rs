@@ -136,6 +136,9 @@ fn grants() -> Vec<Grant> {
             resource: Resource::Tool(Name::new(format!("tool{}", i % 300)).unwrap()),
             pocket: PocketId::from_parts(1, [1; 10]),
             expires_at_ms: NOW + 3_600_000,
+            max_risk_tier: RiskTier::new(3).unwrap(),
+            data_classes: BTreeSet::new(),
+            approves: BTreeSet::new(),
         })
         .collect()
 }

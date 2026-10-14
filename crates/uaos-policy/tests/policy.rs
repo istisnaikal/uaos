@@ -168,6 +168,9 @@ fn grants_are_scoped_and_expire() {
         resource: Resource::Tool(Name::new("git").unwrap()),
         pocket: pocket(1),
         expires_at_ms: NOW + 60_000,
+        max_risk_tier: RiskTier::new(1).unwrap(),
+        data_classes: BTreeSet::new(),
+        approves: BTreeSet::new(),
     };
     let e = PolicyEngine::load("", std::slice::from_ref(&grant), NOW).unwrap();
     let git = request(agent(1), Action::Exec, Resource::Tool(Name::new("git").unwrap()));
@@ -225,10 +228,11 @@ fn policy_piece(i: usize, kind: u8, action: u8, flag: u8) -> String {
         1 => "action".to_owned(),
         _ => format!("action in [Uaos::Action::\"{a}\", Uaos::Action::\"model.call\"]"),
     };
-    // Pin a resource only where the schema allows it: a single tool action.
+    // Pin a resource only where the schema allows it: a single action of that resource's type.
     let resource = match (flag % 3, a, (kind / 4) % 3) {
         (0, "exec" | "tool.call", 1) => "resource == Uaos::Tool::\"git\"",
         (0, "exec" | "tool.call", 2) => "resource == Uaos::Tool::\"fs\"",
+        (0, "model.call", 1 | 2) => "resource == Uaos::Model::\"anthropic/m\"",
         _ => "resource",
     };
     let cond = if flag.is_multiple_of(2) {
@@ -247,10 +251,13 @@ fn policy_piece(i: usize, kind: u8, action: u8, flag: u8) -> String {
 }
 
 fn random_request(action: u8, tier: u8) -> Request {
-    let (action, resource) = match action % 4 {
+    let (action, resource) = match action % 7 {
         0 => (Action::ModelCall, model("anthropic", "m")),
         1 => (Action::Exec, Resource::Tool(Name::new("git").unwrap())),
         2 => (Action::ToolCall, Resource::Tool(Name::new("fs").unwrap())),
+        3 => (Action::Exec, Resource::Tool(Name::new("curl").unwrap())),
+        4 => (Action::ModelCall, model("openai", "m")),
+        5 => (Action::ToolCall, Resource::Tool(Name::new("git").unwrap())),
         _ => (
             Action::BudgetTransfer,
             Resource::Pool(uaos_contracts::id::PoolId::from_parts(1, [1; 10])),
@@ -268,10 +275,12 @@ proptest! {
     #[test]
     fn slicing_preserves_decisions(
         pieces in prop::collection::vec((any::<u8>(), any::<u8>(), any::<u8>()), 0..12),
+        grants in prop::collection::vec((any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>()), 0..3),
         req in (any::<u8>(), any::<u8>()),
     ) {
         let text: Vec<String> = pieces.iter().enumerate().map(|(i, (k, a, f))| policy_piece(i, *k, *a, *f)).collect();
-        let e = PolicyEngine::load(&text.join("\n"), &[], NOW).unwrap();
+        let grants: Vec<Grant> = grants.into_iter().map(random_grant).collect();
+        let e = PolicyEngine::load(&text.join("\n"), &grants, NOW).unwrap();
         let r = random_request(req.0, req.1);
         prop_assert_eq!(e.authorize(&r), e.authorize_unsliced(&r));
     }
@@ -320,6 +329,7 @@ fn an_action_list_forbid_applies_to_each_listed_action() {
     assert_eq!(model_call.effect, Effect::Allow);
 }
 
+/// The grant an approval of `exec git` at risk tier 1 would issue, for 60 s from `NOW`.
 fn exec_grant(expires_at_ms: u64) -> Grant {
     Grant {
         id: GrantId::from_parts(7, [7; 10]),
@@ -328,6 +338,9 @@ fn exec_grant(expires_at_ms: u64) -> Grant {
         resource: Resource::Tool(Name::new("git").unwrap()),
         pocket: pocket(1),
         expires_at_ms,
+        max_risk_tier: RiskTier::new(1).unwrap(),
+        data_classes: BTreeSet::new(),
+        approves: BTreeSet::from(["exec-needs-approval".to_owned()]),
     }
 }
 
@@ -454,14 +467,14 @@ fn at_bounds(stack: usize, operators: usize) -> Effect {
 /// than 100 KiB of stack left, so the worst case is a fail-closed Deny.
 #[test]
 fn a_policy_at_every_bound_never_crashes() {
-    at_bounds(1 << 20, 222);
+    at_bounds(1 << 20, 213);
 }
 
 /// The bounds leave room for real policies: one at every bound evaluates normally. Measured: a
 /// release build needs 1 MiB of stack for it, a debug build 8 MiB (its frames are far larger).
 #[test]
 fn a_policy_at_every_bound_evaluates() {
-    assert_eq!(at_bounds(8 << 20, 222), Effect::Allow);
+    assert_eq!(at_bounds(8 << 20, 213), Effect::Allow);
 }
 
 /// Review L1: an `@id` could pose as an explanation; explanations were ordered by position.
@@ -524,15 +537,47 @@ fn a_clock_running_backwards_is_refused() {
     assert_ne!(e.authorize(&jitter).basis, Basis::EvaluationError, "within tolerance");
 }
 
-fn random_grant(seed: (u8, u8, u8, u8)) -> Grant {
-    let (who, tool, place, life) = seed;
+/// Principals, actions with their resources, and data classes the grant properties draw from.
+fn any_principal(n: u8) -> Principal {
+    match n % 4 {
+        0 | 1 => agent(n % 2),
+        2 => Principal::Module(uaos_contracts::event::ModuleName::new("mod-x").unwrap()),
+        _ => Principal::Human,
+    }
+}
+
+fn any_target(n: u8) -> (Action, Resource) {
+    match n % 5 {
+        0 => (Action::Exec, Resource::Tool(Name::new("git").unwrap())),
+        1 => (Action::Exec, Resource::Tool(Name::new("curl").unwrap())),
+        2 => (Action::ToolCall, Resource::Tool(Name::new("git").unwrap())),
+        3 => (Action::ConfigChange, Resource::ConfigKey(Name::new("git").unwrap())),
+        _ => (Action::ModelCall, model("anthropic", "m")),
+    }
+}
+
+fn any_classes(n: u8) -> BTreeSet<Name> {
+    ["secret.aws", "pii.email"]
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| n & (1 << i) != 0)
+        .map(|(_, c)| Name::new(*c).unwrap())
+        .collect()
+}
+
+fn random_grant(seed: (u8, u8, u8, u8, u8)) -> Grant {
+    let (who, target, place, life, scope) = seed;
+    let (action, resource) = any_target(target);
     Grant {
         id: GrantId::from_parts(u64::from(who) + 1, [who; 10]),
-        principal: agent(who % 2),
-        action: Action::Exec,
-        resource: Resource::Tool(Name::new(["git", "curl"][usize::from(tool % 2)]).unwrap()),
+        principal: any_principal(who),
+        action,
+        resource,
         pocket: pocket(place % 2),
         expires_at_ms: NOW + u64::from(life % 3) * 30_000,
+        max_risk_tier: RiskTier::new(scope % 4).unwrap(),
+        data_classes: any_classes(scope >> 2),
+        approves: BTreeSet::new(),
     }
 }
 
@@ -560,28 +605,192 @@ proptest! {
         prop_assert_eq!((d.effect, d.basis), (Effect::Deny, Basis::EvaluationError), "an erroring policy failed open");
     }
 
-    /// Grants are matched natively; the result equals compiling each grant to its permit.
+    /// Grants are matched natively; with any policy set that has no ask policies, the result
+    /// equals compiling each grant to its permit. Principals, actions, resources, pockets,
+    /// expiry, risk tiers and data classes all vary (V1 review M-3).
     #[test]
     fn native_grants_equal_their_permits(
-        grants in prop::collection::vec((any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>()), 0..4),
-        req in (any::<u8>(), any::<u8>(), any::<u8>(), 0_u64..90_000),
+        grants in prop::collection::vec((any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>()), 0..5),
+        pieces in prop::collection::vec((any::<u8>(), any::<u8>(), any::<u8>()), 0..6),
+        req in (any::<u8>(), any::<u8>(), any::<u8>(), 0_u64..90_000, any::<u8>()),
     ) {
-        let grants: Vec<Grant> = grants.into_iter().map(random_grant).collect();
-        let native = PolicyEngine::load("", &grants, NOW).unwrap();
-        let texts: Vec<String> = grants
+        // Policy pieces without asks: kinds 0 (permit), 1 (forbid), 3 (erroring forbid).
+        let policies: Vec<String> = pieces
             .iter()
-            .filter(|g| g.expires_at_ms > NOW)
             .enumerate()
-            .map(|(i, g)| g.equivalent_permit(&format!("g{i}")).unwrap())
+            .map(|(i, (k, a, f))| policy_piece(i, if k % 4 == 2 { 0 } else { *k }, *a, *f))
             .collect();
-        let compiled = PolicyEngine::load(&texts.join("\n"), &[], NOW).unwrap();
-        let mut r = request(
-            agent(req.0 % 2),
-            Action::Exec,
-            Resource::Tool(Name::new(["git", "curl"][usize::from(req.1 % 2)]).unwrap()),
+        let grants: Vec<Grant> = grants.into_iter().map(random_grant).collect();
+        let native = PolicyEngine::load(&policies.join("\n"), &grants, NOW).unwrap();
+        let mut texts = policies.clone();
+        texts.extend(
+            grants
+                .iter()
+                .filter(|g| g.expires_at_ms > NOW)
+                .enumerate()
+                .map(|(i, g)| g.equivalent_permit(&format!("g{i}")).unwrap()),
         );
+        let compiled = PolicyEngine::load(&texts.join("\n"), &[], NOW).unwrap();
+        let (action, resource) = any_target(req.1);
+        let mut r = request(any_principal(req.0), action, resource);
         r.pocket = pocket(req.2 % 2);
         r.now_ms = NOW + req.3;
+        r.risk_tier = RiskTier::new(req.4 % 4).unwrap();
+        r.data_classes = any_classes(req.4 >> 2);
         prop_assert_eq!(native.authorize(&r).effect, compiled.authorize(&r).effect);
     }
+
+    /// Distinct principals and resources never share a Cedar identity, so neither grants nor
+    /// pinned policies can match the wrong thing (the grant property above relies on it).
+    #[test]
+    fn entity_ids_are_injective(a in any::<u8>(), b in any::<u8>(), x in "[a-z]{1,3}(/[a-z]{1,3})?", y in "[a-z]{1,3}(/[a-z]{1,3})?") {
+        let resource = |n: u8, name: &str| match n % 4 {
+            0 => Resource::Tool(Name::new(name).unwrap()),
+            1 => Resource::ConfigKey(Name::new(name).unwrap()),
+            2 => model("p", name),
+            _ => Resource::Pool(uaos_contracts::id::PoolId::from_parts(u64::from(n), [n; 10])),
+        };
+        let (ra, rb) = (resource(a, &x), resource(b, &y));
+        let g = |r: &Resource| {
+            let mut grant = exec_grant(NOW + 1);
+            grant.resource = r.clone();
+            grant.equivalent_permit("g").unwrap()
+        };
+        prop_assert_eq!(ra == rb, g(&ra) == g(&rb));
+    }
+}
+
+// ── V1 review of the WP2.1 hardening ─────────────────────────────────────────────────────
+
+/// M-2: a grant covers the request its approval saw, nothing riskier.
+#[test]
+fn a_grant_covers_no_riskier_request() {
+    let ask = r#"
+@id("exec-needs-approval") @effect("ask") permit(principal is Uaos::Agent, action == Uaos::Action::"exec", resource);
+@id("prod-needs-approval") @effect("ask") permit(principal is Uaos::Agent, action == Uaos::Action::"exec", resource) when { context.risk_tier > 2 };
+"#;
+    let e = PolicyEngine::load(ask, &[exec_grant(NOW + 60_000)], NOW).unwrap();
+    let git = request(agent(1), Action::Exec, Resource::Tool(Name::new("git").unwrap()));
+    assert_eq!(e.authorize(&git).basis, Basis::Granted, "the approved shape");
+
+    let mut riskier = git.clone();
+    riskier.risk_tier = RiskTier::new(3).unwrap();
+    let d = e.authorize(&riskier);
+    assert_eq!(
+        (d.effect, d.basis),
+        (Effect::Ask, Basis::ApprovalRequired),
+        "a higher tier is not covered"
+    );
+
+    let mut secret = git.clone();
+    secret.data_classes.insert(Name::new("secret.aws").unwrap());
+    assert_eq!(
+        e.authorize(&secret).effect,
+        Effect::Ask,
+        "a new data class is not covered"
+    );
+
+    // The tier 3 request also fires an ask the approval never named.
+    let mut wider = exec_grant(NOW + 60_000);
+    wider.max_risk_tier = RiskTier::new(3).unwrap();
+    let e = PolicyEngine::load(ask, &[wider], NOW).unwrap();
+    let d = e.authorize(&riskier);
+    assert_eq!(d.effect, Effect::Ask, "an ask the grant does not list stays an ask");
+    assert_eq!(d.policies, ["exec-needs-approval", "prod-needs-approval"]);
+}
+
+/// M-1: a request refused as malformed must not move the clock mark.
+#[test]
+fn a_malformed_request_does_not_move_the_clock() {
+    let e = PolicyEngine::load(ALLOW_ANTHROPIC, &[], NOW).unwrap();
+    let mut bogus = request(agent(1), Action::ModelCall, model("anthropic", "m"));
+    bogus.now_ms = u64::MAX;
+    assert_eq!(e.authorize(&bogus).basis, Basis::EvaluationError);
+    let fine = request(agent(1), Action::ModelCall, model("anthropic", "m"));
+    assert_eq!(e.authorize(&fine).effect, Effect::Allow);
+}
+
+/// M-2: the clock tolerance never extends a grant; expiry is judged at the latest clock seen.
+#[test]
+fn a_grant_expires_at_the_latest_clock_seen() {
+    let e = PolicyEngine::load("", &[exec_grant(NOW + 60_000)], NOW).unwrap();
+    let mut after = request(agent(1), Action::Exec, Resource::Tool(Name::new("git").unwrap()));
+    after.now_ms = NOW + 60_001;
+    assert_eq!(e.authorize(&after).effect, Effect::Deny);
+    let mut just_before = after.clone();
+    just_before.now_ms = NOW + 59_000;
+    assert_eq!(
+        e.authorize(&just_before).effect,
+        Effect::Deny,
+        "within the tolerance, but the latest clock is past expiry"
+    );
+}
+
+/// L-2: slicing follows action groups from the schema in use.
+#[test]
+fn action_groups_reach_their_members() {
+    let schema = include_str!("../src/uaos.cedarschema").replace(
+        "  action \"tool.call\", \"exec\" appliesTo {",
+        "  action \"dangerous\";\n  action \"tool.call\", \"exec\" in [\"dangerous\"] appliesTo {",
+    );
+    let policies = r#"
+@id("all") permit(principal, action, resource);
+@id("no-dangerous") forbid(principal, action in [Uaos::Action::"dangerous"], resource);
+"#;
+    let e = PolicyEngine::load_with_schema(&schema, policies, &[], NOW).unwrap();
+    for action in [Action::Exec, Action::ToolCall] {
+        let r = request(agent(1), action, Resource::Tool(Name::new("git").unwrap()));
+        let d = e.authorize(&r);
+        assert_eq!((d.effect, d.basis), (Effect::Deny, Basis::Forbidden), "{action:?}");
+        assert_eq!(d, e.authorize_unsliced(&r));
+    }
+    let model_call = e.authorize(&request(agent(1), Action::ModelCall, model("anthropic", "m")));
+    assert_eq!(model_call.effect, Effect::Allow, "not in the group");
+}
+
+/// H-1: shapes the first bounds missed (index chains, a comment ended by a lone CR) are refused
+/// or handled, and nothing within the bounds crashes on a 1 MiB stack.
+#[test]
+fn no_shape_within_or_beyond_the_bounds_crashes() {
+    let wrap = |body: String| format!("@id(\"s\") permit(principal, action, resource) when {{ {body} }};");
+    let shapes = [
+        // Beyond: must be refused by rule.
+        (wrap(format!("context{} == 1", "[\"a\"]".repeat(3_000))), true),
+        (
+            format!(
+                "// note\r@id(\"cr\") permit(principal, action, resource) when {{ {}true{} }};",
+                "(".repeat(80),
+                ")".repeat(80)
+            ),
+            true,
+        ),
+        // Within: may fail validation or evaluation, but must not crash.
+        (wrap(format!("context{} == 1", "[\"a\"]".repeat(250))), false),
+        (wrap(format!("context{} == 1", ".a".repeat(250))), false),
+        (wrap(format!("{}true", "!".repeat(250))), false),
+        (wrap(format!("{}1{} == 1", "-".repeat(250), "")), false),
+        (wrap(format!("{}1{}.contains(1)", "[".repeat(7), "]".repeat(7))), false),
+    ];
+    let outcome = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            shapes
+                .iter()
+                .map(|(text, refused)| {
+                    let loaded = PolicyEngine::load(text, &[], NOW);
+                    if let Ok(e) = &loaded {
+                        let _decided = e.authorize(&request(
+                            agent(1),
+                            Action::Exec,
+                            Resource::Tool(Name::new("git").unwrap()),
+                        ));
+                    }
+                    !*refused || matches!(loaded, Err(PolicyError::Rule { .. }))
+                })
+                .collect::<Vec<bool>>()
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(outcome.iter().all(|ok| *ok), "{outcome:?}");
 }

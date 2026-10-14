@@ -57,7 +57,7 @@ Every finding is fixed or explicitly accepted; ADR-0008 Amendment 1 records the 
 | H3 Nested policy text aborted the process | **Fixed** | Text bounds before Cedar parses: 8 brackets, 16 `if`s, 256 operators, 16 KiB per policy, 4 MiB in all; measured limits in ADR-0008 Amendment 1 | `deeply_nested_policy_text_is_refused_not_a_crash` (5 shapes, 1 MiB stack); `a_policy_at_every_bound_never_crashes`; `a_policy_at_every_bound_evaluates` |
 | M1 `evaluation_errors_never_allow` was a tautology | **Fixed** | Replaced by a property in which a permit and an erroring forbid always both apply, so plain Cedar would allow | `an_applicable_erroring_policy_always_denies`; seeded negative `policy-error-fails-open` |
 | M2 No policy-semantics gate, no seeded violation | **Fixed** | Gate `policy-semantics` (active) with three seeded violations | `cargo xtask negative`: all three PROVEN |
-| M3 The p99 claim held only for a favourable mix | **Fixed** (mixes measured) / **scheduled** (gate) | Slicing by exact resource within an action; grants indexed. The bench measures three mixes, all p99 ≤ 1 ms (419 µs on the review's 1,000-on-one-action case, 176 µs with 10,000 grants). An enforcing `perf-smoke` gate is P3 | `cargo bench -p uaos-policy --bench authorize` |
+| M3 The p99 claim held only for a favourable mix | **Fixed** (mixes measured) / **scheduled** (gate) | Slicing by exact resource within an action; grants indexed. The bench measures three mixes, all p99 ≤ 1 ms (514 µs on the review's 1,000-on-one-action case, 226 µs with 10,000 grants). An enforcing `perf-smoke` gate is P3 | `cargo bench -p uaos-policy --bench authorize` |
 | M4 Slicing ignored the action hierarchy | **Fixed** | `action in [G]` covers every action under `G`, from the schema's action entities | `slicing_follows_action_groups` (unit) |
 | L1 Forgeable `@id`, unstable order, `@reason` dropped | **Fixed** | `@id` grammar `[A-Za-z0-9._:-]{1,128}`; policies sorted by `@id`; reasons returned and shown | `ids_are_plain_and_explanations_are_sorted_by_id`; `a_grant_satisfies_an_ask_but_never_a_forbid` (reasons) |
 | L2 Model ids not injective | **Fixed** | A provider name containing `/` fails closed | `a_provider_name_with_a_slash_fails_closed` |
@@ -65,4 +65,20 @@ Every finding is fixed or explicitly accepted; ADR-0008 Amendment 1 records the 
 | L4 One bad grant voided all policy, with the wrong error kind | **Fixed** | Grants are no longer Cedar text; a grant that cannot be named is a `Rule` error naming the grant | covered by `native_grants_equal_their_permits` |
 | L5 Blind clock trust; expiry doc off by its boundary | **Fixed** | A request clock more than 5 s behind the latest seen is refused; docs state the exclusive end | `a_clock_running_backwards_is_refused`; `grants_are_scoped_and_expire` |
 | L6 Contract annotations missing without a recorded deferral | **Accepted, deferred with owners** | ADR-0008 Amendment 1 §7 names where `max_amount`, `ttl`, `audit_level` and `compensable` live | review of the text |
+
+## V1 review of the hardening
+
+**Reviewer:** a fresh-context agent, read-only on the repository. It reviewed `438f174`.
+**Scope:** the review was partial. It stopped before running probes, so every finding below was
+reasoned from the code; the probes named in the table were run afterwards.
+**Result:** 1 High, 3 Medium, 2 Low.
+
+| Finding | Status | What changed | Proof |
+|---|---|---|---|
+| H-1 The bounds scanner did not match Cedar's lexer. A comment ended at `\r` is skipped by the scanner but parsed by Cedar, and index chains `x["a"]…` raised no counter | **Fixed** | Comments end at `\n` or `\r` (Cedar's token `//[^\n\r]*`). Every opening bracket counts as an operator. Probe: Cedar's parser crashes at 4,096 chained index or field accesses on a 1 MiB debug stack; the bounds now stop chains at 256 | `no_shape_within_or_beyond_the_bounds_crashes`: 3,000 index links and a CR-hidden 80-deep nest are refused; index, field, `!` and `-` chains at the bounds and nested literals run on a 1 MiB stack without crashing |
+| M-1 A refused request still advanced the clock mark | **Fixed** | The request is validated first; only a well-formed one moves the mark | `a_malformed_request_does_not_move_the_clock` |
+| M-2 A grant covered more than its approval (any tier, any data class, any ask), and the tolerance could extend a grant by up to 5 s | **Fixed** | A grant records the approved risk tier, data classes and ask `@id`s, and covers nothing riskier; expiry is judged at the latest clock seen | `a_grant_covers_no_riskier_request`, `a_grant_expires_at_the_latest_clock_seen` |
+| M-3 Two properties were weaker than claimed | **Fixed** | Grants: principals (agent, module, human), four actions and their resources, tiers, data classes, and a random policy set without asks in both engines, plus an injectivity property for entity ids. Slicing: model-pinned policies, more requests, and grants | `native_grants_equal_their_permits`, `entity_ids_are_injective`, `slicing_preserves_decisions` |
+| L-1 The clock check resets on every reload | **Accepted, documented** | The mark lives as long as one engine; a reload starts from the platform clock passed to `load` (ADR-0008 Amendment 1 §5) | — |
+| L-2 No test loaded a schema with action groups | **Fixed** | `load_with_schema` (hidden, test-only) loads a schema with a group; the forbid on the group reaches its members and equals the unsliced decision | `action_groups_reach_their_members` |
 

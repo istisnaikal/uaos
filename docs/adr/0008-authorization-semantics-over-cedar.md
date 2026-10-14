@@ -70,22 +70,33 @@ this section changes them.
      ask for. **It never overrides a forbid:** `Deny > (Ask unless granted) > Allow`.
    - **Why:** before this, a grant compiled to a plain permit and the ask check fired on any
      matching ask policy. The flow "approve, then the retry succeeds" could never complete.
+   - **What a grant covers:** only what its approval saw. Beyond the exact principal, action,
+     resource and pocket, a grant records:
+     - the highest risk tier approved;
+     - the data classes the approved content carried;
+     - the `@id`s of the ask policies it was issued to satisfy.
+
+     A riskier request (higher tier, a new data class) is not covered. An ask the grant does not
+     list stays an ask, so a policy added after the approval is not satisfied by it.
    - **How grants are evaluated:** they are no longer Cedar policies. They are exact-match
      capabilities in an index (a map lookup per decision). A property proves the result equals
-     compiling each grant to the permit of §5 (`native_grants_equal_their_permits`). Loading
-     10,000 grants takes 83 ms instead of 1 s.
+     compiling each grant to its permit, with tier and data-class conditions, for any policy set
+     without asks (`native_grants_equal_their_permits`). Loading 10,000 grants takes 85 ms
+     instead of 1 s.
 2. **Bounded policy text (adds to §4).** Cedar's parser recurses without a stack check: about 80
    nested parentheses aborted the process, and a persisted policy file would become a crash loop.
-   - **The bounds:** before Cedar sees the text, a scanner that skips strings and comments
-     enforces, per policy, at most:
+   - **The bounds:** before Cedar sees the text, a scanner enforces the limits below. It skips
+     strings and comments as Cedar's lexer does (a `//` comment ends at `\n` or `\r`), and it
+     counts every opening bracket as an operator too, so index chains (`x["a"]["b"]…`) and calls
+     count. Per policy, at most:
      - 8 nested brackets;
      - 16 `if`s;
      - 256 operators;
      - 16 KiB.
 
      The whole text is limited to 4 MiB. Anything beyond is a `Rule` error.
-   - **Measured:** on a 1 MiB stack, a debug build overflows at 32 nested brackets, 256 nested
-     `if`s and 4,096 chained operators. Cedar's evaluator and typechecker check their remaining
+   - **Measured:** on a 1 MiB stack, a debug build's parser overflows at 32 nested brackets,
+     256 nested `if`s, 4,096 chained operators and 4,096 chained field or index accesses. Cedar's evaluator and typechecker check their remaining
      stack (100 KiB) and fail an evaluation instead of overflowing, so the worst case within the
      bounds is a fail-closed Deny.
    - **What fits:** a policy at every bound at once evaluates normally with 1 MiB of stack in a
@@ -103,9 +114,14 @@ this section changes them.
    - **Proof:** the property that proves slicing never changes a decision now compares against
      the complete set as loaded. Before, the oracle was rebuilt from the slices, so a dropped
      policy vanished from both sides.
-5. **Time (changes §7).** `now_ms` must come from the platform clock. A request whose clock is
-   more than 5 s behind the latest one seen is refused, because a clock running backwards could
-   revive an expired grant. A grant is live while `now_ms < expires_at_ms`.
+5. **Time (changes §7).** `now_ms` must come from the platform clock.
+   - **Backwards clocks:** a request whose clock is more than 5 s behind the latest one seen is
+     refused, because a clock running backwards could revive an expired grant.
+   - **Expiry:** a grant is live while `now_ms < expires_at_ms`, judged at the latest clock seen,
+     so the tolerance never extends a grant.
+   - **Malformed requests:** a request refused as malformed does not move the mark.
+   - **Scope:** the mark lives as long as one engine. A reload starts from the time passed to
+     `load`, which the runtime takes from the platform clock.
 6. **Explanations.**
    - Determining policies are listed sorted by `@id`; a grant comes first, followed by the ask
      policies it satisfied.
@@ -123,9 +139,9 @@ this section changes them.
 
 | Set | Load | p50 | p99 |
 |---|---|---|---|
-| Mixed: 1,000 permits, conditional forbids and asks across actions | 66 ms | 160 µs | 678 µs |
-| 1,000 policies all on `exec` (the review's worst case: p99 1.7 ms before) | 61 ms | 369 µs | 419 µs |
-| 10,000 grants on `exec` plus the mixed set (before: load 1 s, p99 19 ms) | 83 ms | 154 µs | 176 µs |
+| Mixed: 1,000 permits, conditional forbids and asks across actions | 62 ms | 163 µs | 688 µs |
+| 1,000 policies all on `exec` (the review's worst case: p99 1.7 ms before) | 67 ms | 363 µs | 514 µs |
+| 10,000 grants on `exec` plus the mixed set (before: load 1 s, p99 19 ms) | 85 ms | 155 µs | 226 µs |
 
 The plan target is p99 ≤ 1 ms. These are measurements of these mixes on one machine, not a
 gate; the `perf-smoke` gate arrives in P3.
