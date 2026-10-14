@@ -49,7 +49,6 @@ jobs:
         run: cargo test -p uaos-redact --release --locked --test corpus -- --nocapture
         env:
           UAOS_CORPUS_SEED: ${{ github.run_id }}
-<<<<<<< HEAD
 
   ack-latency:
     # Production journal and chunk-store acknowledgement latency per OS (plan v2 PD-01; ADR-0003
@@ -70,8 +69,6 @@ jobs:
         run: |
           cargo run -q -p uaos-testkit --release --locked --bin journal-ack-bench -- "$RUNNER_TEMP/ack-latency" | tee ack-latency.md
           { echo "Runner: $RUNNER_LABEL"; echo; cat ack-latency.md; } >> "$GITHUB_STEP_SUMMARY"
-||||||| parent of ead8d14 (Gate hardening II: evidence freshness, xtask quick, nightly mutants)
-=======
 
   mutants:
     # Mutation testing (plan v2 V4): which deliberate bugs do the tests fail to notice? Report-only
@@ -112,4 +109,3 @@ jobs:
           # 0 all caught, 2 some missed, 3 some timed out: report-only for now. Anything else
           # (usage error, failing unmutated build or tests) is a real failure.
           case "$code" in 0|2|3) exit 0 ;; *) exit "$code" ;; esac
->>>>>>> ead8d14 (Gate hardening II: evidence freshness, xtask quick, nightly mutants)

@@ -50,8 +50,6 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **Accepted, with a reason:** the journal does not yet mark when execution began. That
     arrives with the runtime (WP3.3).
 
-### Security
-
 - `uaos-redact`: `FinalScanner`'s derived `Debug` printed its known-secret automaton, from which
   a vault secret could be reconstructed exactly. This was found by the retroactive review
   (`docs/reviews/WP2.3-redact.md`, H1) and breaks red line 2. `FinalScanner`, `DetectorSet` and

@@ -421,9 +421,6 @@ The journal is tamper-proof.
             expect: "used as a claim",
         },
         Case {
-
-
->>>>>>> aba1a93 (WP2.4: resolve the adversarial review (H1, H2, M1-M7, L1-L5))
             id: "identity-epoch-check-skipped",
             gate: "test",
             tool: None,
