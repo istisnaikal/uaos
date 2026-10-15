@@ -31,6 +31,17 @@ disallowed-methods = [
   { path = "std::fs::File::create", reason = "use uaos_platform::Fs (owner: uaos-platform)" },
   { path = "std::fs::File::open", reason = "use uaos_platform::Fs (owner: uaos-platform)" },
   { path = "std::fs::OpenOptions::open", reason = "use uaos_platform::Fs (owner: uaos-platform)" },
+  # Network: only the egress door opens connections or resolves names (I-07, ADR-0013).
+  { path = "std::net::TcpStream::connect", reason = "outbound connections go through the egress door (owner: uaos-egress)" },
+  { path = "std::net::TcpStream::connect_timeout", reason = "outbound connections go through the egress door (owner: uaos-egress)" },
+  { path = "std::net::UdpSocket::bind", reason = "UAOS sends no UDP; the egress door is the only outbound path (owner: uaos-egress)" },
+  { path = "tokio::net::TcpStream::connect", reason = "outbound connections go through the egress door (owner: uaos-egress)" },
+  { path = "tokio::net::lookup_host", reason = "name resolution belongs to the egress door, which classifies every answer (owner: uaos-egress)" },
+  # Tasks: the runtime supervisor is the only spawner (ADR-0010 Decision 7).
+  { path = "tokio::task::spawn", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
+  { path = "tokio::task::spawn_blocking", reason = "CPU work runs on the supervisor's bounded pool (owner: uaos-runtime)" },
+  # The door: built once by the composition root and handed only to the runtime (ADR-0010).
+  { path = "uaos_egress::Door::new", reason = "the composition root builds the one door and hands it only to the runtime (ADR-0010)" },
   # Hidden inputs: configuration arrives through uaos-config snapshots, not ambient env reads.
   { path = "std::env::var", reason = "read config via the composition root (owner: uaos bin)" },
   { path = "std::env::var_os", reason = "read config via the composition root (owner: uaos bin)" },

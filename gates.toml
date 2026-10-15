@@ -31,7 +31,7 @@ source = "CLAUDE.md §4 CI merge blocker: fmt/clippy/test; plan §4.3 code stand
 lane = "merge"
 status = "active"
 job = "clippy"
-negative = ["clippy-unwrap", "clippy-unsafe", "clippy-ambient-clock", "clippy-nondeterministic-map"]
+negative = ["clippy-unwrap", "clippy-unsafe", "clippy-ambient-clock", "clippy-nondeterministic-map", "egress-ctor-outside-root"]
 
 [[gate]]
 id = "test"
@@ -39,7 +39,7 @@ source = "CLAUDE.md §4 CI merge blocker: fmt/clippy/test"
 lane = "merge"
 status = "active"
 job = "test"
-negative = ["test-failure", "identity-epoch-check-skipped"]
+negative = ["test-failure", "identity-epoch-check-skipped", "egress-dials-private-range", "egress-numeric-host"]
 
 # ── supply chain and hygiene ─────────────────────────────────────────────────────────────
 [[gate]]
@@ -97,7 +97,7 @@ source = "plan §1.2 one mechanism per concern; ADR-0001"
 lane = "merge"
 status = "active"
 job = "arch"
-negative = ["arch-forbidden-edge", "arch-ring1-reaches-kernel"]
+negative = ["arch-forbidden-edge", "arch-ring1-reaches-kernel", "arch-ring1-depends-on-hyper"]
 
 [[gate]]
 id = "schema-compat"
