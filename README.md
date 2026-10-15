@@ -8,23 +8,25 @@ authenticated, authorized, priced against a hard budget, redacted, journaled (wr
 hash-chained) and explained. Product features attach to that lifecycle through versioned
 contracts; they are never compiled into it.
 
-## Status: P2 (Control), pre-alpha, no runnable binary yet
+## Status: P3 (Flow), pre-alpha, no runnable binary yet
 
-The kernel is being built from its foundations up: truth (journal) first, then control (policy,
-ledger, redaction), then flow (proxy, runtime, CLI). Nothing user-facing runs yet. Everything
-below is a library with tests, and each claim names the gate that proves it.
+The kernel is being built from its foundations up: truth (journal) first, then control (identity,
+policy, ledger, redaction), now flow (runtime, network door, proxy, CLI). Nothing user-facing
+runs yet. Everything below is a library with tests, and each claim names the gate that proves it
+([`docs/claims.md`](docs/claims.md) holds the exact conditions).
 
 | Exists now | Proof (gate in [`gates.toml`](gates.toml)) |
 |---|---|
 | Canonical contracts (`uaos-contracts`): typed IDs, event envelope, Operation lifecycle, error registry, money, budget entries | unit and property tests; JSON Schemas in [`schemas/`](schemas/) (`schema-compat`) |
 | Hash-chained journal, encrypted content-addressed chunks with crypto-shredding, rebuildable SQLite projections, OS keychain (`uaos-state`, `uaos-platform`) | `journal-durability`: the real journal is killed at random points (40 kills per OS per merge, 10,000 nightly) and no acknowledged record may be lost |
-| Fail-closed authorization over Cedar (`uaos-policy`): default deny, any evaluation error denies, Deny > Ask > Allow | property tests; p99 662 µs at 1,000 policies ([ADR-0008](docs/adr/0008-authorization-semantics-over-cedar.md)) |
-| Budget ledger with a structural hard cap (`uaos-ledger`) | `budget-concurrency`: model-checked simulation, overspend must be 0 |
-| Secret redaction with a fail-closed final scan, 11 high-risk formats (`uaos-redact`) | `redaction-corpus`: synthetic corpus v1. Recall is bound to the claimed formats and this corpus; it is not a real-world rate ([ADR-0009](docs/adr/0009-redaction-detectors-placeholders-final-scan.md)) |
-| Merge gates: fmt, clippy (pedantic + restriction set), tests, architecture direction, schema compatibility, SPDX headers, cargo-deny, cargo-vet, secret scan, DCO, docs-with-contract | every gate is proven to **fail** on a seeded violation: `cargo xtask negative` |
+| Scoped credentials (`uaos-identity`): `uaos_sk_` keys stored only as keyed digests, a child's scope within its parent's, revocation and epoch bumps journaled before they return, a guard against restoring an old data directory | `test`: random hierarchies checked against an independent model, 256 per merge and 10,000 nightly; seeded negative `identity-epoch-check-skipped` |
+| Fail-closed authorization over Cedar (`uaos-policy`): default deny, any evaluation error denies, Deny > Ask > Allow, a grant never beats a forbid | `policy-semantics`; p99 688 µs at 1,000 mixed policies on the reference machine ([ADR-0008](docs/adr/0008-authorization-semantics-over-cedar.md)) |
+| Budget ledger (`uaos-ledger`): a reservation or outgoing transfer beyond the available balance is refused before anything is recorded; spend above a reservation is recorded as an S1 overrun | `budget-concurrency`: randomized simulation against a reference model, 256 schedules per merge and 100,000 nightly |
+| Secret redaction with a fail-closed final scan, 11 high-risk formats (`uaos-redact`) | `redaction-corpus`: synthetic corpus v2 (six evasion forms, 40 negative families). Recall is bound to the claimed formats and this corpus; it is not a real-world rate ([ADR-0009](docs/adr/0009-redaction-detectors-placeholders-final-scan.md)) |
+| Merge gates: fmt, clippy (pedantic + restriction set), tests, architecture direction and guarded-lint owners, schema compatibility, SPDX headers, claim wording, cargo-deny, cargo-vet with an exemption ratchet, secret scan, DCO, docs-with-contract, CodeQL | every gate is proven to **fail** on a seeded violation: `cargo xtask negative` |
 
-What does **not** exist yet: scoped keys, the proxy and runtime, the CLI, the panel and every
-product module. Their gates are listed as pending in [`gates.toml`](gates.toml) and block a
+What does **not** exist yet: the runtime, the network door, the proxy, the CLI, the panel and
+every product module. Their gates are listed as pending in [`gates.toml`](gates.toml) and block a
 release until they are active. The path ahead is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Principles you can hold us to

@@ -91,6 +91,39 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P3 Move 1, Gate 0 records (plan v2 PD-08, PD-10, PD-17):
+  - **`merge-gate` CI job.** It `needs` every other `ci.yml` job, runs even when one failed or
+    was skipped, and fails unless all succeeded.
+  - **Ruleset narrowed (ADR-0019 Amendment 1).** The required checks in
+    `docs/adr/appendix/0019-main-ruleset.json` are now `merge-gate` and `codeql`, so adding a
+    job never needs another settings change.
+  - **New registry checks in `cargo xtask gates`.** The merge gate's `needs` must equal the
+    workflow's other jobs, and the ruleset must require exactly those two checks. Every active
+    merge-lane gate must be covered by a required check.
+  - **Phase check.** `gates.toml` gains `[project] phase`. The README status heading and the
+    roadmap's "Current phase" line must name it, which makes the phase-line check that PD-08
+    promised real.
+  - **Seeded negatives:** `merge-gate-missing-job`, `docs-phase-line-stale`.
+  - **Threat model v1.** Statuses reflect P1 and P2; scoped-credential assets are added; the
+    in-process-module and CI trust boundaries are added; rows T14 to T19 are added (T18: module
+    misbehaviour; T19: parser differential and decoding bombs). It awaits the maintainer's
+    single-signer sign-off (PD-10).
+  - **Privacy data flow v1.** It lists OS certificate checks (OCSP, CRL, AIA) triggered by TLS
+    to the provider, and the machine metadata Claude Code puts in its own requests (CAP-3, CAP-8,
+    CAP-10). The P3 in-process design is marked as not yet built.
+  - **Claims registry.** It gains the scoped-credential claim that the README states.
+  - **ADR-0010 Revision 1** (still Proposed; revised before the decision):
+    - the typestate follows ADR-0002's full order;
+    - execution starts at the door;
+    - balanced-mode recovery settles open reservations at full cost and never releases them on
+      a missing `op.executing`;
+    - module effects are child Operations authorized by a `GrantRef`, and modules hold no I/O
+      handles;
+    - CPU stages run off the async workers;
+    - the panic boundary has owners.
+  - **ADR-0014 Revision 1** (still Proposed; decided after the WP3.0c splice spike): a
+    `system_message` role for mid-conversation `role: "system"` messages (CAP-6), and an exact
+    definition of the newest human turn.
 - Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
   unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a
   forbid.
@@ -318,6 +351,11 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Changed
 
+- README and roadmap describe the real state. The phase is P3. Scoped credentials exist. The
+  numbers are current: corpus v2 and policy p99 688 µs. The ledger claim is worded as the
+  WP2.2 review required: a refusal before recording, and a randomized simulation against a
+  reference model.
+- The nightly mutation lane also covers `uaos-identity`.
 - `uaos-policy` decisions slice by exact resource within an action, and grants are indexed. The
   bench measures three mixes:
   - 1,000 mixed policies: p99 688 µs;

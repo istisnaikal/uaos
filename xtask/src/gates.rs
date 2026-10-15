@@ -73,9 +73,25 @@ const PHASES: &[&str] = &[
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Registry {
+    project: Project,
     gate: Vec<Gate>,
     behavior: Vec<Behavior>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Project {
+    phase: String,
+}
+
+/// The workflow whose jobs form the merge lane, and its aggregating job (ADR-0019 Amendment 1).
+const MERGE_WORKFLOW: &str = "ci.yml";
+const MERGE_GATE_JOB: &str = "merge-gate";
+/// The ruleset applied to `main` (ADR-0019). Its required status checks must be exactly the
+/// aggregating job plus the checks that live outside the merge workflow.
+const RULESET: &str = "docs/adr/appendix/0019-main-ruleset.json";
+/// Required checks that run in another workflow and so cannot be `needs` of the aggregator.
+const OUTSIDE_MERGE_WORKFLOW: &[&str] = &["codeql"];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -170,6 +186,8 @@ pub(crate) fn check(root: &Path, release: bool) -> Result<(), String> {
     }
 
     check_behaviors(&registry.behavior, &ids, &mut problems, &mut pending);
+    check_phase(root, &registry.project, &mut problems);
+    check_merge_gate(root, &registry.gate, &mut problems);
 
     if release && !pending.is_empty() {
         problems.push(format!(
@@ -220,6 +238,178 @@ fn check_behaviors(
             problems.push(format!("missing required behavior `{required}` (CLAUDE.md §4)"));
         }
     }
+}
+
+/// The README status heading and the roadmap's "Current phase" line must name the registry's
+/// phase, so the public phase line cannot go stale (plan v2 PD-08).
+fn check_phase(root: &Path, project: &Project, problems: &mut Vec<String>) {
+    let phase = project.phase.as_str();
+    if !PHASES.contains(&phase) {
+        problems.push(format!("[project] phase `{phase}` is not a known phase"));
+        return;
+    }
+    let sources: [(&str, &str); 2] = [("README.md", "## Status: "), ("docs/roadmap.md", "**Current phase:** ")];
+    for (file, prefix) in sources {
+        let Ok(text) = std::fs::read_to_string(root.join(file)) else {
+            problems.push(format!("phase line: cannot read {file}"));
+            continue;
+        };
+        let named: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix(prefix))
+            .map(|rest| {
+                rest.split(|c: char| c.is_whitespace() || c == ',')
+                    .next()
+                    .unwrap_or_default()
+            })
+            .collect();
+        match named.as_slice() {
+            [] => problems.push(format!("phase line: {file} has no line starting with `{prefix}`")),
+            [one] if *one == phase => {}
+            [one] => problems.push(format!(
+                "phase line: {file} names `{one}` but gates.toml [project] phase is `{phase}`"
+            )),
+            _ => problems.push(format!("phase line: {file} has more than one `{prefix}` line")),
+        }
+    }
+}
+
+/// The ruleset requires one aggregated check per workflow instead of every job by name, so a new
+/// merge-lane job can never be left out of the required set (ADR-0019 Amendment 1, B-38).
+/// Checked here:
+/// * `merge-gate` exists in the merge workflow, runs `if: always()` and `needs` exactly every
+///   other job of that workflow;
+/// * the ruleset's required checks are exactly `merge-gate` plus the checks of other workflows;
+/// * every active merge-lane gate runs in a job one of those required checks covers.
+fn check_merge_gate(root: &Path, gates: &[Gate], problems: &mut Vec<String>) {
+    let path = root.join(".github").join("workflows").join(MERGE_WORKFLOW);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        problems.push(format!("merge gate: cannot read .github/workflows/{MERGE_WORKFLOW}"));
+        return;
+    };
+    let jobs = jobs_with_bodies(&text);
+    let others: BTreeSet<&str> = jobs
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .filter(|id| *id != MERGE_GATE_JOB)
+        .collect();
+    match jobs.iter().find(|(id, _)| id == MERGE_GATE_JOB) {
+        None => problems.push(format!(
+            "merge gate: job `{MERGE_GATE_JOB}` is missing from {MERGE_WORKFLOW}"
+        )),
+        Some((_, body)) => {
+            if !body.iter().any(|l| l.trim() == "if: always()") {
+                problems.push(format!(
+                    "merge gate: `{MERGE_GATE_JOB}` must run `if: always()`, or a failed or skipped job \
+                     would skip it and a skipped required check counts as passing"
+                ));
+            }
+            let needs = body.iter().find_map(|l| l.trim().strip_prefix("needs:")).map(|list| {
+                list.trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect::<BTreeSet<&str>>()
+            });
+            match needs {
+                None => problems.push(format!(
+                    "merge gate: `{MERGE_GATE_JOB}` has no single-line `needs: [...]`"
+                )),
+                Some(needs) => {
+                    for missing in others.difference(&needs) {
+                        problems.push(format!(
+                            "merge gate: job `{missing}` is not in `{MERGE_GATE_JOB}` needs, so no required check covers it"
+                        ));
+                    }
+                    for unknown in needs.difference(&others) {
+                        problems.push(format!("merge gate: `{MERGE_GATE_JOB}` needs unknown job `{unknown}`"));
+                    }
+                }
+            }
+        }
+    }
+
+    match ruleset_required_checks(root) {
+        Err(e) => problems.push(format!("merge gate: {RULESET}: {e}")),
+        Ok(required) => {
+            let expected: BTreeSet<&str> = std::iter::once(MERGE_GATE_JOB)
+                .chain(OUTSIDE_MERGE_WORKFLOW.iter().copied())
+                .collect();
+            let actual: BTreeSet<&str> = required.iter().map(String::as_str).collect();
+            if actual != expected {
+                problems.push(format!(
+                    "merge gate: {RULESET} requires {actual:?}; it must require exactly {expected:?}"
+                ));
+            }
+        }
+    }
+
+    for g in gates.iter().filter(|g| g.lane == "merge" && g.status == "active") {
+        if let Some(job) = &g.job
+            && !others.contains(job.as_str())
+            && !OUTSIDE_MERGE_WORKFLOW.contains(&job.as_str())
+        {
+            problems.push(format!(
+                "merge gate: active gate `{}` runs in job `{job}`, which no required check covers",
+                g.id
+            ));
+        }
+    }
+}
+
+/// The required status-check contexts of the versioned ruleset.
+fn ruleset_required_checks(root: &Path) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(root.join(RULESET)).map_err(|e| e.to_string())?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let rules = json
+        .get("rules")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("no `rules` array")?;
+    let checks = rules
+        .iter()
+        .find(|r| r.get("type").and_then(serde_json::Value::as_str) == Some("required_status_checks"))
+        .and_then(|r| r.pointer("/parameters/required_status_checks"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or("no required_status_checks rule")?;
+    checks
+        .iter()
+        .map(|c| {
+            c.get("context")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| "a required check has no context".to_owned())
+        })
+        .collect()
+}
+
+/// Jobs of one workflow file in order, each with the lines of its body (more deeply indented
+/// lines up to the next job key).
+fn jobs_with_bodies(text: &str) -> Vec<(String, Vec<&str>)> {
+    let mut jobs: Vec<(String, Vec<&str>)> = Vec::new();
+    let mut in_jobs = false;
+    for line in text.lines() {
+        if line.starts_with("jobs:") {
+            in_jobs = true;
+            continue;
+        }
+        if in_jobs && !line.starts_with(' ') && !line.trim().is_empty() && !line.starts_with('#') {
+            in_jobs = false;
+        }
+        if !in_jobs {
+            continue;
+        }
+        if let Some(key) = line.strip_prefix("  ").and_then(|l| l.strip_suffix(':'))
+            && !key.starts_with(' ')
+            && !key.starts_with('#')
+        {
+            jobs.push((key.to_owned(), Vec::new()));
+        } else if let Some((_, body)) = jobs.last_mut() {
+            body.push(line);
+        }
+    }
+    jobs
 }
 
 /// Job IDs declared in `.github/workflows/*.yml` (two-space-indented keys under `jobs:`).

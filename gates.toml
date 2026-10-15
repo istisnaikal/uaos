@@ -11,6 +11,11 @@
 # recorded in ADR-0003: CLAUDE.md lists these as merge blockers from day one; a gate whose
 # subject is not built yet is tracked as `pending` instead of being faked green.
 
+# The phase being built. The README status heading and the roadmap's "Current phase" line must
+# name the same phase (plan v2 PD-08); `cargo xtask gates` fails the merge when they drift.
+[project]
+phase = "P3"
+
 # ── fmt / clippy / test ──────────────────────────────────────────────────────────────────
 [[gate]]
 id = "fmt"
@@ -116,7 +121,7 @@ source = "plan §4.2 gate registry"
 lane = "merge"
 status = "active"
 job = "gates"
-negative = ["gate-registry-incomplete"]
+negative = ["gate-registry-incomplete", "docs-phase-line-stale", "merge-gate-missing-job"]
 
 [[gate]]
 id = "gate-selftest"

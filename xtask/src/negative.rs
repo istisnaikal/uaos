@@ -226,6 +226,24 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "missing required gate",
         },
         Case {
+            // The README's public phase line drifts from the registry (plan v2 PD-08).
+            id: "docs-phase-line-stale",
+            gate: "gate-registry",
+            tool: None,
+            seed: replace("README.md", "## Status: P3 ", "## Status: P2 "),
+            runner: Runner::Xtask(&["gates"]),
+            expect: "phase line: README.md names `P2`",
+        },
+        Case {
+            // A merge-lane job left out of the aggregated required check (ADR-0019 Amendment 1).
+            id: "merge-gate-missing-job",
+            gate: "gate-registry",
+            tool: None,
+            seed: replace(".github/workflows/ci.yml", ", paths, negative]", ", paths]"),
+            runner: Runner::Xtask(&["gates"]),
+            expect: "job `negative` is not in `merge-gate` needs",
+        },
+        Case {
             id: "secret-committed",
             gate: "secret-scan",
             tool: Some("gitleaks"),

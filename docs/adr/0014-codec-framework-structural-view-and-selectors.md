@@ -2,6 +2,17 @@
 
 **Status:** Proposed (opened 2026-10-13; earliest decision 2026-10-15, 48 h) · **Plan refs:** v2 I-06, §2.5 beachhead facts, C-01, C-24 · **Builds on:** ADR-0005, ADR-0009 · **Amends:** ADR-0001 (adds Ring 0 crate `uaos-json`)
 
+**Revision 1 (2026-10-15, before the decision).** The Claude Code capture (CAP-6,
+`docs/research/beachhead-facts.md`) shows `role: "system"` messages in the middle of
+`messages`. The role table did not cover them, so a codec could not mark them and the kernel
+could not protect them. Revision 1:
+- adds the `system_message` role;
+- defines the newest human turn precisely;
+- keeps the role check fail-closed for both.
+
+The decision waits for the WP3.0c splice spike (plan P3 Move 1), which can still change this
+design.
+
 ## Context
 
 ADR-0005 requires byte-preserving codecs: unknown fields and signed blocks pass through
@@ -39,13 +50,20 @@ raw offsets. It has no nesting or key paths, and there is no fuzz target for it.
    | `newest_human_turn` | Where tags are read and injections are appended | tag strip and append-only injections happen only here |
    | `provider_produced` | Assistant turns and `tool_use` inputs | detectors never run; only the inverse rehydration map applies (ADR-0017) |
    | `system_entry(n)` | Entries of the `system` array | never added, removed, reordered or merged; entry 0 never touched; only the deterministic secret splice inside entries ≥ 1 |
+   | `system_message` | A `role: "system"` message inside `messages` (CAP-6; Revision 1) | never added, removed, moved or merged; never treated as a human turn; only the deterministic secret splice inside it |
+
+   **The newest human turn** is the last `messages` element with `role: "user"` that carries at
+   least one block other than a tool result. A user message holding only tool results is tool
+   output, so tags in it are never read (T1). A codec that cannot find such a turn marks none.
+   The kernel then reads no tags and appends nothing; it never guesses.
 
    A codec also declares its dialect's endpoints with their class (governed, metadata or
    denied; plan v2 D-28) and its billing dimensions.
 3. **The kernel resolves selectors and performs every edit.**
    - Edits are span splices on the original bytes; unedited bytes are forwarded unchanged.
-   - Every edit is checked against the roles: an edit inside `signed`, `opaque` or a
-     forbidden `system` position is a kernel error that fails the request. It is never forwarded.
+   - Every edit is checked against the roles. An edit is a kernel error that fails the request,
+     and is never forwarded, when it lands inside `signed` or `opaque`, at a forbidden `system`
+     position, or inside a `system_message` other than the secret splice.
 4. **Selectors cannot reduce redaction coverage.** Detection stays schema-agnostic over every
    JSON string (ADR-0009). Roles only *restrict* edits; they never exempt content from the final
    scan.
