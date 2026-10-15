@@ -10,8 +10,9 @@ could not protect them. Revision 1:
 - defines the newest human turn precisely;
 - keeps the role check fail-closed for both.
 
-The decision waits for the WP3.0c splice spike (plan P3 Move 1), which can still change this
-design.
+**The WP3.0c splice spike passed** on 2026-10-15
+([appendix](appendix/0014-splice-spike-2026-10-15.md); branch `spike/wp3.0c-splice`). Its
+lessons became Decision item 6, so this text is now ready for a decision.
 
 ## Context
 
@@ -71,6 +72,31 @@ raw offsets. It has no nesting or key paths, and there is no fuzz target for it.
    of `system`, `tools` and earlier `messages` against what it sent on the previous turn of the
    same Session, as recorded in the chunk manifest. A difference that UAOS caused is an S2 event
    and counts toward the binding-mismatch SLI (B-37).
+
+6. **Transforms are pinned per chunk value (Revision 1, from the WP3.0c spike).**
+   - **What a chunk is.** Each element of `system`, `tools` and `messages`, as the codec's
+     selectors mark them.
+   - **What a transform is.** A secret splice, a tag strip or an append.
+   - **The pin key** is the chunk's canonical value digest with volatile members excluded, plus
+     the detector version and the transform configuration. The transform computed when a chunk
+     first appears is recorded under that key.
+   - **Replay.** On every later turn the same edits are replayed by value path, whatever
+     formatting the client uses, so the values the provider bound stay identical.
+   - **Why it matters.** A tag strip or injection applies only to the newest human turn, and the
+     client resends its own unstripped original on the next turn. Without pinning, or with
+     `cache_control` inside the digest, the spike's provider check fails.
+   - **Replayed edits form their own class.** They are allowed outside the newest turn and still
+     forbidden in `signed`, `opaque`, `system[0]` and provider-produced content.
+   - **Selectors.** These primitives suffice for every Messages role:
+     - `key`, `each element`, `any-depth key`;
+     - the predicates "member is one of", "member is not one of" and "string, or an array with
+       an element matching";
+     - a `last` modifier.
+
+     Growth needs this ADR amended.
+   - **Numbers are grammar-only.** RFC 8259 sets no range, so the tape never re-serializes
+     numbers. A numeric field the kernel must read (for example `max_tokens`) is parsed with an
+     explicit range check.
 
 ## Alternatives rejected
 

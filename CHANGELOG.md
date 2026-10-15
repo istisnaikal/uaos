@@ -121,9 +121,19 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       handles;
     - CPU stages run off the async workers;
     - the panic boundary has owners.
-  - **ADR-0014 Revision 1** (still Proposed; decided after the WP3.0c splice spike): a
-    `system_message` role for mid-conversation `role: "system"` messages (CAP-6), and an exact
-    definition of the newest human turn.
+  - **ADR-0014 Revision 1** (still Proposed; ready for a decision):
+    - a `system_message` role for mid-conversation `role: "system"` messages (CAP-6);
+    - an exact definition of the newest human turn;
+    - the evidence from the WP3.0c splice spike (`docs/adr/appendix/0014-splice-spike-2026-10-15.md`).
+      Over 10,000 simulated turns under random client reformatting the values stayed stable,
+      and both design counterfactuals broke them.
+    - Decision item 6 states what the spike taught:
+      - transforms are pinned per chunk value, keyed with the detector version and the
+        transform configuration;
+      - chunk digests exclude volatile members;
+      - replayed edits are their own class;
+      - the selector set is closed;
+      - numbers are grammar-only.
 - Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
   unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a
   forbid.
