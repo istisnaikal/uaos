@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `journal-durability` gate (CLAUDE.md §4, ADR-0003): kill a real writer process at random
-//! points and prove that every acknowledged record survives, unchanged, on the real filesystem.
+//! The `journal-durability` gate (CLAUDE.md §4, ADR-0003, ADR-0018): kill a real writer process
+//! at random points and prove that every acknowledged record survives, unchanged, on the real
+//! filesystem, **and so does the payload it references**: in balanced mode chunks are only
+//! handed to the OS, never flushed, before the record that references them is acknowledged.
 //!
 //! Kill points alternate between "after k acknowledgements" and "after a random delay", so the
 //! writer is caught both blocked on its output and in the middle of journal I/O. Iterations:
@@ -21,11 +23,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use uaos_contracts::digest::Sha256Digest;
+use std::sync::Arc;
+
+use uaos_contracts::digest::{ChunkRef, Sha256Digest};
 use uaos_platform::Rng;
+use uaos_platform::real::OsRng;
 use uaos_platform::real::fs::OsFs;
 use uaos_platform::sim::SimRng;
+use uaos_state::chunks::ChunkStore;
 use uaos_state::journal::{JOURNAL_DIR, read_verified};
+use uaos_testkit::{kill_keyring, kill_payload, kill_pocket};
 
 const WRITER: &str = env!("CARGO_BIN_EXE_journal-crash-writer");
 /// Start a fresh data directory this often, so long nightly runs stay bounded in size.
@@ -58,13 +65,16 @@ fn spawn(data: &Path, mode: &str) -> Child {
         .unwrap()
 }
 
-/// Parses `<seq> <hash>` acknowledgement lines; ignores a torn final line.
-fn parse_ack(line: &str) -> Option<(u64, Sha256Digest)> {
-    let (seq, hash) = line.trim_end_matches(['\r', '\n']).split_once(' ')?;
+/// Parses `<seq> <hash> <chunk>` acknowledgement lines; ignores a torn final line.
+fn parse_ack(line: &str) -> Option<(u64, (Sha256Digest, ChunkRef))> {
     if !line.ends_with('\n') {
         return None;
     }
-    Some((seq.parse().ok()?, hash.parse().ok()?))
+    let mut words = line.trim_end_matches(['\r', '\n']).split(' ');
+    let seq = words.next()?.parse().ok()?;
+    let hash = words.next()?.parse().ok()?;
+    let chunk = words.next()?.parse().ok()?;
+    Some((seq, (hash, chunk)))
 }
 
 #[test]
@@ -74,7 +84,7 @@ fn kill_minus_nine_loses_no_acknowledged_record() {
     let rng = SimRng::new(seed);
     let root = scratch_root();
     let mut data = root.join("gen-0");
-    let mut acked: BTreeMap<u64, Sha256Digest> = BTreeMap::new();
+    let mut acked: BTreeMap<u64, (Sha256Digest, ChunkRef)> = BTreeMap::new();
     let mut total_acked = 0u64;
 
     for i in 0..iterations {
@@ -128,11 +138,20 @@ fn kill_minus_nine_loses_no_acknowledged_record() {
         let (records, report) = read_verified(&OsFs, &data.join(JOURNAL_DIR))
             .unwrap_or_else(|e| panic!("seed {seed:#x}, iteration {i}: journal does not verify: {e}"));
         let present: BTreeMap<u64, Sha256Digest> = records.iter().map(|r| (r.envelope.seq.0, r.hash)).collect();
-        for (seq, hash) in &acked {
+        for (seq, (hash, _)) in &acked {
             assert_eq!(
                 present.get(seq),
                 Some(hash),
                 "seed {seed:#x}, iteration {i}: acknowledged record {seq} lost or changed"
+            );
+        }
+        // Every acknowledged record's payload is with the OS too (ADR-0018, I-02).
+        let store = ChunkStore::open(Arc::new(OsFs), Arc::new(OsRng), kill_keyring().unwrap(), &data).unwrap();
+        for (seq, (_, chunk)) in &acked {
+            assert_eq!(
+                store.get(kill_pocket(), *chunk).ok(),
+                Some(kill_payload(*seq)),
+                "seed {seed:#x}, iteration {i}: acknowledged record {seq} lost its payload"
             );
         }
         total_acked = total_acked.max(report.records);

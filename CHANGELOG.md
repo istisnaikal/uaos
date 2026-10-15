@@ -8,6 +8,27 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Security
 
+- P3 Move 1, PR-1: chunk durability joins the journal's durability classes (ADR-0018), and a
+  latent chunk race (S-6) in P1 code is fixed.
+  - **Race (S-6).** Two concurrent puts of the same content could tear one shared temporary file
+    or pair one writer's data file with the other's key, which reads back as `Corrupt`. It was
+    harmless while single-threaded, but parallel subagents sharing `system` and `tools` content
+    would make it the common case.
+  - **The fix:**
+    - every atomic write now uses its own temporary;
+    - puts of one chunk wait for each other;
+    - a chunk left by an earlier process is read back once before it is trusted.
+  - **Proof:** a deterministic interleaving test and two seeded violations.
+- Payload before record (I-02). A journal opened with its chunk store refuses a record whose
+  `payload_ref` is not stored (`JournalError::PayloadNotStored`).
+- Payload losses are never silent.
+  - **On open:** the journal reads back the payloads of every record after its durable point,
+    and journals each unreadable one as `chunk.lost`.
+  - **After a failed payload flush:** the writer stops until `recover` has read the pending
+    chunks back.
+  - **Found by the new property test before merge:** a loss could go unreported when recovery's
+    own flush also failed. Lost chunks are now kept until their `chunk.lost` record is written.
+
 - `uaos-policy` hardening after the retroactive review (`docs/reviews/WP2.1-policy.md`; ADR-0008
   Amendment 1):
   - **Crafted policy text aborted the process** (about 80 nested parentheses overflowed Cedar's
@@ -151,6 +172,25 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       - replayed edits are their own class;
       - the selector set is closed;
       - numbers are grammar-only.
+- ADR-0018 balanced chunk durability (P3 Move 1, PR-1).
+  - `ChunkStore::open_with(…, ChunkDurability::Balanced)`: puts hand chunks to the OS, unflushed.
+  - `Journal::open_with_payloads`: every journal flush makes the pending chunks durable before
+    the segment, and records the durable point in `journal/FLUSHED`.
+  - `Journal::lost_payloads()`.
+  - Kernel event type `chunk.lost`: a `chunk.lost` or `chunk.shredded` record names its chunk
+    in metadata key `chunk`.
+  - `Fs::write_unsynced` and `Fs::sync_file` on both filesystems.
+- **Tests and harness:**
+  - `uaos-state/tests/durability.rs`: flush ordering under every injected flush fault, random
+    crash and power-loss schedules, rotation durability, torn-chunk rewrite and the S-6
+    interleaving.
+  - **Kill harness:** the writer now stores a payload before each intent, and the harness
+    reads every acknowledged record's payload back.
+  - **New seeded violations for `journal-durability`:** `chunk-flushed-before-sync`,
+    `intent-before-chunk-write`, `chunk-put-pair-race`, `chunk-put-shared-temp`.
+- `journal-ack-bench` gains `chunk-put-balanced` and `group-flush-chunks`. The reference-machine
+  numbers are in `docs/adr/appendix/0018-chunk-put-2026-10-15.md`: ADR-0018's p99 ≤ 0.5 ms
+  balanced-put target is **not met** on Windows, where file creation dominates.
 - Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
   unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a
   forbid.

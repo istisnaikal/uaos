@@ -88,3 +88,71 @@ loss is detected and reported. Chunk authenticity (AEAD) is unchanged, and shred
   ≤ 0.5 ms in balanced mode.
 - **Negative case for the gate self-test:** a coordinator that advances `flushed_through` before
   syncing chunks must fail the simulation.
+
+## Implementation and evidence (P3 Move 1, PR-1, 2026-10-15)
+
+**How each decision is built.**
+- **Decision 1.** `ChunkStore::open_with(…, ChunkDurability::Balanced)` hands both chunk files to
+  the OS through a uniquely named temporary and a rename, with no flush. Strict mode is unchanged.
+- **Decision 2.** The coordinator role belongs to `Journal::open_with_payloads`.
+  - `Journal::sync` first flushes the store's pending chunks (files, then pocket directories),
+    then the segment, and only then advances `flushed_through`.
+  - A failed payload flush stops the writer (`JournalHealth::PayloadFlushFailed`). `recover`
+    then reads the pending chunks back, journals each unreadable one as `chunk.lost` and flushes.
+  - The flush still runs inline, as before. Moving it to its own thread is runtime work
+    (WP3.3, the state actor).
+- **Decision 3.**
+  - **Durable point.** After each flush a one-line marker (`journal/FLUSHED`) records the
+    durable point. It is written without a flush and made durable at most once per second, so a
+    durable marker never names a record beyond the true durable point.
+  - **Recovery on open.** `open_with_payloads` reads back and flushes the payloads of every
+    record after the marker, or after the start of the previously active segment if the marker
+    is missing. It does this **before** the previous run's records are made durable. Each
+    unreadable payload gets a `chunk.lost` record (chunk named in metadata, never as
+    `payload_ref`), and none is silent.
+  - **Shredded chunks.** A chunk shredded after the record that references it is not a loss,
+    when a `chunk.shredded` record for it follows. That record also names the chunk in metadata.
+- **Added beyond the decision (I-02, S-6).**
+  - **Payload before record.** With a store attached, the journal refuses a record whose
+    `payload_ref` is not stored (`JournalError::PayloadNotStored`).
+  - **One writer per chunk.** Concurrent puts of one chunk wait for each other, and every
+    atomic write uses its own temporary.
+  - **No trust in leftovers.** A chunk left by an earlier process is read back once before it is
+    trusted. A torn pair is rewritten.
+  - **Rotation re-wraps are always flushed.** The old KEK is destroyed right after, so an
+    unflushed re-wrap lost to power would leave a key file only the destroyed KEK can open.
+
+**Verification as built.**
+- **Kill harness.** The real-OS writer stores a distinct payload before each intent. Every
+  acknowledged record's payload must read back after the kill.
+  - Windows, local: 60 kills, 0 lost.
+  - CI: 40 kills per OS per merge, 10,000 nightly.
+- **Simulation (`uaos-state/tests/durability.rs`).**
+  - **Flush-ordering scenario.** A flush fails at every possible step, then the power goes. A
+    record at or before `flushed_through` must have a readable payload.
+  - **Random crash schedules.** Writes, repeated payloads, flushes, failed flushes, process
+    crashes, power losses and recoveries (64 cases per merge; 2,048 run locally). Every
+    surviving record's payload is readable or reported.
+- **The property test found a silent-loss path, fixed before merge.** It runs as follows:
+  1. A failed flush drops chunk A.
+  2. Recovery sets A aside as lost.
+  3. Recovery's own re-flush then fails too.
+  4. The next successful recovery makes A's record durable without reporting it.
+
+  Lost chunks now accumulate in the store until the journal has written their `chunk.lost`
+  records.
+- **Gate self-test.** Four new seeded violations prove the `journal-durability` gate bites:
+  `chunk-flushed-before-sync`, `intent-before-chunk-write`, `chunk-put-pair-race` and
+  `chunk-put-shared-temp`.
+- **Bench: the target is not met on the reference machine.** The details are in
+  [the appendix](appendix/0018-chunk-put-2026-10-15.md).
+  - Balanced chunk put, 4 KiB: p99 is 2.1 ms on Windows 10 (solid-state drive) against the
+    0.5 ms target.
+  - Without the flush, the cost is the creation of two files per chunk.
+  - Creating chunk files in place, with no temporary or rename, was also measured: it halved
+    p50 but tripled p99, so the rename stays.
+  - Linux and macOS numbers come from the nightly `ack-latency` job.
+  - This is the condition Decision 4 names for its follow-up: one key file per chunk is now the
+    measured cost. A per-pocket keystore log would halve the file count, but it changes shred
+    semantics (ADR-0007). It therefore needs its own ADR and the maintainer's decision; it does
+    not ride in with this change.
