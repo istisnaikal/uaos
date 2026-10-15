@@ -93,3 +93,31 @@ and it was not applied.
   - `gh api repos/<owner>/<repo>/rulesets` shows no bypass actors.
 - **Release:** the RC-1 go/no-go (plan v2 §8.1 item 9) checks that the tag commit is reachable
   only through gated merges.
+
+## Amendment 1 (2026-10-15): one aggregated required check per workflow
+
+**Problem.** Decision 1 lists every merge-lane job as a required check by name. That list is
+fragile in two ways:
+- The count drifted: the text says 19 jobs, while the JSON lists 18 `ci.yml` contexts plus
+  CodeQL.
+- Phase 3 adds jobs (`empty-kernel`, fuzz smoke, `surface`). Each addition would need the
+  maintainer to re-apply the ruleset. A forgotten re-apply silently leaves that job ungated
+  (B-38), and no check on the code side would notice.
+
+**Change.** Decision 1's list of required checks is replaced by:
+- **`merge-gate`,** a job in `ci.yml` that `needs` every other job of that workflow. It runs
+  `if: always()` and fails unless every needed job succeeded. A skipped needed job therefore
+  fails it. This matters because GitHub counts a skipped required check as passing.
+- **`codeql`,** which runs in its own workflow, plus the code-scanning rule.
+
+**Checks.** `cargo xtask gates` fails the merge in any of these cases:
+- `merge-gate` is missing, or does not run `if: always()`;
+- its `needs` differs from the set of other `ci.yml` jobs;
+- the ruleset JSON requires anything other than `merge-gate` and `codeql`;
+- an active merge-lane gate runs in a job that no required check covers.
+
+The seeded negative `merge-gate-missing-job` proves the check bites.
+
+**Consequence.** After one re-apply of the amended JSON, adding a job to `ci.yml` needs no
+settings change, and leaving the new job out of `needs` fails the merge. The consequence "renaming
+a job requires updating the ruleset" now applies only to `merge-gate` and `codeql`.

@@ -244,3 +244,26 @@ jobs:
           echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum --check --strict
           tar -xzf gitleaks.tar.gz gitleaks && sudo mv gitleaks /usr/local/bin/ && rm gitleaks.tar.gz
       - run: cargo xtask negative --require-all-tools
+
+  merge-gate:
+    # The one check of this workflow that the ruleset on `main` requires (ADR-0019 Amendment 1).
+    # It needs every other job here; `cargo xtask gates` fails the merge if one is missing. It
+    # runs even when a needed job failed, was skipped or was cancelled, because GitHub counts a
+    # skipped required check as passing; it then fails unless every needed job succeeded.
+    if: always()
+    needs: [fmt, clippy, test, arch, schemas, headers, gates, deny, vet, secrets, dco, docs-sync, paths, negative]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every merge-lane job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        # Prints each needed job's result; exits non-zero unless there is at least one and every
+        # one is "success" (failure, cancelled and skipped all fail the gate).
+        run: |
+          python3 -c '
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          for job, outcome in sorted(needs.items()):
+              print(job + ": " + str(outcome.get("result")))
+          sys.exit(0 if needs and all(o.get("result") == "success" for o in needs.values()) else 1)
+          '

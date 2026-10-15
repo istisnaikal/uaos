@@ -12,14 +12,18 @@ Each phase has two exits:
 
 ## Where we are
 
+**Current phase:** P3
+
 | Phase | What it builds | State |
 |---|---|---|
 | P0 Bedrock | Contracts, platform boundary, merge gates that are proven to bite | built |
-| P1 Truth | Hash-chained journal, encrypted chunks, projections, OS keychain | built. Owed: Linux and macOS durability numbers; the passphrase vault for hosts without a keychain |
-| P2 Control | Cedar authorization, budget ledger with a structural cap, secret redaction | policy, ledger and redaction built; **scoped keys (WP2.4) next** |
-| P3 Flow → **Kernel RC-1** | Proxy for Anthropic Messages and OpenAI Responses clients, runtime, CLI, pricing, release pipeline | next |
+| P1 Truth | Hash-chained journal, encrypted chunks, projections, OS keychain | built. Owed: the passphrase vault for hosts without a keychain; chunk durability joining the journal's flush schedule (ADR-0018) |
+| P2 Control | Scoped credentials, Cedar authorization, budget ledger, secret redaction | built. Owed: the signed threat-model review that closes the phase |
+| P3 Flow → **Kernel RC-1** | Runtime, the one network door, the module socket, proxy for Anthropic Messages and OpenAI Responses clients, CLI, pricing, release pipeline | **in progress.** First move: the module socket and the first governed Operation, end to end against a local mock provider |
 
-Work owed by finished phases is tracked as `phase-debt` and must be repaid before RC-1.
+Work owed by finished phases is tracked as `phase-debt` and must be repaid before RC-1. The
+current phase above is checked against [`gates.toml`](../gates.toml) and the README on every
+merge.
 
 ## Kernel RC-1
 
