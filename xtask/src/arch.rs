@@ -19,6 +19,9 @@ struct ArchFile {
 #[serde(deny_unknown_fields)]
 struct Ring1 {
     allow: Vec<String>,
+    /// Crates no Ring 1 module may reach, even transitively (ADR-0010: no ambient authority).
+    #[serde(default)]
+    ban: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,10 +94,15 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
             }
         }
 
-        // Transitive closure over product edges, for bans.
-        if let Some(rule) = rule.filter(|r| !r.ban.is_empty()) {
+        // Transitive closure over product edges, for bans. Ring 1 crates share one ban list.
+        let bans: &[String] = if is_ring1 {
+            &arch.ring1.ban
+        } else {
+            rule.map_or(&[][..], |r| r.ban.as_slice())
+        };
+        if !bans.is_empty() {
             let closure = product_closure(id, &nodes);
-            for banned in &rule.ban {
+            for banned in bans {
                 if closure.iter().any(|p| names.get(*p).copied() == Some(banned.as_str())) {
                     violations.push(format!("{name}: transitively depends on banned crate `{banned}`"));
                 }

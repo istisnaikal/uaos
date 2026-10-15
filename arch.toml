@@ -12,6 +12,12 @@
 
 [ring1]
 allow = ["uaos-contracts", "uaos-module-api"]
+# No Ring 1 module may reach a network, process or async-I/O crate, even transitively: a module's
+# effects are child Operations through the kernel's one door (ADR-0010 Decision 4 and Revision 1).
+ban = [
+  "tokio", "hyper", "hyper-util", "reqwest", "mio", "socket2",
+  "rustls", "tokio-rustls", "uaos-egress",
+]
 
 [crate.uaos-contracts]
 ring = 0
@@ -51,7 +57,8 @@ ban = ["tokio", "hyper", "reqwest", "rusqlite"]
 [crate.uaos-module-api]
 ring = 0
 allow = ["uaos-contracts"]
-ban = ["hyper", "reqwest", "rusqlite"]
+# The socket modules plug into carries no I/O of its own (ADR-0010, ADR-0014).
+ban = ["tokio", "hyper", "hyper-util", "reqwest", "mio", "socket2", "rusqlite", "uaos-egress"]
 
 [crate.uaos-egress]
 ring = 0
@@ -73,9 +80,15 @@ ban = ["rusqlite"]
 
 [crate.uaos]
 ring = 0
-# Composition root: the one crate allowed to wire everything, including Ring 1 defaults.
-allow = ["*"]
-ban = []
+# Composition root: wires the kernel and the default Ring 1 modules. Its list is explicit and
+# leaves out `uaos-egress` (ADR-0010 Decision 2): network use from the CLI, such as
+# `doctor --online`, is a runtime Operation like any other. A new module is added here by name.
+allow = [
+  "uaos-contracts", "uaos-platform", "uaos-state", "uaos-identity", "uaos-policy",
+  "uaos-ledger", "uaos-redact", "uaos-module-api", "uaos-runtime", "uaos-api",
+  "mod-anthropic", "mod-openai", "mod-mock",
+]
+ban = ["uaos-egress"]
 
 [crate.uaos-testkit]
 ring = "dev"
@@ -96,6 +109,8 @@ ban = []
 "unsafe_code" = []
 "clippy::disallowed_methods" = [
     "crates/uaos-platform/src/real", # owner of clocks, randomness and the filesystem (D15)
+    "crates/uaos-egress/src/connect.rs", # owner of outbound sockets: the one door (I-07, ADR-0013)
+    "crates/uaos-egress/src/resolve.rs", # owner of outbound name resolution (ADR-0013)
     "crates/*/tests/",
     "crates/*/benches/",
     "crates/uaos-testkit/", # dev-only harnesses that need real processes and real time

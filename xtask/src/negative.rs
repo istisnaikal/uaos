@@ -302,6 +302,75 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "lost or changed",
         },
         Case {
+            id: "egress-dials-private-range",
+            gate: "test",
+            tool: None,
+            // T5: a door whose classification lets the loopback range through.
+            seed: replace(
+                "crates/uaos-egress/src/addr.rs",
+                "([127, 0, 0, 0], 8, Blocked::Loopback),",
+                "([127, 0, 0, 0], 32, Blocked::Loopback),",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-egress",
+                    "--test",
+                    "door",
+                    "private_answers_are_refused_unless_the_upstream_is_declared_private",
+                ],
+            },
+            expect: "the door dialled a private range",
+        },
+        Case {
+            id: "egress-numeric-host",
+            gate: "test",
+            tool: None,
+            // T5: an upstream named by an address literal in disguise (`2130706433`).
+            seed: replace(
+                "crates/uaos-egress/src/host.rs",
+                "if name.rsplit('.').next().is_some_and(is_numeric_label) {",
+                "if false && name.rsplit('.').next().is_some_and(is_numeric_label) {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--lib", "address_literals_are_refused"],
+            },
+            expect: "was accepted as a host name",
+        },
+        Case {
+            id: "egress-ctor-outside-root",
+            gate: "clippy",
+            tool: None,
+            // ADR-0010: code other than the composition root building an egress door.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\npub fn seeded_violation() -> Result<Door, EgressError> {\n    Door::new(\n        Vec::new(),\n        std::sync::Arc::new(SystemResolver),\n        std::sync::Arc::new(uaos_platform::real::SystemClock::new()),\n        hyper_util::rt::TokioExecutor::new(),\n        DoorLimits::default(),\n    )\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "uaos_egress::Door::new",
+        },
+        Case {
+            id: "arch-ring1-depends-on-hyper",
+            gate: "arch-check",
+            tool: None,
+            // ADR-0010: a Ring 1 module that reaches a network crate.
+            seed: both(
+                both(
+                    write(
+                        "modules/mod-seeded/Cargo.toml",
+                        "[package]\nname = \"mod-seeded\"\nversion = \"0.0.0\"\nedition = \"2024\"\nlicense = \"Apache-2.0\"\npublish = false\n\n[dependencies]\nhyper.workspace = true\n".to_owned(),
+                    ),
+                    write("modules/mod-seeded/src/lib.rs", "// SPDX-License-Identifier: Apache-2.0\n".to_owned()),
+                ),
+                replace("Cargo.toml", "members = [\"crates/*\", \"xtask\"]", "members = [\"crates/*\", \"modules/*\", \"xtask\"]"),
+            ),
+            runner: Runner::Xtask(&["arch-check"]),
+            expect: "transitively depends on banned crate `hyper`",
+        },
+        Case {
             id: "ledger-reserve-beyond-available",
             gate: "budget-concurrency",
             tool: None,

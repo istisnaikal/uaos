@@ -156,6 +156,36 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       - replayed edits are their own class;
       - the selector set is closed;
       - numbers are grammar-only.
+- `uaos-egress`, the one outbound door (P3 Move 1, PR-5; ADR-0013, threat T5).
+  - **Destinations.** Only declared upstreams, named by DNS names. Address literals are refused
+    in every spelling.
+  - **DNS.** The door resolves names itself, classifies every answer, and dials the classified
+    address. It refuses every special-purpose range, including IPv4 embedded in IPv4-mapped,
+    NAT64 and 6to4 forms, and Teredo, unless the upstream is declared private.
+  - **TLS.** On aws-lc-rs with the platform verifier; HTTP/1.1.
+  - **Requests.**
+    - Redirects are returned, never followed.
+    - Hop-by-hop headers are stripped and no UAOS header is added.
+    - The provider credential is inserted last and marked sensitive.
+    - One send per Operation; a request bound to another Operation is refused.
+    - A circuit breaker runs per upstream.
+  - **Connection tasks** run on an executor the runtime provides.
+  - **Error codes** `UAOS-EGRESS-0001` to `0005`: blocked, unreachable, timeout, circuit open,
+    refused.
+- Reachability rules for the door (ADR-0010).
+  - **`clippy.toml`.** Outbound connects, name resolution and UDP are banned outside the door;
+    task spawning outside the runtime; `Door::new` outside the composition root.
+  - **`arch.toml`.** The bin's allow list is now explicit and leaves out the door.
+    `uaos-module-api` and every Ring 1 crate are banned, transitively, from network and
+    async-I/O crates (new `[ring1] ban`, enforced by `cargo xtask arch-check`).
+  - **Seeded violations:** `egress-dials-private-range`, `egress-numeric-host`,
+    `egress-ctor-outside-root`, `arch-ring1-depends-on-hyper`.
+- Dependencies for the ADR-0013 stack: tokio, hyper 1, hyper-util, http, rustls 0.23
+  (aws-lc-rs only), tokio-rustls, rustls-platform-verifier, and rcgen for tests only.
+  - 57 cargo-vet exemptions, each with a written reason (the unnoted baseline is unchanged).
+  - cargo-vet 0.10 ignores the newer Bytecode Alliance audits for this stack, so they are not
+    imported yet.
+
 - Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
   unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a
   forbid.
