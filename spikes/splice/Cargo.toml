@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPIKE (plan P3 Move 1, WP3.0c: the kill-spike for ADR-0014). Throwaway measurement code: not
+# part of the workspace, not product code. It answers one question: can a kernel-owned structural
+# tape plus declarative role selectors plus kernel-performed splices keep every value the
+# provider checks identical across turns, while the client reformats its own JSON? Its verdict
+# feeds ADR-0014's decision; the code is deleted or rewritten with full tests inside `uaos-json`.
+[package]
+name = "spike-splice"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+# SIMD byte search for string runs (already a vetted workspace dependency of uaos-redact).
+memchr = "2.8.3"
+# Oracle only: value comparison and differential acceptance. The tape never uses it.
+serde_json = "1"
+
+[profile.release]
+debug = false
