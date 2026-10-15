@@ -189,13 +189,16 @@ pub mod types {
     pub const REDACT_EXPOSED_SECRET: EventType = EventType::from_static("redact.exposed_secret");
     /// A content chunk was crypto-shredded.
     pub const CHUNK_SHREDDED: EventType = EventType::from_static("chunk.shredded");
+    /// A record's content chunk could not be read back after a power loss or a failed flush
+    /// (ADR-0018 §3): the record stands, its payload is reported lost, never silently.
+    pub const CHUNK_LOST: EventType = EventType::from_static("chunk.lost");
     /// One budget ledger entry (`uaos.budget_tx/1` in the inline payload).
     pub const BUDGET_ENTRY: EventType = EventType::from_static("budget.entry");
     /// One identity entry (`uaos.credential/1` in the inline payload).
     pub const IDENTITY_ENTRY: EventType = EventType::from_static("identity.entry");
 
     /// All kernel event types, for validation and generated documentation.
-    pub const ALL: [&EventType; 12] = [
+    pub const ALL: [&EventType; 13] = [
         &OP_RESERVED_INTENT,
         &OP_COMMITTED,
         &OP_FAILED,
@@ -206,6 +209,7 @@ pub mod types {
         &BUDGET_RELEASED,
         &REDACT_EXPOSED_SECRET,
         &CHUNK_SHREDDED,
+        &CHUNK_LOST,
         &BUDGET_ENTRY,
         &IDENTITY_ENTRY,
     ];

@@ -15,6 +15,10 @@
 //! | `strict`      | one `Journal::append` with a flush before every acknowledgement            |
 //! | `group-flush` | one `Journal::sync` after 64 unflushed appends                             |
 //! | `chunk-put`   | one `ChunkStore::put` of a new 4 KiB chunk (data plus wrapped key)          |
+//! |               | in strict mode: both files flushed before it returns                       |
+//! | `chunk-put-balanced` | the same put in balanced mode (ADR-0018): handed to the OS only     |
+//! | `group-flush-chunks` | one `Journal::sync` after 64 records, each with its own new chunk:  |
+//! |               | 128 chunk files, then the segment, made durable (ADR-0018 order)           |
 //!
 //! Output: a Markdown table on stdout (the nightly job appends it to the run summary), then one
 //! `json:` line with the same numbers in nanoseconds for artifacts.
@@ -37,8 +41,8 @@ use uaos_platform::fs::Fs;
 use uaos_platform::real::fs::OsFs;
 use uaos_platform::real::{OsRng, SystemClock};
 use uaos_platform::{Clock, Rng};
-use uaos_state::chunks::ChunkStore;
 use uaos_state::chunks::keyring::MemoryKeyring;
+use uaos_state::chunks::{ChunkDurability, ChunkStore};
 use uaos_state::journal::{FlushPolicy, Journal};
 use uaos_testkit::intent_draft;
 
@@ -143,6 +147,8 @@ fn run(dir: &Path) -> Result<Vec<Series>, String> {
         store.put(pocket, &content).map_err(|e| format!("chunk put: {e}"))?;
         chunk.push(start.elapsed());
     }
+    drop(store);
+    let (chunk_balanced, group_chunks) = payload_series(&fs, &clock, &rng, &dir.join("payloads"), never)?;
 
     Ok(vec![
         Series {
@@ -161,7 +167,68 @@ fn run(dir: &Path) -> Result<Vec<Series>, String> {
             name: "chunk-put",
             samples: chunk,
         },
+        Series {
+            name: "chunk-put-balanced",
+            samples: chunk_balanced,
+        },
+        Series {
+            name: "group-flush-chunks",
+            samples: group_chunks,
+        },
     ])
+}
+
+/// ADR-0018 balanced mode: each put hands both chunk files to the OS; the journal's flush makes
+/// them durable before the records that reference them. Returns the put latencies and the
+/// latencies of flushes that each cover `GROUP_SIZE` records with their own new chunk.
+fn payload_series(
+    fs: &Arc<dyn Fs>,
+    clock: &Arc<dyn Clock>,
+    rng: &Arc<dyn Rng>,
+    data: &Path,
+    window: FlushPolicy,
+) -> Result<(Vec<Duration>, Vec<Duration>), String> {
+    let mut puts = Vec::new();
+    let mut flushes = Vec::new();
+    fs.create_dir_all(data).map_err(|e| format!("payload dir: {e}"))?;
+    let keys = Arc::new(MemoryKeyring::new(Arc::clone(rng)));
+    let store = Arc::new(
+        ChunkStore::open_with(Arc::clone(fs), Arc::clone(rng), keys, data, ChunkDurability::Balanced)
+            .map_err(|e| format!("open balanced chunk store: {e}"))?,
+    );
+    let mut journal = Journal::open_with_payloads(
+        Arc::clone(fs),
+        Arc::clone(clock),
+        Arc::clone(rng),
+        data,
+        window,
+        Arc::clone(&store),
+    )
+    .map_err(|e| format!("open journal with payloads: {e}"))?;
+    let pocket = PocketId::from_parts(2, [9; 10]);
+    let mut content = vec![0u8; CHUNK_BYTES];
+    let mut i = 0u64;
+    for _ in 0..GROUPS {
+        for _ in 0..GROUP_SIZE {
+            for (slot, byte) in content.iter_mut().zip(i.to_le_bytes()) {
+                *slot = byte;
+            }
+            i += 1;
+            let start = Instant::now();
+            let reference = store
+                .put(pocket, &content)
+                .map_err(|e| format!("balanced chunk put: {e}"))?;
+            puts.push(start.elapsed());
+            let mut draft = intent_draft(i);
+            draft.pocket_id = Some(pocket);
+            draft.payload_ref = Some(reference);
+            journal.append(draft).map_err(|e| format!("append with payload: {e}"))?;
+        }
+        let start = Instant::now();
+        journal.sync().map_err(|e| format!("flush with payloads: {e}"))?;
+        flushes.push(start.elapsed());
+    }
+    Ok((puts, flushes))
 }
 
 /// The sample at quantile `permille / 1000` (nearest rank).

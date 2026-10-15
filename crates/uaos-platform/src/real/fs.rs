@@ -178,6 +178,32 @@ impl Fs for OsFs {
         result
     }
 
+    fn write_unsynced(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+        let tmp = temp_sibling(path);
+        let result = (|| {
+            let mut file = File::create(&tmp).map_err(|e| FsError::from_io("write_unsynced", &e))?;
+            file.write_all(bytes)
+                .map_err(|e| FsError::from_io("write_unsynced", &e))?;
+            drop(file);
+            std::fs::rename(&tmp, path).map_err(|e| FsError::from_io("write_unsynced", &e))
+        })();
+        if result.is_err() {
+            // As in `write_atomic`: never leave a temporary behind; `path` is untouched.
+            let _cleanup_result = std::fs::remove_file(&tmp);
+        }
+        result
+    }
+
+    fn sync_file(&self, path: &Path) -> Result<(), FsError> {
+        // Windows flushes a file only through a handle with write access; Unix accepts any
+        // handle. Opening for writing neither creates nor truncates.
+        let file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|e| FsError::from_io("sync_file", &e))?;
+        file.sync_data().map_err(|_| FsError::SyncFailed { op: "sync_file" })
+    }
+
     fn try_lock_exclusive(&self, path: &Path) -> Result<Box<dyn LockGuard>, FsError> {
         local(path, "lock")?;
         let file = OpenOptions::new()
