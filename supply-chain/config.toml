@@ -47,6 +47,21 @@ criteria = "safe-to-deploy"
 version = "4.0.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.asn1-rs]]
+version = "0.7.2"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+
+[[exemptions.asn1-rs-derive]]
+version = "0.6.0"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+
+[[exemptions.asn1-rs-impl]]
+version = "0.2.0"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+
 [[exemptions.async-broadcast]]
 version = "0.7.2"
 criteria = "safe-to-deploy"
@@ -191,6 +206,11 @@ criteria = "safe-to-deploy"
 version = "0.5.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.combine]]
+version = "4.6.9"
+criteria = "safe-to-deploy"
+notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
+
 [[exemptions.concurrent-queue]]
 version = "2.5.0"
 criteria = "safe-to-deploy"
@@ -243,6 +263,11 @@ criteria = "safe-to-deploy"
 version = "0.24.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.data-encoding]]
+version = "2.11.1"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+
 [[exemptions.defmt]]
 version = "1.1.1"
 criteria = "safe-to-deploy"
@@ -255,6 +280,11 @@ criteria = "safe-to-deploy"
 version = "1.0.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.der-parser]]
+version = "10.0.0"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+
 [[exemptions.deranged]]
 version = "0.5.9"
 criteria = "safe-to-deploy"
@@ -266,6 +296,11 @@ criteria = "safe-to-deploy"
 [[exemptions.digest]]
 version = "0.11.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.displaydoc]]
+version = "0.2.7"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
 
 [[exemptions.dyn-clone]]
 version = "1.0.20"
@@ -327,6 +362,11 @@ criteria = "safe-to-deploy"
 version = "1.3.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.futures-channel]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 async and HTTP stack (D-26), used only behind the egress door. cargo-vet 0.10 ignores the newer Bytecode Alliance audits that cover this stack; import or audit before GA (PD-06)."
+
 [[exemptions.futures-io]]
 version = "0.3.34"
 criteria = "safe-to-deploy"
@@ -352,6 +392,11 @@ version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.getrandom]]
+version = "0.2.17"
+criteria = "safe-to-deploy"
+notes = "Older getrandom line reached only through optional paths of the TLS stack. Import or audit before GA (PD-06)."
+
+[[exemptions.getrandom]]
 version = "0.4.3"
 criteria = "safe-to-deploy"
 
@@ -371,9 +416,39 @@ criteria = "safe-to-deploy"
 version = "0.13.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.http]]
+version = "1.5.0"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 async and HTTP stack (D-26), used only behind the egress door. cargo-vet 0.10 ignores the newer Bytecode Alliance audits that cover this stack; import or audit before GA (PD-06)."
+
+[[exemptions.http-body]]
+version = "1.1.0"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 async and HTTP stack (D-26), used only behind the egress door. cargo-vet 0.10 ignores the newer Bytecode Alliance audits that cover this stack; import or audit before GA (PD-06)."
+
+[[exemptions.http-body-util]]
+version = "0.1.5"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 async and HTTP stack (D-26), used only behind the egress door. cargo-vet 0.10 ignores the newer Bytecode Alliance audits that cover this stack; import or audit before GA (PD-06)."
+
+[[exemptions.httparse]]
+version = "1.10.1"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 async and HTTP stack (D-26), used only behind the egress door. cargo-vet 0.10 ignores the newer Bytecode Alliance audits that cover this stack; import or audit before GA (PD-06)."
+
 [[exemptions.hybrid-array]]
 version = "0.4.15"
 criteria = "safe-to-deploy"
+
+[[exemptions.hyper]]
+version = "1.12.0"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 async and HTTP stack (D-26), used only behind the egress door. cargo-vet 0.10 ignores the newer Bytecode Alliance audits that cover this stack; import or audit before GA (PD-06)."
+
+[[exemptions.hyper-util]]
+version = "0.1.21"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 async and HTTP stack (D-26), used only behind the egress door. cargo-vet 0.10 ignores the newer Bytecode Alliance audits that cover this stack; import or audit before GA (PD-06)."
 
 [[exemptions.iana-time-zone]]
 version = "0.1.65"
@@ -419,6 +494,26 @@ criteria = "safe-to-deploy"
 version = "0.1.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.jni]]
+version = "0.22.4"
+criteria = "safe-to-deploy"
+notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
+
+[[exemptions.jni-macros]]
+version = "0.22.4"
+criteria = "safe-to-deploy"
+notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
+
+[[exemptions.jni-sys]]
+version = "0.4.1"
+criteria = "safe-to-deploy"
+notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
+
+[[exemptions.jni-sys-macros]]
+version = "0.4.1"
+criteria = "safe-to-deploy"
+notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
+
 [[exemptions.jobserver]]
 version = "0.1.35"
 criteria = "safe-to-deploy"
@@ -438,6 +533,11 @@ criteria = "safe-to-deploy"
 [[exemptions.lalrpop-util]]
 version = "0.22.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.lazy_static]]
+version = "1.5.1"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
 
 [[exemptions.libc]]
 version = "0.2.190"
@@ -491,6 +591,16 @@ criteria = "safe-to-deploy"
 version = "7.6.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.minimal-lexical]]
+version = "0.2.1"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+
+[[exemptions.mio]]
+version = "1.2.4"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 async and HTTP stack (D-26), used only behind the egress door. cargo-vet 0.10 ignores the newer Bytecode Alliance audits that cover this stack; import or audit before GA (PD-06)."
+
 [[exemptions.new_debug_unreachable]]
 version = "1.0.6"
 criteria = "safe-to-deploy"
@@ -523,9 +633,19 @@ criteria = "safe-to-deploy"
 version = "0.39.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.oid-registry]]
+version = "0.8.1"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+
 [[exemptions.once_cell]]
 version = "1.21.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.openssl-probe]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06). Only probes where Linux keeps its certificate directories; it does not link OpenSSL."
 
 [[exemptions.ordered-stream]]
 version = "0.2.0"
@@ -538,6 +658,11 @@ criteria = "safe-to-deploy"
 [[exemptions.parking_lot_core]]
 version = "0.9.12"
 criteria = "safe-to-deploy"
+
+[[exemptions.pem]]
+version = "4.0.0"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
 
 [[exemptions.petgraph]]
 version = "0.7.1"
@@ -611,6 +736,11 @@ criteria = "safe-to-deploy"
 version = "0.5.0"
 criteria = "safe-to-run"
 
+[[exemptions.rcgen]]
+version = "0.14.10"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+
 [[exemptions.redox_syscall]]
 version = "0.5.18"
 criteria = "safe-to-deploy"
@@ -635,6 +765,11 @@ criteria = "safe-to-deploy"
 version = "0.8.11"
 criteria = "safe-to-deploy"
 
+[[exemptions.ring]]
+version = "0.17.14"
+criteria = "safe-to-deploy"
+notes = "Listed in Cargo.lock only as an optional dependency of rustls-webpki and compiled for no target (`cargo tree -i ring --target all` prints nothing). TLS uses aws-lc-rs (plan D18)."
+
 [[exemptions.rusqlite]]
 version = "0.40.2"
 criteria = "safe-to-deploy"
@@ -643,9 +778,44 @@ criteria = "safe-to-deploy"
 version = "0.0.8"
 criteria = "safe-to-deploy"
 
+[[exemptions.rusticata-macros]]
+version = "4.1.0"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+
 [[exemptions.rustix]]
 version = "1.1.5"
 criteria = "safe-to-deploy"
+
+[[exemptions.rustls]]
+version = "0.23.37"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
+
+[[exemptions.rustls-native-certs]]
+version = "0.8.5"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
+
+[[exemptions.rustls-pki-types]]
+version = "1.15.1"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
+
+[[exemptions.rustls-platform-verifier]]
+version = "0.7.1"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
+
+[[exemptions.rustls-platform-verifier-android]]
+version = "0.2.0"
+criteria = "safe-to-deploy"
+notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
+
+[[exemptions.rustls-webpki]]
+version = "0.103.10"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
 
 [[exemptions.rustversion]]
 version = "1.0.23"
@@ -658,6 +828,11 @@ criteria = "safe-to-run"
 [[exemptions.same-file]]
 version = "1.0.6"
 criteria = "safe-to-deploy"
+
+[[exemptions.schannel]]
+version = "0.1.29"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06). The Windows certificate store, used by the platform verifier."
 
 [[exemptions.schemars]]
 version = "0.8.12"
@@ -735,6 +910,11 @@ criteria = "safe-to-deploy"
 version = "1.4.8"
 criteria = "safe-to-deploy"
 
+[[exemptions.simd_cesu8]]
+version = "1.2.0"
+criteria = "safe-to-deploy"
+notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
+
 [[exemptions.siphasher]]
 version = "1.0.4"
 criteria = "safe-to-deploy"
@@ -750,6 +930,11 @@ criteria = "safe-to-deploy"
 [[exemptions.smol_str]]
 version = "0.3.6"
 criteria = "safe-to-deploy"
+
+[[exemptions.socket2]]
+version = "0.6.5"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 async and HTTP stack (D-26), used only behind the egress door. cargo-vet 0.10 ignores the newer Bytecode Alliance audits that cover this stack; import or audit before GA (PD-06)."
 
 [[exemptions.stacker]]
 version = "0.1.25"
@@ -795,6 +980,21 @@ criteria = "safe-to-deploy"
 version = "1.13.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.tokio]]
+version = "1.53.3"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 async and HTTP stack (D-26), used only behind the egress door. cargo-vet 0.10 ignores the newer Bytecode Alliance audits that cover this stack; import or audit before GA (PD-06)."
+
+[[exemptions.tokio-macros]]
+version = "2.7.2"
+criteria = "safe-to-deploy"
+notes = "Test attribute macros (#[tokio::test]) for the egress tests; part of the ADR-0013 stack. Import or audit before GA (PD-06)."
+
+[[exemptions.tokio-rustls]]
+version = "0.26.6"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
+
 [[exemptions.toml]]
 version = "1.1.8+spec-1.1.0"
 criteria = "safe-to-deploy"
@@ -814,6 +1014,11 @@ criteria = "safe-to-deploy"
 [[exemptions.toml_writer]]
 version = "1.1.3+spec-1.1.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.tower-service]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 async and HTTP stack (D-26), used only behind the egress door. cargo-vet 0.10 ignores the newer Bytecode Alliance audits that cover this stack; import or audit before GA (PD-06)."
 
 [[exemptions.tracing]]
 version = "0.1.44"
@@ -847,6 +1052,11 @@ criteria = "safe-to-deploy"
 version = "0.1.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.untrusted]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
+
 [[exemptions.uuid]]
 version = "1.28.0"
 criteria = "safe-to-deploy"
@@ -858,6 +1068,16 @@ criteria = "safe-to-deploy"
 [[exemptions.walkdir]]
 version = "2.5.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.want]]
+version = "0.3.2"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 async and HTTP stack (D-26), used only behind the egress door. cargo-vet 0.10 ignores the newer Bytecode Alliance audits that cover this stack; import or audit before GA (PD-06)."
+
+[[exemptions.wasi]]
+version = "0.11.0+wasi-snapshot-preview1"
+criteria = "safe-to-deploy"
+notes = "WASI target support pulled by the async stack. Never compiled for UAOS's targets."
 
 [[exemptions.wasm-bindgen]]
 version = "0.2.129"
@@ -874,6 +1094,11 @@ criteria = "safe-to-deploy"
 [[exemptions.wasm-bindgen-shared]]
 version = "0.2.129"
 criteria = "safe-to-deploy"
+
+[[exemptions.webpki-root-certs]]
+version = "1.0.9"
+criteria = "safe-to-deploy"
+notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
 
 [[exemptions.winapi-util]]
 version = "0.1.9"
@@ -904,12 +1129,72 @@ version = "0.5.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows-sys]]
+version = "0.52.0"
+criteria = "safe-to-deploy"
+notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+
+[[exemptions.windows-sys]]
 version = "0.61.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.windows-targets]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+
+[[exemptions.windows_aarch64_gnullvm]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+
+[[exemptions.windows_aarch64_msvc]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+
+[[exemptions.windows_i686_gnu]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+
+[[exemptions.windows_i686_gnullvm]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+
+[[exemptions.windows_i686_msvc]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+
+[[exemptions.windows_x86_64_gnu]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+
+[[exemptions.windows_x86_64_gnullvm]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+
+[[exemptions.windows_x86_64_msvc]]
+version = "0.52.6"
+criteria = "safe-to-deploy"
+notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
 
 [[exemptions.winnow]]
 version = "1.0.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.x509-parser]]
+version = "0.18.1"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+
+[[exemptions.yasna]]
+version = "0.6.0"
+criteria = "safe-to-run"
+notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
 
 [[exemptions.zbus]]
 version = "5.19.0"

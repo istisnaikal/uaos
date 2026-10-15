@@ -256,6 +256,21 @@ registry! {
     INGRESS_UNSUPPORTED = Ingress 3, User, Info, retryable: false, leak: false,
         "error-ingress-unsupported", "The request uses a feature the selected route cannot carry; UAOS refuses instead of silently dropping it.",
         "Choose a route that supports the feature, or remove it from the request.";
+    EGRESS_BLOCKED = Egress 1, Security, S2, retryable: false, leak: false,
+        "error-egress-blocked", "The destination resolved only to private or special-purpose addresses, so UAOS did not connect.",
+        "If this is a server on your own machine or network that you trust, declare it as a private upstream in the profile.";
+    EGRESS_UNREACHABLE = Egress 2, Provider, S3, retryable: true, leak: false,
+        "error-egress-unreachable", "The provider could not be reached: name resolution, connection or TLS failed.",
+        "Check the network, then run `uaos doctor --online` and retry.";
+    EGRESS_TIMEOUT = Egress 3, Provider, S3, retryable: true, leak: false,
+        "error-egress-timeout", "The provider did not answer within the configured time.",
+        "Retry; if it persists check the provider's status page.";
+    EGRESS_CIRCUIT_OPEN = Egress 4, Provider, S3, retryable: true, leak: false,
+        "error-egress-circuit-open", "Recent attempts to this provider failed, so UAOS paused new attempts for a short time.",
+        "Retry after the indicated delay.";
+    EGRESS_REFUSED = Egress 5, Internal, S2, retryable: false, leak: false,
+        "error-egress-refused", "UAOS refused to send a request that broke the egress door's rules; nothing was sent.",
+        "Report this with `uaos trace`; it indicates a defect, not a problem with your request.";
     CONFIG_INVALID = Config 1, Config, S3, retryable: false, leak: false,
         "error-config-invalid", "The configuration failed validation and was not applied.",
         "Run `uaos profile check` for the exact field and reason.";
