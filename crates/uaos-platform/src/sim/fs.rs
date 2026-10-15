@@ -358,6 +358,31 @@ impl Fs for SimFs {
         result
     }
 
+    fn write_unsynced(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+        let tmp = temp_sibling(path);
+        let result = (|| {
+            let mut file = self.open_append(&tmp)?;
+            file.append(bytes)?;
+            drop(file);
+            self.rename(&tmp, path)
+        })();
+        if result.is_err() && self.os_view(&tmp).is_some() {
+            // Mirrors the real implementation's cleanup; failure here changes nothing reported.
+            let _cleanup_result = self.remove_file(&tmp);
+        }
+        result
+    }
+
+    fn sync_file(&self, path: &Path) -> Result<(), FsError> {
+        let mut s = lock(&self.state);
+        let id = *s.live.get(path).ok_or(FsError::NotFound { op: "sync_file" })?;
+        s.take_sync_fault(id, "sync_file")?;
+        if let Some(node) = s.nodes.get_mut(&id) {
+            node.durable_len = node.data.len();
+        }
+        Ok(())
+    }
+
     fn try_lock_exclusive(&self, path: &Path) -> Result<Box<dyn LockGuard>, FsError> {
         let mut s = lock(&self.state);
         if !s.parent_exists(path) {
@@ -465,6 +490,45 @@ mod tests {
         assert!(matches!(fs.try_lock_exclusive(&path), Err(FsError::Locked { .. })));
         drop(second);
         assert!(fs.try_lock_exclusive(&path).is_ok());
+    }
+
+    #[test]
+    fn unsynced_write_is_kept_by_a_crash_and_may_vanish_on_power_loss() {
+        let (fs, dir) = setup();
+        fs.sync_dir(&dir).unwrap();
+        let chunk = dir.join("c.chunk");
+        fs.write_unsynced(&chunk, b"payload").unwrap();
+        fs.crash();
+        assert_eq!(
+            fs.read(&chunk).unwrap(),
+            b"payload",
+            "a process crash keeps what the OS holds"
+        );
+        fs.power_loss();
+        assert!(fs.read(&chunk).is_err(), "neither the data nor the entry was flushed");
+
+        // The entry flushed but not the data: the file comes back empty (torn), never mixed.
+        fs.write_unsynced(&chunk, b"payload").unwrap();
+        fs.sync_dir(&dir).unwrap();
+        fs.power_loss();
+        assert_eq!(fs.read(&chunk).unwrap(), b"");
+
+        // Data and entry flushed: durable.
+        fs.write_unsynced(&chunk, b"payload").unwrap();
+        fs.sync_file(&chunk).unwrap();
+        fs.sync_dir(&dir).unwrap();
+        fs.power_loss();
+        assert_eq!(fs.read(&chunk).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn failed_file_sync_discards_the_unflushed_content() {
+        let (fs, dir) = setup();
+        let chunk = dir.join("c.chunk");
+        fs.write_unsynced(&chunk, b"payload").unwrap();
+        fs.fail_next_sync();
+        assert_eq!(fs.sync_file(&chunk), Err(FsError::SyncFailed { op: "sync_file" }));
+        assert_eq!(fs.read(&chunk).unwrap(), b"", "the OS dropped the unflushed pages");
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! uaos.lock                       exclusive lock: one daemon per data directory
 //! journal/MANIFEST                segment list (replaced atomically on rotation)
 //! journal/seg-<first seq>-<gen>.jsonl   one uaos.event/1 record per line
+//! journal/FLUSHED                 durable point, with an attached chunk store (ADR-0018)
 //! ```
 
 mod error;
@@ -17,4 +18,7 @@ mod writer;
 
 pub use error::JournalError;
 pub use scan::{VerifiedRecord, VerifyReport, genesis_hash, read_verified, verify};
-pub use writer::{Appended, EventDraft, FlushPolicy, JOURNAL_DIR, Journal, JournalHealth, LOCK_FILE};
+pub use writer::{
+    Appended, CHUNK_METADATA_KEY, EventDraft, FLUSH_MARKER, FlushPolicy, JOURNAL_DIR, Journal, JournalHealth,
+    LOCK_FILE, LostPayload,
+};

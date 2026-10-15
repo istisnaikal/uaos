@@ -1135,6 +1135,91 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "transitively depends on banned crate `hyper`",
         },
         Case {
+            id: "chunk-flushed-before-sync",
+            gate: "journal-durability",
+            tool: None,
+            // ADR-0018: a journal that declares records durable before their payloads are.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "        self.sync_payloads()?;\n        match self.active.sync_data() {\n            Ok(()) => {\n                self.mark_flushed();\n",
+                "        match self.active.sync_data() {\n            Ok(()) => {\n                self.mark_flushed();\n                self.sync_payloads()?;\n",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "a_flushed_record_never_references_an_unreadable_payload",
+                ],
+            },
+            expect: "lost its payload",
+        },
+        Case {
+            id: "intent-before-chunk-write",
+            gate: "journal-durability",
+            tool: None,
+            // I-02: a journal that acknowledges a record whose payload is not stored yet.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "if !store.is_stored(pocket, chunk).map_err(JournalError::Payload)? {",
+                "if false && !store.is_stored(pocket, chunk).map_err(JournalError::Payload)? {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "a_record_cannot_reference_a_chunk_that_is_not_stored",
+                ],
+            },
+            expect: "payload before record",
+        },
+        Case {
+            id: "chunk-put-pair-race",
+            gate: "journal-durability",
+            tool: None,
+            // S-6: a chunk store that lets two writers of one chunk interleave.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "while inflight.contains(&key) {",
+                "while false && inflight.contains(&key) {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "concurrent_puts_of_one_chunk_never_pair_data_with_the_wrong_key",
+                ],
+            },
+            expect: "paired with the other's key",
+        },
+        Case {
+            id: "chunk-put-shared-temp",
+            gate: "journal-durability",
+            tool: None,
+            // S-6: atomic writes that share one temporary name per target.
+            seed: replace(
+                "crates/uaos-platform/src/fs.rs",
+                "name.push(format!(\"{TEMP_MARKER}{}-{n}\", std::process::id()));",
+                "name.push(format!(\"{TEMP_MARKER}{}-{}\", std::process::id(), n * 0));",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-platform", "--lib", "temp_names_are_unique"],
+            },
+            expect: "never share a temporary",
+        },
+        Case {
             id: "ledger-reserve-beyond-available",
             gate: "budget-concurrency",
             tool: None,

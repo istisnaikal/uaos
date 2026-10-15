@@ -166,11 +166,17 @@ negative = ["claims-forbidden-word"]
 # ── pending: subjects built in later phases ──────────────────────────────────────────────
 [[gate]]
 id = "journal-durability"
-source = "CLAUDE.md §4 CI merge blocker: journal durability (40 real kills per OS per merge; 10,000 per OS nightly)"
+source = "CLAUDE.md §4 CI merge blocker: journal durability (40 real kills per OS per merge; 10,000 per OS nightly), payloads included (ADR-0018: chunks flushed before the records that reference them, payload before record, one writer per chunk)"
 lane = "merge"
 status = "active"
 job = "test"
-negative = ["journal-ack-without-write"]
+negative = [
+  "journal-ack-without-write",
+  "chunk-flushed-before-sync",
+  "intent-before-chunk-write",
+  "chunk-put-pair-race",
+  "chunk-put-shared-temp",
+]
 
 [[gate]]
 id = "budget-concurrency"

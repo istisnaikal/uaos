@@ -4,6 +4,8 @@ use uaos_contracts::error::{ErrorCode, codes};
 use uaos_platform::PlatformError;
 use uaos_platform::fs::FsError;
 
+use crate::chunks::ChunkError;
+
 /// Journal failure. Every variant maps to a registered error code via [`JournalError::code`].
 ///
 /// **Contract for callers of [`super::Journal::append`]:** an error means the record *may*
@@ -56,6 +58,14 @@ pub enum JournalError {
     /// A record or the manifest could not be encoded or decoded.
     #[error("encoding error: {0}")]
     Encoding(String),
+    /// A record references a content chunk that is not stored (or a chunk without its pocket).
+    /// Payloads are written before the records that reference them (I-02, ADR-0018); the record
+    /// was not appended.
+    #[error("the record references a content chunk that is not stored; write the chunk first")]
+    PayloadNotStored,
+    /// The attached chunk store failed while the journal flushed or recovered its payloads.
+    #[error("payload store: {0}")]
+    Payload(ChunkError),
 }
 
 impl JournalError {
@@ -68,9 +78,13 @@ impl JournalError {
             Self::Stopped => codes::JOURNAL_FSYNC_FAILED,
             Self::Corrupt(_) | Self::ChainBroken { .. } => codes::JOURNAL_CHAIN_BROKEN,
             Self::ReaderTooOld { .. } => codes::JOURNAL_READER_TOO_OLD,
-            Self::Write(_) | Self::Storage(_) | Self::LineTooLarge | Self::Platform(_) | Self::Encoding(_) => {
-                codes::JOURNAL_WRITE_FAILED
-            }
+            Self::Write(_)
+            | Self::Storage(_)
+            | Self::LineTooLarge
+            | Self::Platform(_)
+            | Self::Encoding(_)
+            | Self::PayloadNotStored => codes::JOURNAL_WRITE_FAILED,
+            Self::Payload(e) => e.code(),
         }
     }
 }
