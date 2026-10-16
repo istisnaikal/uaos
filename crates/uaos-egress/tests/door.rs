@@ -862,7 +862,7 @@ async fn a_switching_protocols_answer_is_an_error() {
     assert!(
         matches!(
             got,
-            Err(EgressError::Unreachable("the upstream switched protocols unasked"))
+            Err(EgressError::Unusable("the upstream switched protocols unasked"))
         ),
         "a 101 reached the caller: {:?}",
         got.map(|r| r.status)
@@ -905,7 +905,7 @@ async fn a_transfer_coding_other_than_chunked_is_an_error() {
         assert!(
             matches!(
                 got,
-                Err(EgressError::Unreachable(
+                Err(EgressError::Unusable(
                     "the upstream used a transfer coding the door does not decode"
                 ))
             ),
@@ -979,6 +979,39 @@ async fn a_repeated_content_length_is_forwarded_once() {
         );
         assert_eq!(&got.body.collect().await.unwrap().to_bytes()[..], b"abcde");
     }
+}
+
+/// Round 16, M1: the error says whether the request may have reached the provider. Answered
+/// but unusable, and cut off after it was sent, are not retryable and say the provider may have
+/// received it; a connection that never opened is `Unreachable`, retryable, nothing sent.
+#[tokio::test]
+async fn errors_say_whether_the_request_may_have_reached_the_provider() {
+    let retryable = |e: &EgressError| uaos_contracts::error::spec(e.code()).map(|s| s.retryable);
+    let unusable = raw_upstream(b"HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\n\r\n").await;
+    let e = unusable.send(op(1), request(op(1), "local"), None).await.unwrap_err();
+    assert!(matches!(e, EgressError::Unusable(_)), "{e:?}");
+    assert_eq!(retryable(&e), Some(false));
+    // Reads the request, then closes without answering.
+    let cut = raw_upstream(b"").await;
+    let e = cut.send(op(1), request(op(1), "local"), None).await.unwrap_err();
+    assert!(
+        matches!(e, EgressError::Interrupted(_)),
+        "a request the provider received was reported as never sent: {e:?}"
+    );
+    assert_eq!(retryable(&e), Some(false));
+    let up = Upstream {
+        id: UpstreamId::new("local"),
+        host: HostName::parse("ollama.lan").unwrap(),
+        port: closed_port(),
+        scheme: Scheme::Http,
+        pinned: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        allow_private: true,
+        trust: Trust::System,
+    };
+    let refused = door(vec![up], Table::default(), DoorLimits::default());
+    let e = refused.send(op(1), request(op(1), "local"), None).await.unwrap_err();
+    assert!(matches!(e, EgressError::Unreachable(_)), "{e:?}");
+    assert_eq!(retryable(&e), Some(true));
 }
 
 /// L2: a caller's `content-length` cannot truncate the body; the door frames it.

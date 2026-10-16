@@ -65,12 +65,21 @@ pub enum EgressError {
     /// Every address the name resolved to was refused.
     #[error("destination refused: it resolved only to {0:?} addresses")]
     Blocked(addr::Blocked),
-    /// Resolution, connection or TLS failed.
+    /// Resolution, connection or TLS failed, or the connection closed before the request was
+    /// sent: nothing reached the provider.
     #[error("provider unreachable: {0}")]
     Unreachable(&'static str),
-    /// No response headers within the limit, or a connect or handshake timed out.
-    #[error("provider did not answer in time")]
+    /// Resolution, a connect or the TLS handshake timed out: nothing was sent.
+    #[error("provider could not be reached in time")]
     Timeout,
+    /// The connection failed, or no answer came within the response timeout, after the request
+    /// was sent: the provider may have received it (review WP3.A5, round 16, M1).
+    #[error("no answer after the request was sent: {0}")]
+    Interrupted(&'static str),
+    /// The provider answered in a form the door does not pass on; it may have processed the
+    /// request (round 16, M1).
+    #[error("unusable answer from the provider: {0}")]
+    Unusable(&'static str),
     /// The upstream's circuit is open.
     #[error("recent attempts failed; retry after {retry_after:?}")]
     CircuitOpen {
@@ -99,23 +108,33 @@ impl EgressError {
             Self::Timeout => codes::EGRESS_TIMEOUT,
             Self::CircuitOpen { .. } => codes::EGRESS_CIRCUIT_OPEN,
             Self::Refused(_) => codes::EGRESS_REFUSED,
+            Self::Interrupted(_) => codes::EGRESS_INTERRUPTED,
+            Self::Unusable(_) => codes::EGRESS_UNUSABLE_RESPONSE,
             Self::Upstream(_) | Self::Tls(_) => codes::CONFIG_INVALID,
         }
     }
 
-    /// Maps a client failure, keeping a connector's own verdict (for example `Blocked`).
+    /// Maps a client failure, keeping a connector's own verdict (for example `Blocked`), and
+    /// telling a request that never left from one the provider may have received: hyper
+    /// reports a request it handed back unsent as canceled (round 16, M1).
     fn from_client(e: &hyper_util::client::legacy::Error) -> Self {
+        let mut unsent = e.is_connect();
         let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
         while let Some(s) = source {
             if let Some(own) = s.downcast_ref::<Self>() {
                 return own.clone();
             }
+            if s.downcast_ref::<hyper::Error>().is_some_and(hyper::Error::is_canceled) {
+                unsent = true;
+            }
             source = s.source();
         }
         if e.is_connect() {
             Self::Unreachable("connection failed")
+        } else if unsent {
+            Self::Unreachable("the connection closed before the request was sent")
         } else {
-            Self::Unreachable("the connection failed before a response arrived")
+            Self::Interrupted("the connection failed after the request was sent")
         }
     }
 }
