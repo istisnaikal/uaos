@@ -24,8 +24,12 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     let mut checked = 0usize;
     for path in walk_files(root)? {
         let relative = rel(root, &path);
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-        if !CHECKED_EXTENSIONS.contains(&ext) || EXEMPT_PREFIXES.iter().any(|(p, _)| relative.starts_with(p)) {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !CHECKED_EXTENSIONS.contains(&ext.as_str()) || EXEMPT_PREFIXES.iter().any(|(p, _)| relative.starts_with(p)) {
             continue;
         }
         checked += 1;

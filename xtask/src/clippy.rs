@@ -27,17 +27,8 @@ const ARGS: &[&str] = &[
 ];
 
 pub(crate) fn check(root: &Path) -> Result<(), String> {
-    let set = overriding_env(std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()));
-    if !set.is_empty() {
-        return Err(format!(
-            "[clippy] refusing to run: {} can change lint levels, compiler flags or clippy's configuration outside the workspace lint table; unset them (review WP3.A5, round 7, M1)",
-            set.join(", ")
-        ));
-    }
     println!("xtask: [clippy] cargo {}", ARGS.join(" "));
-    let out = Command::new("cargo")
-        .args(ARGS)
-        .current_dir(root)
+    let out = clippy_command(root)
         .output()
         .map_err(|e| format!("[clippy] could not start `cargo`: {e}"))?;
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -59,16 +50,22 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     }
 }
 
-/// The variables among `names` that change lint levels, compiler flags or clippy's
-/// configuration: compiler flags in any form, compiler wrappers, clippy's arguments and
-/// configuration directory.
-fn overriding_env(names: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut set: Vec<String> = names
-        .into_iter()
-        .filter(|k| crate::allow_audit::OVERRIDING_ENV_WORDS.iter().any(|w| k.contains(w)))
-        .collect();
-    set.sort();
-    set
+/// `cargo clippy` with the gate's arguments, its environment cleared of what could change lint
+/// levels, compiler flags or clippy's configuration outside the workspace lint table (review
+/// WP3.A5, rounds 7 and 8): an empty `CARGO_ENCODED_RUSTFLAGS` takes priority over every other
+/// source of compiler flags (`RUSTFLAGS` in any case on Windows, `CARGO_TARGET_*_RUSTFLAGS`, any
+/// Cargo configuration's `rustflags`), an empty `RUSTC_WRAPPER` overrides any configured
+/// wrapper, and clippy's own variables are removed (Windows matches these names in any case).
+fn clippy_command(root: &Path) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .args(ARGS)
+        .current_dir(root)
+        .env("CARGO_ENCODED_RUSTFLAGS", "")
+        .env("RUSTC_WRAPPER", "")
+        .env_remove("CLIPPY_ARGS")
+        .env_remove("CLIPPY_CONF_DIR");
+    command
 }
 
 /// The warnings clippy printed for `clippy.toml` paths it could not resolve: for each note, the
@@ -139,21 +136,28 @@ mod tests {
         );
     }
 
-    /// Round 7, M1: flags, wrappers and clippy's own arguments in the environment are refused.
+    /// Rounds 7 and 8: the child runs without outside compiler flags, wrapper or clippy
+    /// configuration, whatever the caller's environment holds.
     #[test]
-    fn an_overriding_environment_is_refused() {
-        let names = [
-            "PATH",
-            "RUSTFLAGS",
-            "CARGO_ENCODED_RUSTFLAGS",
-            "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS",
-            "RUSTC_WRAPPER",
-            "CLIPPY_ARGS",
-            "CLIPPY_CONF_DIR",
-            "CARGO_TERM_COLOR",
-        ]
-        .map(str::to_owned);
-        assert_eq!(overriding_env(names).len(), 6);
+    fn the_child_environment_is_neutralised() {
+        let command = clippy_command(Path::new("."));
+        let envs: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().to_ascii_uppercase(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for (name, value) in [
+            ("CARGO_ENCODED_RUSTFLAGS", Some(String::new())),
+            ("RUSTC_WRAPPER", Some(String::new())),
+            ("CLIPPY_ARGS", None),
+            ("CLIPPY_CONF_DIR", None),
+        ] {
+            assert!(envs.contains(&(name.to_owned(), value.clone())), "{name}: {envs:?}");
+        }
     }
 
     /// A note with no warning above it still fails the gate.
