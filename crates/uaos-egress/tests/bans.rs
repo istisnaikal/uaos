@@ -9,7 +9,8 @@
 //! keeps this file complete: it fails on a ban in `clippy.toml` with no `// canary:` marker here
 //! (round 6, L2), on a canary that does not spell its item's own path in code (a method's full
 //! type path, an item in a module its whole path; a module-level import does not count), and on
-//! one that also uses another ban of the same lint anywhere in its function (rounds 9 to 11).
+//! one whose function also spells another ban of the same lint by its full path (rounds 9 to
+//! 11; a ban reached through a module-level import or a shortened path is not seen).
 //! `getrandom::fill` is not a dependency here; its canary lives in `uaos-platform`'s tests.
 
 #![allow(clippy::unwrap_used, reason = "test harness")]
