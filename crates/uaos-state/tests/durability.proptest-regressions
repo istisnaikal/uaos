@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc d9b4eefa53d6289c2641d08781a4b054a2c5f861f4c20a6053ff00345e657e81 # shrinks to seed = 0, ops = [Write, FailNextSync, Sync, Crash, PowerLoss]
 cc 06c23f07f7880439fbdd4eaeb23b26eb62fd0a82f12a008ed7a925ad911345cc # shrinks to seed = 490259766890027738, ops = [Write, FailNextSync, Sync, Write, FailNextSync, Recover, Recover, Crash]
+cc d21c0b1da8757ea0cfa57dba9bd53da37481122ff2eb71b355fb61b8a04661b6 # shrinks to seed = 0, keep_cache = false, ops = [Write, Write, Write, Shred(28), Shred(34), FailSyncAfter(3), FinishRewraps, PowerLoss]

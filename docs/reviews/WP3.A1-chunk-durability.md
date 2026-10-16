@@ -10,7 +10,8 @@ process. The High findings blocked merge.
 accepted with a reason. The property test, extended as M6 asked, then found four more defects
 (N1–N4), all fixed and pinned. One item needs a maintainer decision (L7). A second V1 review of
 the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up,
-a third found 1 High, 3 Medium and 5 Low, and a fourth 2 Medium and 4 Low; all are fixed below.
+a third found 1 High, 3 Medium and 5 Low, a fourth 2 Medium and 4 Low, and a fifth 2 Medium
+and 3 Low; all are fixed below.
 The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
@@ -179,3 +180,29 @@ readable or an old KEK alive; 6,000 crash schedules and the 42 tests passed in t
 | L4 | ADR-0018 claimed every review fix was pinned by a test that fails with it reverted; `claims.md` said "two review rounds" | The ADR lists the fixes held by construction (second round L3, L4; third round M3, the marker half of M1, the data-file half of L3, two parts of L4); `claims.md` says four rounds | review of the text |
 
 Each round-four test was checked to fail with its fix reverted (eleven mutations, all bite).
+
+## Fifth review (2026-10-16)
+
+**Reviewed:** `f4f90f1` (on `555494b`) by a fresh-context agent, in a scratch export.
+**Result:** 0 High · 2 Medium · 3 Low. Every round-four change it reverted failed its test; 6,000
+crash schedules passed; no deadlock was found (a slot is never taken while a stripe is held).
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| M1 | Round four's M1 fix held only while the first open with a store succeeded: if it failed after writing `PAYLOADS` (a crash during the whole-journal check, a refused keychain, a full disk), the next open trusted the plain journal's marker and never checked the earlier records | The first open with a store invalidates the plain marker (writes `none`) before it writes `PAYLOADS`, so no open, in the same process or after a crash, reads it as vouching for payloads. This replaces round four's check of the flag, which it makes redundant | `r5_m1_a_failed_first_open_with_a_store_does_not_trust_the_plain_marker` (with and without a crash between the opens), `r4_m1_*`; negative `plain-marker-trusted` re-anchored, **PROVEN** |
+| M2 | A journal flush was acknowledged even when a flushed write elsewhere in the store failed and poisoned it while the flush ran; round four's `PendingRewrap` made that overlap designed (a re-wrap's `keys/` flush on another thread), so recovery would never rewrite the pending chunk whose entry the failed flush may have dropped | The flush reads the poisoning generation before its batch and refuses to acknowledge it if the generation changed, keeping the batch pending. Every flushed write or directory flush that poisons now holds a store-wide flush window until it has poisoned, and the flush takes the window before its check, so a failure that overlaps it is always seen (by construction: the microseconds between a failure and its poisoning cannot be reached by a deterministic test) | `r5_m2_a_flush_is_not_acknowledged_across_a_failed_rewrap` (the reviewer's repro: the flush now fails, the chunk stays pending, recovery rewrites it); negative `flush-acked-across-poisoning` **PROVEN** |
+| L1 | The shred mark came too late and went too early: a put that failed had already lifted it, and a shred whose own flush failed never set it; either way, once the record was durable, a later record cancelled the shred | The journal marks the chunk before it appends the record (mark only: forgetting it there would drop a pending chunk before the flush, which the reviewer found loses payloads); a put lifts the mark only once it has succeeded | `r5_l1_a_failed_put_keeps_a_failed_shred_refused`, `r5_l1_a_shred_whose_flush_failed_stays_refused`; negatives `failed-put-lifts-shred-mark`, `shred-marked-after-record` **PROVEN** |
+| L2 | "The journal writer does not wait for the re-wrap" was false: the journal's flush waits for a re-wrap holding the stripe of a pocket with a pending chunk | The ADR, the `PendingRewrap` docs and the CHANGELOG say what holds: the writer is released before the re-wrap; its flush can still wait | review of the text |
+| L3 | The crash schedules dropped each `PendingRewrap` at once, and the set of marked chunks had no bound | The schedules keep re-wraps pending across later operations, finish them later, or lose them to a crash (no `Drop` runs). At most 4,096 failed shreds stay marked; past that a shred is refused (`ShredBacklog`) before its record | `r5_l3_unfinished_shreds_are_bounded`; the property test |
+
+**Found by the extended schedules after these fixes.** With re-wraps left pending, the crash
+schedules found a defect that predates this PR: a re-wrap whose `keys/` flush failed left its new
+key file visible but not durable; a later re-wrap skipped that file as already current and
+destroyed the old KEK, so after a power loss the only durable key file needed the destroyed KEK
+(open then failed closed with `Retired`; in a longer schedule the payload was silently
+unreadable). A rotation now writes every readable key file of the pocket again, as a fresh
+flushed file, before it destroys old versions. Proof: `r5_a_failed_rewrap_never_leaves_a_key_only_a_retired_kek_opens`,
+the shrunk schedule kept in `durability.proptest-regressions`, and negative
+`rotation-skips-current-key` **PROVEN**.
+
+Each round-five test was checked to fail with its fix reverted (seven mutations, all bite).

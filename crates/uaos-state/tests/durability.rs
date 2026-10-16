@@ -43,7 +43,9 @@ use uaos_platform::sim::fs::SimFs;
 use uaos_platform::sim::{SimClock, SimRng};
 use uaos_platform::{Clock, Rng};
 use uaos_state::chunks::keyring::{KekVersion, KeyringError, MemoryKeyring, PocketKeyring};
-use uaos_state::chunks::{CHUNKS_DIR, ChunkDurability, ChunkError, ChunkStore, MAX_PENDING, QUARANTINE_DIR};
+use uaos_state::chunks::{
+    CHUNKS_DIR, ChunkDurability, ChunkError, ChunkStore, MAX_PENDING, MAX_UNFINISHED_SHREDS, QUARANTINE_DIR,
+};
 use uaos_state::journal::{
     CHUNK_METADATA_KEY, EventDraft, FlushPolicy, JOURNAL_DIR, Journal, JournalError, JournalHealth,
     RECORD_SEQ_METADATA_KEY, read_verified,
@@ -1716,7 +1718,10 @@ fn r4_m2_the_rewrap_runs_after_the_writer_is_free() {
     );
     let report = rewrap.finish().unwrap();
     assert!(report.removed);
-    assert_eq!(report.rewrapped, 19);
+    assert_eq!(
+        report.rewrapped, 20,
+        "the 19 older keys and the one written since the rotation"
+    );
     assert_eq!(w.keys.kek_versions(pocket()).unwrap().len(), 1);
     drop(j.shred(shredded_record(chunks[1], 102)).unwrap());
     assert_eq!(
@@ -1933,6 +1938,232 @@ fn r4_l3_open_asks_the_keychain_once_per_pocket() {
     );
 }
 
+/// Fifth-round M1: the first open with a store fails after writing `PAYLOADS` (here, a full disk
+/// while it journals the loss it found). The plain journal's marker must still not be trusted by
+/// the next open, in the same process or after a crash.
+#[test]
+fn r5_m1_a_failed_first_open_with_a_store_does_not_trust_the_plain_marker() {
+    for crash_between in [false, true] {
+        let w = World::new(970);
+        let plain = || {
+            let clock: Arc<dyn Clock> = w.clock.clone();
+            let rng: Arc<dyn Rng> = w.rng.clone();
+            Journal::open(Arc::new(w.fs.clone()), clock, rng, &w.data, NEVER)
+        };
+        let strict = w.try_store(ChunkDurability::Strict).unwrap();
+        let mut j = plain().unwrap();
+        let x = strict.put(pocket(), &content(1)).unwrap();
+        j.append(draft(Some(pocket()), Some(x), 1)).unwrap();
+        let never_stored = strict.reference(pocket(), &content(2)).unwrap();
+        let unchecked = j.append(draft(Some(pocket()), Some(never_stored), 2)).unwrap().seq.0;
+        j.sync().unwrap();
+        drop(j);
+        drop(plain().unwrap()); // the plain marker now names `unchecked`
+        drop(strict);
+        w.sim.crash();
+        let mut store = w.store();
+        w.fs.fail_segment_append_after(0); // the chunk.lost append of the first open with a store
+        assert!(w.open(&store).is_err(), "the first open with a store should fail here");
+        w.fs.clear_append_fault();
+        if crash_between {
+            drop(store);
+            w.sim.crash();
+            store = w.store();
+        }
+        let j = w.open(&store).unwrap();
+        assert!(
+            w.survey().1.contains(&unchecked),
+            "crash between {crash_between}: after a failed first open, the plain marker was trusted"
+        );
+        drop(j);
+        drop(store);
+        let (store, _j) = w.restart(true);
+        w.assert_never_silent(&store, "r5 m1");
+    }
+}
+
+/// Fifth-round M2: a journal flush is not acknowledged across a failed flushed write elsewhere
+/// in the store (here a re-wrap's `keys/` flush on another thread, which may have dropped the
+/// pending chunk's entry); the next recovery rewrites the pending chunk.
+#[test]
+fn r5_m2_a_flush_is_not_acknowledged_across_a_failed_rewrap() {
+    let w = World::new(973);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let chunks: Vec<ChunkRef> = (0..4).map(|n| write(&store, &mut j, n).1).collect();
+    j.sync().unwrap();
+    let rewrap = j.shred(shredded_record(chunks[0], 100)).unwrap();
+    let pending = write(&store, &mut j, 101).1; // pending in the same pocket, its record unflushed
+    assert_eq!(store.pending_len(), 1);
+    w.fs.key_write.arm();
+    let rewrapping = std::thread::spawn(move || rewrap.finish());
+    w.fs.key_write.wait_held(); // the re-wrap holds the stripe and the flush window
+    w.sim.fail_sync_after(1); // the re-wrap's file flush passes, its keys/ flush fails
+    let synced = std::thread::scope(|s| {
+        let t = s.spawn(|| j.sync());
+        std::thread::sleep(Duration::from_millis(100));
+        w.fs.key_write.release();
+        t.join().unwrap()
+    });
+    let finished = rewrapping.join().unwrap();
+    w.sim.fail_sync_after(u32::MAX);
+    assert!(finished.is_err(), "the re-wrap's flush was meant to fail");
+    assert_eq!(
+        synced,
+        Err(JournalError::PayloadFlushFailed),
+        "a journal flush was acknowledged across a failed flush of the same directory"
+    );
+    assert_eq!(store.pending_len(), 1, "the batch was dropped from the pending set");
+    j.recover().unwrap();
+    j.sync().unwrap();
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    w.assert_never_silent(&store, "r5 m2");
+    assert_eq!(store.get(pocket(), pending).ok(), Some(content(101)));
+}
+
+/// Fifth-round L1: a put whose own write fails does not lift a failed shred's refusal.
+#[test]
+fn r5_l1_a_failed_put_keeps_a_failed_shred_refused() {
+    let w = World::new(971);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    j.sync().unwrap();
+    w.fs.fail_key_remove.store(true, Ordering::SeqCst);
+    assert!(j.shred(shredded_record(x, 2)).is_err());
+    w.sim.fail_sync_after(0); // the put's flushed rewrite fails
+    assert!(store.put(pocket(), &content(1)).is_err());
+    w.sim.fail_sync_after(u32::MAX);
+    j.recover().unwrap();
+    assert_eq!(
+        store.get(pocket(), x).err(),
+        Some(ChunkError::Unavailable),
+        "a failed put lifted the refusal of a failed shred"
+    );
+    assert_eq!(
+        j.append(draft(Some(pocket()), Some(x), 3)).err(),
+        Some(JournalError::PayloadNotStored),
+        "a failed put lifted the refusal of a failed shred"
+    );
+    j.sync().unwrap();
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    w.assert_never_silent(&store, "r5 l1 put");
+    assert_eq!(store.get(pocket(), x).err(), Some(ChunkError::Unavailable));
+}
+
+/// Fifth-round L1: a shred whose own flush fails marks the chunk anyway; once `recover` makes the
+/// shred record durable, no record can reference the content and the next open completes it.
+#[test]
+fn r5_l1_a_shred_whose_flush_failed_stays_refused() {
+    let w = World::new(972);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    j.sync().unwrap();
+    w.fs.fail_segment_append_after(1); // the shred record passes, the rewrite's copy fails
+    w.sim.fail_sync_after(0); // the segment flush fails
+    assert!(j.shred(shredded_record(x, 2)).is_err());
+    w.fs.clear_append_fault();
+    w.sim.fail_sync_after(u32::MAX);
+    j.recover().unwrap(); // the shred record is now durable
+    assert!(w.survey().2.iter().any(|(_, c, _)| *c == x.to_string()));
+    assert_eq!(
+        j.append(draft(Some(pocket()), Some(x), 3)).err(),
+        Some(JournalError::PayloadNotStored),
+        "a record referenced content whose shred record is durable"
+    );
+    j.sync().unwrap();
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    w.assert_never_silent(&store, "r5 l1 flush");
+    assert_eq!(store.get(pocket(), x).err(), Some(ChunkError::Unavailable));
+}
+
+/// Found by the fifth round's crash schedules: a re-wrap whose `keys/` flush fails leaves its new
+/// key file visible but not durable; a later re-wrap must not skip it as already current and
+/// retire the old KEK, or a power loss leaves a key file only the retired KEK opens.
+#[test]
+fn r5_a_failed_rewrap_never_leaves_a_key_only_a_retired_kek_opens() {
+    let mut hits = Vec::new();
+    for k in 0..8u32 {
+        let w = World::new(975);
+        let store = w.store();
+        let mut j = w.open(&store).unwrap();
+        let chunks: Vec<ChunkRef> = (1..=3).map(|n| write(&store, &mut j, n).1).collect();
+        let first = j.shred(shredded_record(chunks[1], 10)).unwrap();
+        let second = j.shred(shredded_record(chunks[1], 11)).unwrap();
+        w.sim.fail_sync_after(k);
+        let failed = first.finish().is_err();
+        w.sim.fail_sync_after(u32::MAX);
+        let _outcome = second.finish();
+        drop(j);
+        drop(store);
+        w.sim.power_loss();
+        let store = w.store();
+        match w.open(&store) {
+            Ok(_j) => {
+                for (n, c) in [(1, chunks[0]), (3, chunks[2])] {
+                    if store.get(pocket(), c).ok() != Some(content(n)) {
+                        hits.push(format!(
+                            "fault after {k} (re-wrap failed: {failed}): payload {n} unreadable"
+                        ));
+                    }
+                }
+            }
+            Err(e) => hits.push(format!(
+                "fault after {k} (re-wrap failed: {failed}): open failed: {e:?}"
+            )),
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "a re-wrap retired a KEK a durable key file still needed:
+{}",
+        hits.join(
+            "
+"
+        )
+    );
+}
+
+/// Fifth-round L3: shreds left unfinished by failures are bounded; past the bound a shred is
+/// refused before its record, and retrying them clears the backlog.
+#[test]
+fn r5_l3_unfinished_shreds_are_bounded() {
+    let w = World::new(974);
+    let keys = Arc::new(FailRotate {
+        inner: Arc::clone(&w.keys),
+        fail: AtomicBool::new(false),
+    });
+    let rng: Arc<dyn Rng> = w.rng.clone();
+    let k: Arc<dyn PocketKeyring> = keys.clone();
+    let store =
+        Arc::new(ChunkStore::open_with(Arc::new(w.fs.clone()), rng, k, &w.data, ChunkDurability::Balanced).unwrap());
+    let mut j = w.open(&store).unwrap();
+    write(&store, &mut j, 0);
+    j.sync().unwrap();
+    let refs: Vec<ChunkRef> = (1..=u64::try_from(MAX_UNFINISHED_SHREDS).unwrap() + 1)
+        .map(|n| store.reference(pocket(), &content(n)).unwrap())
+        .collect();
+    for (n, r) in (1..).zip(&refs[..MAX_UNFINISHED_SHREDS]) {
+        keys.fail.store(true, Ordering::SeqCst);
+        assert!(j.shred(shredded_record(*r, n)).is_err());
+    }
+    let over = refs[MAX_UNFINISHED_SHREDS];
+    assert_eq!(
+        j.shred(shredded_record(over, 0)).err(),
+        Some(JournalError::Payload(ChunkError::ShredBacklog)),
+        "unfinished shreds grew past their bound"
+    );
+    j.shred(shredded_record(refs[0], 1)).unwrap().finish().unwrap(); // a retry clears its entry
+    j.shred(shredded_record(over, 0)).unwrap().finish().unwrap();
+}
+
 // ── Random crash schedules ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -1950,6 +2181,8 @@ enum Op {
     FailAppend,
     /// Advance the clock past the marker interval.
     Tick,
+    /// Finish the re-wraps shreds left pending.
+    FinishRewraps,
     Crash,
     PowerLoss,
     Recover,
@@ -1964,6 +2197,7 @@ fn op() -> impl Strategy<Value = Op> {
         2 => (0u32..4).prop_map(Op::FailSyncAfter),
         1 => Just(Op::FailAppend),
         1 => Just(Op::Tick),
+        1 => Just(Op::FinishRewraps),
         1 => Just(Op::Crash),
         1 => Just(Op::PowerLoss),
         2 => Just(Op::Recover),
@@ -2019,6 +2253,7 @@ proptest! {
         let mut contents: Vec<u64> = Vec::new();
         let mut acked: BTreeMap<u64, u64> = BTreeMap::new();
         let mut next = 0u64;
+        let mut rewraps = Vec::new();
         for op in ops {
             match op {
                 Op::Write | Op::Repeat(_) => {
@@ -2035,8 +2270,11 @@ proptest! {
                     let n = contents[i % contents.len()];
                     let Ok(chunk) = store.reference(pocket(), &content(n)) else { continue };
                     // Through the journal: the shred runs only once its record is durable. A shred
-                    // that fails after its record is completed when the journal next opens.
-                    let _outcome = journal.shred(shredded_record(chunk, n));
+                    // that fails after its record is completed when the journal next opens. Its
+                    // re-wrap stays pending until a later operation.
+                    if let Ok(rewrap) = journal.shred(shredded_record(chunk, n)) {
+                        rewraps.push(rewrap);
+                    }
                 }
                 Op::Shred(_) => {}
                 // Failures are part of the schedule; the checks after each crash judge the outcome.
@@ -2044,12 +2282,19 @@ proptest! {
                 Op::FailSyncAfter(n) => w.sim.fail_sync_after(n),
                 Op::FailAppend => w.fs.fail_segment_append_after(0),
                 Op::Tick => w.clock.advance(1_100_000_000),
+                Op::FinishRewraps => {
+                    for rewrap in rewraps.drain(..) {
+                        let _outcome = rewrap.finish();
+                    }
+                }
                 Op::Recover => { let _outcome = journal.recover(); }
                 Op::Crash | Op::PowerLoss => {
                     let power = matches!(op, Op::PowerLoss);
                     let flushed = journal.flushed_through().map(|s| s.0);
                     let os_holds_unflushed = journal.health() != JournalHealth::FlushFailed;
                     let (_, reported_before, _) = w.survey();
+                    // The process dies with its re-wraps unfinished: nothing runs their `Drop`.
+                    rewraps.drain(..).for_each(std::mem::forget);
                     drop(journal);
                     drop(store);
                     if power { w.sim.power_loss() } else { w.sim.crash() }

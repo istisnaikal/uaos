@@ -308,6 +308,13 @@ impl Journal {
             Some(store) => {
                 // Recorded before anything else: from now on this journal never opens without it.
                 if !flagged {
+                    // A plain journal's marker says nothing about payloads. It is invalidated
+                    // before the flag exists, so no open, including one after this one fails or
+                    // is interrupted, reads it as a store's marker (review WP3.A1, fourth round,
+                    // M1; fifth round, M1).
+                    let none = format!("{MARKER_PREFIX} {MARKER_NONE}\n");
+                    fs.write_atomic(&dir.join(FLUSH_MARKER), none.as_bytes())
+                        .map_err(storage)?;
                     fs.write_atomic(&dir.join(PAYLOADS_FLAG), b"uaos.payloads/1\n")
                         .map_err(storage)?;
                 }
@@ -342,11 +349,7 @@ impl Journal {
             // (or reported lost) before those records are made durable below.
             if let Some(store) = &payloads {
                 shreds_to_complete = journaled_shreds(&records);
-                // A marker vouches for payloads only if the journal coordinated a store when it
-                // was written; a plain journal's marker bounds the copy below and nothing else
-                // (review WP3.A1, fourth round, M1).
-                let payloads_checked = if flagged { durable } else { None };
-                lost_in_tail = recover_tail_payloads(&records, payloads_checked, store)?;
+                lost_in_tail = recover_tail_payloads(&records, durable, store)?;
             }
             // The previous process may have acknowledged records the OS holds but never
             // flushed. They move to the new active segment unflushed, so a durable manifest
@@ -483,6 +486,9 @@ impl Journal {
             .ok_or(JournalError::InvalidRecord(
                 "a chunk.shredded record names its chunk in metadata key `chunk`",
             ))?;
+        // Marked before the record exists: whichever later step fails, even the flush that
+        // `recover` later completes, nothing vouches for the content (fifth round, L1).
+        store.begin_shred(pocket, chunk).map_err(JournalError::Payload)?;
         self.append(record)?;
         self.sync()?;
         let removed = store.shred_remove(pocket, chunk).map_err(JournalError::Payload)?;
