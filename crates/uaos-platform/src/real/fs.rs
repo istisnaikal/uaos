@@ -156,6 +156,7 @@ mod tests {
     }
 
     impl Drop for Scratch {
+        #[allow(clippy::disallowed_methods, reason = "test scaffolding")]
         fn drop(&mut self) {
             let _cleanup = std::fs::remove_dir_all(&self.0);
         }
