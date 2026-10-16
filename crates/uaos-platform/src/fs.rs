@@ -217,10 +217,12 @@ pub(crate) fn temp_sibling(path: &Path) -> PathBuf {
 }
 
 /// Whether `name` is a temporary left by an interrupted [`Fs::write_atomic`] or
-/// [`Fs::write_unsynced`]. Such files are never referenced and may be removed at startup.
+/// [`Fs::write_unsynced`], in the current form (`<name>.uaos-tmp-<pid>-<n>`) or the form used
+/// before temporaries were unique (`<name>.uaos-tmp`). Such files are never referenced and may
+/// be removed at startup.
 #[must_use]
 pub fn is_temp_file_name(name: &str) -> bool {
-    name.contains(TEMP_MARKER)
+    name.contains(TEMP_MARKER) || name.ends_with(".uaos-tmp")
 }
 
 #[cfg(test)]
@@ -238,6 +240,10 @@ mod tests {
             assert!(is_temp_file_name(t.file_name().and_then(|n| n.to_str()).unwrap()));
         }
         assert!(!is_temp_file_name("abc.chunk"));
+        assert!(
+            is_temp_file_name("abc.key.uaos-tmp"),
+            "the pre-S-6 temporary name is still swept"
+        );
     }
 }
 

@@ -1,21 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! ADR-0018: chunk payloads join the journal's durability classes, under deterministic crash
-//! simulation, plus the S-6 chunk race (two writers of one chunk).
+//! simulation, plus the S-6 chunk race and every finding of the WP3.A1 review
+//! (`docs/reviews/WP3.A1-chunk-durability.md`) as a regression test.
 //!
 //! Guarantees checked:
 //! * **payload before record:** a record that references a chunk not yet stored is refused;
 //! * after a **process crash**, every acknowledged record is present and its payload readable,
-//!   unless an earlier failed flush dropped it and the loss was reported;
+//!   unless a failed flush dropped it and the loss was journaled;
 //! * after a **power loss**, every record up to the flushed boundary is present and its payload
-//!   readable;
-//! * **never silent:** a surviving record whose payload is unreadable has a `chunk.lost` record.
+//!   readable, unless that loss was already journaled;
+//! * **never silent:** a surviving record whose payload is unreadable has a `chunk.lost` record,
+//!   or a later `chunk.shredded` record names its chunk.
+//!
+//! The simulated disk runs in two modes: a failed flush either drops the unflushed bytes, or
+//! (`set_failed_sync_keeps_cache`) keeps serving them while never making them durable, as Linux
+//! does after a writeback error.
 
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
     clippy::disallowed_methods,
-    reason = "test harness: fixtures and checks abort on failure; the race test needs real threads and time"
+    reason = "test harness: fixtures and checks abort on failure; race tests need real threads and time"
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,9 +42,12 @@ use uaos_platform::fs::{AppendFile, Fs, FsError, LockGuard};
 use uaos_platform::sim::fs::SimFs;
 use uaos_platform::sim::{SimClock, SimRng};
 use uaos_platform::{Clock, Rng};
-use uaos_state::chunks::keyring::{MemoryKeyring, PocketKeyring};
-use uaos_state::chunks::{ChunkDurability, ChunkStore};
-use uaos_state::journal::{EventDraft, FlushPolicy, JOURNAL_DIR, Journal, JournalError, JournalHealth, read_verified};
+use uaos_state::chunks::keyring::{KekVersion, MemoryKeyring, PocketKeyring};
+use uaos_state::chunks::{CHUNKS_DIR, ChunkDurability, ChunkError, ChunkStore, QUARANTINE_DIR};
+use uaos_state::journal::{
+    CHUNK_METADATA_KEY, EventDraft, FlushPolicy, JOURNAL_DIR, Journal, JournalError, JournalHealth,
+    RECORD_SEQ_METADATA_KEY, read_verified,
+};
 
 const DATA: &str = "/data";
 /// A window longer than any test, so only explicit `sync` calls flush.
@@ -46,8 +55,169 @@ const NEVER: FlushPolicy = FlushPolicy::Balanced {
     window: Millis(u64::MAX / 2),
 };
 
+// ── A simulated disk with switches ─────────────────────────────────────────────────────────
+
+/// Holds the first matching operation until released.
+#[derive(Debug, Default)]
+struct Gate {
+    armed: AtomicBool,
+    held: AtomicBool,
+    open: Mutex<bool>,
+    opened: Condvar,
+}
+
+impl Gate {
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+    fn hold_if_armed(&self) {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.held.store(true, Ordering::SeqCst);
+            let mut open = self.open.lock().unwrap();
+            while !*open {
+                open = self.opened.wait(open).unwrap();
+            }
+        }
+    }
+    /// Waits until the gated operation is held; panics if it never runs, so a test cannot hang.
+    fn wait_held(&self) {
+        for _ in 0..10_000 {
+            if self.held.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the gated operation never ran");
+    }
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
+    /// Releases after `ms` from another thread, so a test cannot deadlock on its own gate.
+    fn release_after(self: &Arc<Self>, ms: u64) -> std::thread::JoinHandle<()> {
+        let gate = Arc::clone(self);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(ms));
+            gate.release();
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FaultFs {
+    sim: SimFs,
+    /// Segment appends let through before the next one fails with `NoSpace`, once.
+    segment_append_fault: Arc<Mutex<Option<u32>>>,
+    /// The first key-file write.
+    key_write: Arc<Gate>,
+    /// The first key-file rename (quarantine).
+    key_rename: Arc<Gate>,
+}
+
+#[derive(Debug)]
+struct FaultAppend {
+    inner: Box<dyn AppendFile>,
+    segment: bool,
+    fault: Arc<Mutex<Option<u32>>>,
+}
+
+impl AppendFile for FaultAppend {
+    fn append(&mut self, bytes: &[u8]) -> Result<(), FsError> {
+        if self.segment {
+            let mut fault = self.fault.lock().unwrap();
+            match *fault {
+                Some(0) => {
+                    *fault = None;
+                    return Err(FsError::NoSpace { op: "append" });
+                }
+                Some(n) => *fault = Some(n - 1),
+                None => {}
+            }
+        }
+        self.inner.append(bytes)
+    }
+    fn sync_data(&mut self) -> Result<(), FsError> {
+        self.inner.sync_data()
+    }
+    fn os_len(&self) -> Result<u64, FsError> {
+        self.inner.os_len()
+    }
+}
+
+fn is_key(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("key")
+}
+
+impl FaultFs {
+    /// Lets `n` segment appends through, then fails the next with `NoSpace`.
+    fn fail_segment_append_after(&self, n: u32) {
+        *self.segment_append_fault.lock().unwrap() = Some(n);
+    }
+
+    fn clear_append_fault(&self) {
+        *self.segment_append_fault.lock().unwrap() = None;
+    }
+}
+
+impl Fs for FaultFs {
+    fn create_dir_all(&self, path: &Path) -> Result<(), FsError> {
+        self.sim.create_dir_all(path)
+    }
+    fn open_append(&self, path: &Path) -> Result<Box<dyn AppendFile>, FsError> {
+        Ok(Box::new(FaultAppend {
+            inner: self.sim.open_append(path)?,
+            segment: path.extension().and_then(|e| e.to_str()) == Some("jsonl"),
+            fault: Arc::clone(&self.segment_append_fault),
+        }))
+    }
+    fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+        self.sim.read(path)
+    }
+    fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
+        self.sim.list_dir(path)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), FsError> {
+        if is_key(from) {
+            self.key_rename.hold_if_armed();
+        }
+        self.sim.rename(from, to)
+    }
+    fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+        self.sim.remove_file(path)
+    }
+    fn sync_dir(&self, path: &Path) -> Result<(), FsError> {
+        self.sim.sync_dir(path)
+    }
+    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+        if is_key(path) {
+            self.key_write.hold_if_armed();
+        }
+        self.sim.write_atomic(path, bytes)
+    }
+    fn write_unsynced(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+        if is_key(path) {
+            self.key_write.hold_if_armed();
+        }
+        self.sim.write_unsynced(path, bytes)
+    }
+    fn sync_file(&self, path: &Path) -> Result<(), FsError> {
+        self.sim.sync_file(path)
+    }
+    fn try_lock_exclusive(&self, path: &Path) -> Result<Box<dyn LockGuard>, FsError> {
+        self.sim.try_lock_exclusive(path)
+    }
+}
+
+/// What a journal shows: see [`World::survey`].
+type Survey = (
+    Vec<(u64, PocketId, ChunkRef)>,
+    BTreeSet<u64>,
+    Vec<(PocketId, String, u64)>,
+);
+
 struct World {
-    fs: SimFs,
+    sim: SimFs,
+    fs: FaultFs,
     clock: Arc<SimClock>,
     rng: Arc<SimRng>,
     /// Survives simulated crashes, like an OS keychain.
@@ -57,11 +227,17 @@ struct World {
 
 impl World {
     fn new(seed: u64) -> Self {
-        let fs = SimFs::new();
-        fs.create_dir_all(Path::new(DATA)).unwrap();
+        let sim = SimFs::new();
+        sim.create_dir_all(Path::new(DATA)).unwrap();
         let rng = Arc::new(SimRng::new(seed));
         Self {
-            fs,
+            fs: FaultFs {
+                sim: sim.clone(),
+                segment_append_fault: Arc::new(Mutex::new(None)),
+                key_write: Arc::new(Gate::default()),
+                key_rename: Arc::new(Gate::default()),
+            },
+            sim,
             clock: Arc::new(SimClock::new(
                 WallTime::from_unix_nanos(1_760_000_000_000_000_000).unwrap(),
             )),
@@ -71,19 +247,14 @@ impl World {
         }
     }
 
-    fn store(&self) -> Arc<ChunkStore> {
+    fn try_store(&self, durability: ChunkDurability) -> Result<Arc<ChunkStore>, ChunkError> {
         let rng: Arc<dyn Rng> = self.rng.clone();
         let keys: Arc<dyn PocketKeyring> = self.keys.clone();
-        Arc::new(
-            ChunkStore::open_with(
-                Arc::new(self.fs.clone()),
-                rng,
-                keys,
-                &self.data,
-                ChunkDurability::Balanced,
-            )
-            .unwrap(),
-        )
+        ChunkStore::open_with(Arc::new(self.fs.clone()), rng, keys, &self.data, durability).map(Arc::new)
+    }
+
+    fn store(&self) -> Arc<ChunkStore> {
+        self.try_store(ChunkDurability::Balanced).unwrap()
     }
 
     fn open(&self, store: &Arc<ChunkStore>) -> Result<Journal, JournalError> {
@@ -99,20 +270,65 @@ impl World {
         )
     }
 
-    /// (seq, pocket, payload) of every record with a payload, and the record seqs reported lost.
-    fn survey(&self) -> (Vec<(u64, PocketId, ChunkRef)>, BTreeSet<u64>) {
-        let (records, _) = read_verified(&self.fs, &self.data.join(JOURNAL_DIR)).unwrap();
-        let mut with_payload = Vec::new();
-        let mut reported = BTreeSet::new();
+    /// Simulates the process dying and starting again: a crash, then a fresh store and journal.
+    fn restart(&self, power: bool) -> (Arc<ChunkStore>, Journal) {
+        self.sim.fail_sync_after(u32::MAX);
+        if power {
+            self.sim.power_loss();
+        } else {
+            self.sim.crash();
+        }
+        let store = self.store();
+        let journal = self.open(&store).unwrap();
+        (store, journal)
+    }
+
+    /// Records with a payload, record seqs named by `chunk.lost`, and (pocket, chunk, seq) of
+    /// every `chunk.shredded` record.
+    fn survey(&self) -> Survey {
+        let (records, _) = read_verified(&self.sim, &self.data.join(JOURNAL_DIR)).unwrap();
+        let (mut with_payload, mut reported, mut shreds) = (Vec::new(), BTreeSet::new(), Vec::new());
         for r in records {
             let e = r.envelope;
             if e.event_type == types::CHUNK_LOST {
-                reported.insert(e.metadata.as_map()["record_seq"].parse::<u64>().unwrap());
+                reported.insert(e.metadata.as_map()[RECORD_SEQ_METADATA_KEY].parse::<u64>().unwrap());
+            } else if e.event_type == types::CHUNK_SHREDDED {
+                shreds.push((
+                    e.pocket_id.unwrap(),
+                    e.metadata.as_map()[CHUNK_METADATA_KEY].clone(),
+                    e.seq.0,
+                ));
             } else if let (Some(p), Some(c)) = (e.pocket_id, e.payload_ref) {
                 with_payload.push((e.seq.0, p, c));
             }
         }
-        (with_payload, reported)
+        (with_payload, reported, shreds)
+    }
+
+    /// Every surviving record's payload is readable, reported lost, or shredded after it.
+    fn assert_never_silent(&self, store: &ChunkStore, what: &str) {
+        let (records, reported, shreds) = self.survey();
+        for (seq, p, c) in &records {
+            let shredded = shreds
+                .iter()
+                .any(|(sp, sc, ss)| sp == p && *sc == c.to_string() && ss > seq);
+            assert!(
+                store.get(*p, *c).is_ok() || reported.contains(seq) || shredded,
+                "{what}: record {seq} has an unreadable payload and no chunk.lost record"
+            );
+        }
+    }
+
+    fn quarantined(&self) -> usize {
+        self.sim
+            .list_dir(
+                &self
+                    .data
+                    .join(CHUNKS_DIR)
+                    .join(pocket().to_string())
+                    .join(QUARANTINE_DIR),
+            )
+            .map_or(0, |v| v.len())
     }
 }
 
@@ -144,9 +360,31 @@ fn draft(pocket: Option<PocketId>, chunk: Option<ChunkRef>, n: u64) -> EventDraf
     }
 }
 
+fn shredded_record(chunk: ChunkRef, n: u64) -> EventDraft {
+    let mut d = draft(Some(pocket()), None, n);
+    d.event_type = types::CHUNK_SHREDDED;
+    d.side_effect_class = SideEffectClass::LocalIrreversible;
+    d.metadata = Metadata::new(
+        [(CHUNK_METADATA_KEY.to_owned(), chunk.to_string())]
+            .into_iter()
+            .collect(),
+    )
+    .unwrap();
+    d
+}
+
 fn content(n: u64) -> Vec<u8> {
     format!("payload {n} ").repeat(32).into_bytes()
 }
+
+/// Stores a payload and appends a record that references it.
+fn write(store: &ChunkStore, journal: &mut Journal, n: u64) -> (u64, ChunkRef) {
+    let chunk = store.put(pocket(), &content(n)).unwrap();
+    let seq = journal.append(draft(Some(pocket()), Some(chunk), n)).unwrap().seq.0;
+    (seq, chunk)
+}
+
+// ── Scenarios ──────────────────────────────────────────────────────────────────────────────
 
 #[test]
 fn a_record_cannot_reference_a_chunk_that_is_not_stored() {
@@ -175,20 +413,17 @@ fn balanced_chunks_become_durable_with_the_records_that_reference_them() {
     let w = World::new(2);
     let store = w.store();
     let mut journal = w.open(&store).unwrap();
-    let chunk = store.put(pocket(), &content(1)).unwrap();
+    let (seq, chunk) = write(&store, &mut journal, 1);
     assert_eq!(store.pending_len(), 1, "a balanced put is not flushed by itself");
-    journal.append(draft(Some(pocket()), Some(chunk), 1)).unwrap();
     journal.sync().unwrap();
     assert_eq!(store.pending_len(), 0, "the journal's flush flushes the payloads first");
-    let flushed = journal.flushed_through().unwrap().0;
+    assert_eq!(journal.flushed_through().unwrap().0, seq);
     drop(journal);
+    drop(store);
 
-    w.fs.power_loss();
-    let store = w.store();
-    let journal = w.open(&store).unwrap();
+    let (store, journal) = w.restart(true);
     assert!(journal.lost_payloads().is_empty());
-    let (records, _) = w.survey();
-    assert!(records.iter().any(|(seq, _, _)| *seq == flushed));
+    assert!(w.survey().0.iter().any(|(s, _, _)| *s == seq));
     assert_eq!(store.get(pocket(), chunk).unwrap(), content(1));
 }
 
@@ -197,62 +432,50 @@ fn unflushed_payloads_lost_to_power_are_never_silent() {
     let w = World::new(3);
     let store = w.store();
     let mut journal = w.open(&store).unwrap();
-    let a = store.put(pocket(), &content(1)).unwrap();
-    journal.append(draft(Some(pocket()), Some(a), 1)).unwrap();
+    write(&store, &mut journal, 1);
     journal.sync().unwrap();
-    // Unflushed: the record's bytes and its chunk are with the OS only.
-    let b = store.put(pocket(), &content(2)).unwrap();
-    journal.append(draft(Some(pocket()), Some(b), 2)).unwrap();
+    write(&store, &mut journal, 2); // with the OS only
     drop(journal);
-    w.fs.power_loss();
-
-    let store = w.store();
-    let journal = w.open(&store).unwrap();
-    let (records, reported) = w.survey();
-    for (seq, p, c) in &records {
-        assert!(
-            store.get(*p, *c).is_ok() || reported.contains(seq),
-            "record {seq} survived with an unreadable payload and no chunk.lost record"
-        );
-    }
-    drop(journal);
+    drop(store);
+    let (store, _journal) = w.restart(true);
+    w.assert_never_silent(&store, "power loss");
 }
 
-/// The deterministic form of the ADR-0018 ordering rule: whatever flush fails, and whenever the
-/// power goes, a record at or before the flushed boundary has a readable payload.
+/// The deterministic form of the ADR-0018 ordering rule: whatever flush fails, in either cache
+/// mode, and whenever the power goes, a record at or before the flushed boundary has a readable
+/// payload.
 #[test]
 fn a_flushed_record_never_references_an_unreadable_payload() {
-    for k in 0..12 {
-        let w = World::new(100 + u64::from(k));
-        let store = w.store();
-        let mut journal = w.open(&store).unwrap();
-        for n in 0..3 {
-            let chunk = store.put(pocket(), &content(n)).unwrap();
-            journal.append(draft(Some(pocket()), Some(chunk), n)).unwrap();
-        }
-        w.fs.fail_sync_after(k);
-        // Whether this flush fails depends on `k`; the guarantee must hold either way.
-        let _outcome = journal.sync();
-        let flushed = journal.flushed_through().map(|s| s.0);
-        drop(journal);
-        w.fs.fail_sync_after(u32::MAX);
-        w.fs.power_loss();
-
-        let store = w.store();
-        let _journal = w.open(&store).unwrap();
-        let (records, reported) = w.survey();
-        for (seq, p, c) in records {
-            let readable = store.get(p, c).is_ok();
-            if flushed.is_some_and(|f| seq <= f) {
+    for keep_cache in [false, true] {
+        for k in 0..14 {
+            let w = World::new(100 + u64::from(k));
+            w.sim.set_failed_sync_keeps_cache(keep_cache);
+            let store = w.store();
+            let mut journal = w.open(&store).unwrap();
+            for n in 0..3 {
+                write(&store, &mut journal, n);
+            }
+            w.sim.fail_sync_after(k);
+            // Whether this flush fails depends on `k`; the guarantee must hold either way.
+            let _outcome = journal.sync();
+            let flushed = journal.flushed_through().map(|s| s.0);
+            drop(journal);
+            drop(store);
+            let (store, _journal) = w.restart(true);
+            let (records, reported, _) = w.survey();
+            for (seq, p, c) in records {
+                let readable = store.get(p, c).is_ok();
+                if flushed.is_some_and(|f| seq <= f) {
+                    assert!(
+                        readable,
+                        "fault after {k} flushes (cache kept: {keep_cache}): flushed record {seq} lost its payload"
+                    );
+                }
                 assert!(
-                    readable,
-                    "fault after {k} flushes: flushed record {seq} lost its payload"
+                    readable || reported.contains(&seq),
+                    "record {seq} lost its payload silently"
                 );
             }
-            assert!(
-                readable || reported.contains(&seq),
-                "record {seq} lost its payload silently"
-            );
         }
     }
 }
@@ -262,20 +485,30 @@ fn a_failed_payload_flush_stops_the_writer_until_recovery_reports_the_loss() {
     let w = World::new(4);
     let store = w.store();
     let mut journal = w.open(&store).unwrap();
-    let chunk = store.put(pocket(), &content(1)).unwrap();
-    let acked = journal.append(draft(Some(pocket()), Some(chunk), 1)).unwrap();
-    w.fs.fail_next_sync(); // the chunk's data file: the OS drops its unflushed pages
-    assert_eq!(journal.sync(), Err(JournalError::Stopped));
+    let (seq, _) = write(&store, &mut journal, 1);
+    w.sim.fail_next_sync(); // the chunk's data file: the OS drops its unflushed pages
+    assert_eq!(journal.sync(), Err(JournalError::PayloadFlushFailed));
     assert_eq!(journal.health(), JournalHealth::PayloadFlushFailed);
-    assert_eq!(journal.append(draft(None, None, 2)), Err(JournalError::Stopped));
+    assert_eq!(
+        journal.append(draft(None, None, 2)),
+        Err(JournalError::PayloadFlushFailed)
+    );
+    assert_eq!(
+        store.put(pocket(), &content(3)),
+        Err(ChunkError::FlushFailed),
+        "the store is poisoned"
+    );
 
     journal.recover().unwrap();
     assert_eq!(journal.health(), JournalHealth::Healthy);
     assert_eq!(journal.lost_payloads().len(), 1);
-    assert_eq!(journal.lost_payloads()[0].record_seq, acked.seq);
+    assert_eq!(journal.lost_payloads()[0].record_seq.0, seq);
+    assert!(
+        w.quarantined() > 0,
+        "the unreadable chunk is kept in quarantine, not deleted"
+    );
     drop(journal);
-    let (_, reported) = w.survey();
-    assert!(reported.contains(&acked.seq.0), "the loss is journaled as chunk.lost");
+    assert!(w.survey().1.contains(&seq), "the loss is journaled as chunk.lost");
 }
 
 #[test]
@@ -286,7 +519,8 @@ fn rotation_rewraps_are_durable_in_balanced_mode() {
     let doomed = store.put(pocket(), &content(2)).unwrap();
     store.sync_pending().unwrap();
     store.shred(pocket(), doomed).unwrap(); // rotates the KEK, re-wraps `keep`, retires the old KEK
-    w.fs.power_loss();
+    drop(store);
+    w.sim.power_loss();
     let store = w.store();
     assert_eq!(
         store.get(pocket(), keep).unwrap(),
@@ -301,11 +535,14 @@ fn a_chunk_left_torn_by_a_power_loss_is_rewritten_not_trusted() {
     let store = w.store();
     let chunk = store.put(pocket(), &content(1)).unwrap();
     // Make the directory entries durable but not the file contents: both files come back empty.
-    w.fs.sync_dir(&w.data.join("chunks").join(pocket().to_string()).join("data"))
+    w.sim
+        .sync_dir(&w.data.join(CHUNKS_DIR).join(pocket().to_string()).join("data"))
         .unwrap();
-    w.fs.sync_dir(&w.data.join("chunks").join(pocket().to_string()).join("keys"))
+    w.sim
+        .sync_dir(&w.data.join(CHUNKS_DIR).join(pocket().to_string()).join("keys"))
         .unwrap();
-    w.fs.power_loss();
+    drop(store);
+    w.sim.power_loss();
     let store = w.store();
     assert!(store.get(pocket(), chunk).is_err());
     assert!(!store.is_stored(pocket(), chunk).unwrap());
@@ -313,7 +550,447 @@ fn a_chunk_left_torn_by_a_power_loss_is_rewritten_not_trusted() {
     assert_eq!(store.get(pocket(), chunk).unwrap(), content(1));
 }
 
-// ── Random crash schedules ──────────────────────────────────────────────────────────────────
+// ── Regressions from the WP3.A1 review ─────────────────────────────────────────────────────
+
+/// H1: if reporting a loss fails during open, the marker has not moved, so the next open
+/// checks the same tail and reports it.
+#[test]
+fn h1_open_reports_a_loss_before_its_marker_moves() {
+    let w = World::new(11);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    write(&store, &mut j, 1);
+    w.sim.fail_next_sync();
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    drop(j);
+    drop(store);
+    w.sim.crash();
+
+    // The open copies the previous run's record to a fresh segment, then appends chunk.lost:
+    // the second segment append fails.
+    w.fs.fail_segment_append_after(1);
+    let store = w.store();
+    let first = w.open(&store);
+    assert!(first.is_err(), "the chunk.lost append failed, so open fails: {first:?}");
+    drop(first);
+    drop(store);
+
+    let (store, _j) = w.restart(false);
+    w.assert_never_silent(&store, "h1");
+}
+
+/// H1: an open that found a loss and failed to journal it leaves no record durable ahead of its
+/// loss record, even if the power goes before the next open.
+#[test]
+fn h1_a_failed_open_leaves_no_record_durable_before_its_loss_record() {
+    let w = World::new(25);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, _) = write(&store, &mut j, 1);
+    w.sim.fail_next_sync(); // the chunk's data file: the OS drops its unflushed pages
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    drop(j);
+    drop(store);
+    w.sim.crash();
+    // The open finds the loss, copies the record, and fails to append its chunk.lost record.
+    w.fs.fail_segment_append_after(1);
+    let store = w.store();
+    assert!(w.open(&store).is_err());
+    drop(store);
+    w.sim.power_loss();
+    let (records, reported, _) = w.survey();
+    assert!(
+        !records.iter().any(|(s, _, _)| *s == seq) || reported.contains(&seq),
+        "the record became durable before its loss record"
+    );
+}
+
+/// H2: a loss found by recovery survives a failed report and every other recovery branch.
+#[test]
+fn h2_a_loss_survives_a_failed_report_and_other_recover_branches() {
+    let w = World::new(12);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    write(&store, &mut j, 1);
+    w.sim.fail_next_sync();
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+
+    w.fs.fail_segment_append_after(0);
+    assert!(j.recover().is_err(), "the chunk.lost append fails");
+    assert_eq!(j.health(), JournalHealth::DiskFull);
+    j.recover().unwrap(); // the disk-full branch must report what is still unreported
+    assert_eq!(j.lost_payloads().len(), 1);
+    write(&store, &mut j, 2);
+    j.sync().unwrap();
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    w.assert_never_silent(&store, "h2");
+}
+
+/// H3: a flush that fails in the store, outside the journal, poisons the store, so the next
+/// journal flush stops instead of marking records durable over dropped content.
+#[test]
+fn h3_a_store_flush_failure_stops_the_journal() {
+    let w = World::new(13);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, chunk) = write(&store, &mut j, 1);
+    w.sim.fail_next_sync();
+    assert!(store.sync_pending().is_err());
+    assert_eq!(
+        j.sync(),
+        Err(JournalError::PayloadFlushFailed),
+        "the journal saw the store's failure"
+    );
+    assert!(j.flushed_through().is_none_or(|f| f.0 < seq));
+    assert!(
+        store.is_stored(pocket(), chunk).is_err(),
+        "a poisoned store does not vouch from memory"
+    );
+    j.recover().unwrap();
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    w.assert_never_silent(&store, "h3");
+}
+
+/// H4: after a writeback error the cache still serves the bytes and a second flush of the same
+/// file "succeeds" without making them durable. Recovery must rewrite, not re-flush.
+#[test]
+fn h4_recovery_rewrites_content_instead_of_reflushing_the_failed_file() {
+    let w = World::new(16);
+    w.sim.set_failed_sync_keeps_cache(true);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, chunk) = write(&store, &mut j, 1);
+    w.sim.fail_next_sync();
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    j.recover().unwrap();
+    assert!(
+        j.lost_payloads().is_empty(),
+        "the cached bytes were readable, so nothing is lost"
+    );
+    assert!(j.flushed_through().is_some_and(|f| f.0 >= seq));
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    assert_eq!(
+        store.get(pocket(), chunk).ok(),
+        Some(content(1)),
+        "a flushed record's payload was re-flushed in place and lost to the power cut"
+    );
+}
+
+/// M2: a lost chunk is quarantined under its slot, so a concurrent put of the same content
+/// cannot have its fresh pair moved away underneath it. The race is reachable at open, while
+/// the previous run's tail is checked; during runtime recovery the store is poisoned and refuses
+/// puts outright (`a_failed_payload_flush_stops_the_writer_until_recovery_reports_the_loss`).
+#[test]
+fn m2_a_quarantine_and_a_concurrent_put_of_the_same_chunk_never_lose_it() {
+    let w = World::new(14);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    w.sim.fail_next_sync(); // the chunk's data file: the OS drops its unflushed pages
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    drop(j);
+    drop(store);
+    w.sim.crash(); // the record is still with the OS; its payload is not
+
+    let store = w.store();
+    w.fs.key_rename.arm(); // the quarantine of the lost chunk stops at its key file
+    let rename = Arc::clone(&w.fs.key_rename);
+    let b = {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || {
+            rename.wait_held();
+            store.put(pocket(), &content(1))
+        })
+    };
+    let releaser = w.fs.key_rename.release_after(300);
+    let mut j = w.open(&store).unwrap();
+    releaser.join().unwrap();
+    assert_eq!(
+        b.join().unwrap().unwrap(),
+        x,
+        "the put waited for the quarantine, then wrote a fresh pair"
+    );
+    assert_eq!(
+        j.lost_payloads().len(),
+        1,
+        "the earlier record's payload was lost and is reported"
+    );
+    j.append(draft(Some(pocket()), Some(x), 2)).unwrap();
+    j.sync().unwrap();
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    w.assert_never_silent(&store, "m2");
+    assert_eq!(
+        store.get(pocket(), x).ok(),
+        Some(content(1)),
+        "the fresh pair was moved into quarantine"
+    );
+}
+
+/// M3: a put that is wrapping its key cannot race a shred into wrapping under a KEK the
+/// shred destroys.
+#[test]
+fn m3_a_put_racing_a_shred_in_the_same_pocket_stays_readable() {
+    for durability in [ChunkDurability::Balanced, ChunkDurability::Strict] {
+        let w = World::new(15);
+        let store = w.try_store(durability).unwrap();
+        let other = store.put(pocket(), &content(9)).unwrap();
+        store.sync_pending().unwrap();
+        w.fs.key_write.arm();
+        let a = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || store.put(pocket(), &content(1)))
+        };
+        w.fs.key_write.wait_held(); // A holds the current KEK and has not written its key file
+        let s = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || store.shred(pocket(), other))
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        w.fs.key_write.release();
+        let z = a.join().unwrap().unwrap();
+        s.join().unwrap().unwrap();
+        assert!(store.is_stored(pocket(), z).unwrap());
+        assert_eq!(
+            store.get(pocket(), z).ok(),
+            Some(content(1)),
+            "{durability:?}: the put's key file was wrapped under a destroyed KEK"
+        );
+    }
+}
+
+/// M5: recovery quarantines unreadable chunks instead of deleting them, and a keyring that
+/// cannot produce a KEK is a failure that touches nothing.
+#[test]
+fn m5_keyring_failures_fail_closed_without_touching_chunks() {
+    let w = World::new(17);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, chunk) = write(&store, &mut j, 1);
+    drop(j);
+    drop(store);
+    w.sim.crash();
+    // The keychain lost every KEK version (a reset, or a moved data directory).
+    w.keys.retire_keks_before(pocket(), KekVersion(1_000)).unwrap();
+    let store = w.store();
+    let opened = w.open(&store);
+    assert!(
+        matches!(opened, Err(JournalError::Payload(ChunkError::Keyring(_)))),
+        "missing keys are not a payload loss: {opened:?}"
+    );
+    assert_eq!(w.quarantined(), 0, "nothing was moved or deleted");
+    let name = chunk.to_string();
+    let key_file = format!("{}.key", name.strip_prefix("hmac-sha256:").unwrap());
+    let key_files = w
+        .sim
+        .list_dir(&w.data.join(CHUNKS_DIR).join(pocket().to_string()).join("keys"))
+        .unwrap();
+    assert!(
+        key_files
+            .iter()
+            .any(|p| p.file_name().unwrap().to_string_lossy() == key_file),
+        "the key file is where it was"
+    );
+}
+
+/// L2: one chunk store per data directory.
+#[test]
+fn l2_one_chunk_store_per_data_directory() {
+    let w = World::new(18);
+    let _first = w.store();
+    assert_eq!(
+        w.try_store(ChunkDurability::Balanced).err(),
+        Some(ChunkError::InstanceLocked)
+    );
+}
+
+/// L3: a journal that has coordinated a chunk store cannot be opened without it.
+#[test]
+fn l3_a_coordinated_journal_refuses_to_open_without_its_store() {
+    let w = World::new(19);
+    let store = w.store();
+    let j = w.open(&store).unwrap();
+    drop(j);
+    w.sim.crash();
+    let clock: Arc<dyn Clock> = w.clock.clone();
+    let rng: Arc<dyn Rng> = w.rng.clone();
+    let plain = Journal::open(Arc::new(w.fs.clone()), clock, rng, &w.data, NEVER);
+    assert_eq!(
+        plain.err(),
+        Some(JournalError::PayloadsRequired),
+        "a coordinated journal opened without its store"
+    );
+}
+
+/// L5: chunk records name their chunk in metadata, and a shred after a record is not a loss.
+#[test]
+fn l5_chunk_records_name_their_chunk_and_a_shred_is_not_a_loss() {
+    let w = World::new(20);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, chunk) = write(&store, &mut j, 1);
+    let mut wrong = shredded_record(chunk, 2);
+    wrong.payload_ref = Some(chunk);
+    assert!(matches!(j.append(wrong), Err(JournalError::InvalidRecord(_))));
+    // Write-ahead, as the kernel shreds: the record is durable before the content goes.
+    j.append(shredded_record(chunk, 3)).unwrap();
+    j.sync().unwrap();
+    store.shred(pocket(), chunk).unwrap();
+    drop(j);
+    drop(store);
+    let (store, j) = w.restart(true);
+    assert!(j.lost_payloads().is_empty(), "a shredded payload was reported lost");
+    w.assert_never_silent(&store, "l5");
+}
+
+// ── Found by the crash schedules after the review fixes (WP3.A1 N1–N4) ───────────────────
+
+/// N1: a chunk already on disk from an earlier process is replaced only by a flushed write. An
+/// unflushed replacement, once its process died, would be made durable empty by the next
+/// directory flush, under a record that was durable before.
+#[test]
+fn n1_a_rewrite_of_a_chunk_from_an_earlier_process_is_flushed() {
+    let w = World::new(21);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, x) = write(&store, &mut j, 1);
+    w.clock.advance(1_100_000_000);
+    j.sync().unwrap(); // the marker now names the record: no later open checks its payload
+    drop(j);
+    drop(store);
+    w.sim.crash();
+    // A process that did not write the content stores it again, then dies before any flush.
+    let store = w.store();
+    assert_eq!(store.put(pocket(), &content(1)).unwrap(), x);
+    drop(store);
+    // The next process flushes the pocket's directories, then the power goes.
+    let (store, mut j) = w.restart(false);
+    write(&store, &mut j, 2);
+    j.sync().unwrap();
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    assert!(w.survey().0.iter().any(|(s, _, _)| *s == seq));
+    assert_eq!(
+        store.get(pocket(), x).ok(),
+        Some(content(1)),
+        "a durable payload was replaced by an unflushed copy"
+    );
+}
+
+/// N2: a rewrite keeps the pair's data key, so a failure between the data-file and key-file
+/// writes leaves the old key file opening the new data file.
+#[test]
+fn n2_a_rewrite_that_fails_between_its_two_files_leaves_a_readable_pair() {
+    let w = World::new(22);
+    let store = w.store();
+    let x = store.put(pocket(), &content(1)).unwrap();
+    store.sync_pending().unwrap();
+    drop(store);
+    w.sim.crash();
+    let store = w.store();
+    store.put(pocket(), &content(2)).unwrap(); // the pocket's directories are prepared
+    // A flushed write is two flushes (file, directory): the data file's succeed, the key
+    // file's first one fails.
+    w.sim.fail_sync_after(2);
+    assert!(store.put(pocket(), &content(1)).is_err());
+    w.sim.fail_sync_after(u32::MAX);
+    assert_eq!(
+        store.get(pocket(), x).ok(),
+        Some(content(1)),
+        "new data was left paired with a key file that was never written"
+    );
+    drop(store);
+    w.sim.power_loss();
+    let store = w.store();
+    assert_eq!(
+        store.get(pocket(), x).ok(),
+        Some(content(1)),
+        "new data was left paired with a key file that was never written"
+    );
+}
+
+/// N3: while a found loss waits to be journaled (the disk filled while it was reported), the
+/// writer refuses records and flushes, so no record becomes durable before its loss record.
+#[test]
+fn n3_a_loss_waiting_to_be_journaled_holds_back_every_flush() {
+    let w = World::new(23);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, _) = write(&store, &mut j, 1);
+    w.sim.fail_next_sync(); // the chunk's data file: the OS drops its unflushed pages
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    w.fs.fail_segment_append_after(0);
+    assert!(
+        j.recover().is_err(),
+        "the loss was found; its record could not be appended"
+    );
+    assert_eq!(
+        j.sync(),
+        Err(JournalError::DiskFull),
+        "a flush ran while a loss waited to be journaled"
+    );
+    assert!(
+        j.flushed_through().is_none_or(|f| f.0 < seq),
+        "the record became durable before its loss record"
+    );
+    assert_eq!(j.append(draft(None, None, 2)), Err(JournalError::DiskFull));
+    j.recover().unwrap();
+    assert!(j.flushed_through().is_some_and(|f| f.0 > seq));
+    drop(j);
+    drop(store);
+    let (_store, _j) = w.restart(true);
+    assert!(w.survey().1.contains(&seq), "the loss is journaled and durable");
+}
+
+/// N4: open never flushes the previous run's segment again. After a failed flush, a second
+/// flush of the same file can report success without writing anything (cache kept), and a
+/// failing one drops what the OS held (cache dropped). Whatever flush fails during an open,
+/// the previous run's records survive the next open and a power loss after it.
+#[test]
+fn n4_open_copies_the_previous_runs_records_instead_of_flushing_their_file_again() {
+    for keep_cache in [false, true] {
+        for k in 0..6 {
+            let w = World::new(24);
+            w.sim.set_failed_sync_keeps_cache(keep_cache);
+            let plain = || {
+                let clock: Arc<dyn Clock> = w.clock.clone();
+                let rng: Arc<dyn Rng> = w.rng.clone();
+                Journal::open(Arc::new(w.fs.clone()), clock, rng, &w.data, NEVER)
+            };
+            let mut j = plain().unwrap();
+            for n in 0..3 {
+                j.append(draft(None, None, n)).unwrap(); // with the OS only
+            }
+            drop(j);
+            w.sim.crash();
+            w.sim.fail_sync_after(k);
+            // Whether this open fails depends on `k`; the records must survive either way.
+            drop(plain());
+            w.sim.fail_sync_after(u32::MAX);
+            w.sim.crash();
+            drop(plain().unwrap());
+            w.sim.power_loss();
+            let records = read_verified(&w.sim, &w.data.join(JOURNAL_DIR))
+                .unwrap_or_else(|e| panic!("cache kept: {keep_cache}, fault after {k}: {e}"))
+                .0;
+            assert_eq!(
+                records.len(),
+                3,
+                "cache kept: {keep_cache}, fault after {k}: the previous run's records were lost"
+            );
+        }
+    }
+}
+
+// ── Random crash schedules ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 enum Op {
@@ -321,8 +998,15 @@ enum Op {
     Write,
     /// Append a record that references an earlier payload again.
     Repeat(usize),
+    /// Shred an earlier payload and journal it.
+    Shred(usize),
     Sync,
-    FailNextSync,
+    /// Let `n` flushes succeed, then fail the next.
+    FailSyncAfter(u32),
+    /// The next segment append fails with `NoSpace`.
+    FailAppend,
+    /// Advance the clock past the marker interval.
+    Tick,
     Crash,
     PowerLoss,
     Recover,
@@ -332,19 +1016,20 @@ fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         6 => Just(Op::Write),
         2 => (0usize..64).prop_map(Op::Repeat),
+        1 => (0usize..64).prop_map(Op::Shred),
         3 => Just(Op::Sync),
-        1 => Just(Op::FailNextSync),
+        2 => (0u32..4).prop_map(Op::FailSyncAfter),
+        1 => Just(Op::FailAppend),
+        1 => Just(Op::Tick),
         1 => Just(Op::Crash),
         1 => Just(Op::PowerLoss),
-        1 => Just(Op::Recover),
+        2 => Just(Op::Recover),
     ]
 }
 
 /// `os_holds_unflushed`: whether records after the flushed boundary were with the OS when the
-/// process died. They are not after a failed segment flush whose rewrite also failed
-/// ([`JournalHealth::FlushFailed`]: those records lived only in memory, ADR-0003).
-/// `reported_before`: records whose payload loss was already journaled before this crash (a
-/// failed flush can drop a payload; the record then stands with a `chunk.lost` record).
+/// process died; not after a failed segment flush whose rewrite also failed (`FlushFailed`: those
+/// records lived only in memory, ADR-0003). `reported_before`: losses already journaled.
 fn check(
     w: &World,
     store: &ChunkStore,
@@ -354,27 +1039,23 @@ fn check(
     os_holds_unflushed: bool,
     reported_before: &BTreeSet<u64>,
 ) {
-    let (records, reported) = w.survey();
+    w.assert_never_silent(store, "schedule");
+    let (records, _, shreds) = w.survey();
     let present: BTreeMap<u64, ChunkRef> = records.iter().map(|(s, _, c)| (*s, *c)).collect();
-    for (seq, p, c) in &records {
-        assert!(
-            store.get(*p, *c).is_ok() || reported.contains(seq),
-            "record {seq} lost its payload silently"
-        );
-    }
     for seq in acked.keys() {
         let flushed_here = flushed.is_some_and(|f| *seq <= f);
-        let must_survive = flushed_here || (!power && os_holds_unflushed);
-        if must_survive {
-            let chunk = present
-                .get(seq)
-                .unwrap_or_else(|| panic!("acknowledged record {seq} is gone"));
-            if power && !reported_before.contains(seq) {
-                assert!(
-                    store.get(pocket(), *chunk).is_ok(),
-                    "flushed record {seq} lost its payload"
-                );
-            }
+        if !(flushed_here || (!power && os_holds_unflushed)) {
+            continue;
+        }
+        let chunk = present
+            .get(seq)
+            .unwrap_or_else(|| panic!("acknowledged record {seq} is gone"));
+        let shredded = shreds.iter().any(|(_, sc, ss)| *sc == chunk.to_string() && ss > seq);
+        if power && !reported_before.contains(seq) && !shredded {
+            assert!(
+                store.get(pocket(), *chunk).is_ok(),
+                "flushed record {seq} lost its payload"
+            );
         }
     }
 }
@@ -383,8 +1064,13 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
-    fn payload_durability_under_random_crash_schedules(seed in any::<u64>(), ops in prop::collection::vec(op(), 1..60)) {
+    fn payload_durability_under_random_crash_schedules(
+        seed in any::<u64>(),
+        keep_cache in any::<bool>(),
+        ops in prop::collection::vec(op(), 1..80),
+    ) {
         let w = World::new(seed);
+        w.sim.set_failed_sync_keeps_cache(keep_cache);
         let mut store = w.store();
         let mut journal = w.open(&store).unwrap();
         let mut contents: Vec<u64> = Vec::new();
@@ -402,23 +1088,49 @@ proptest! {
                         acked.insert(a.seq.0, n);
                     }
                 }
+                Op::Shred(i) if !contents.is_empty() => {
+                    let n = contents[i % contents.len()];
+                    let Ok(chunk) = store.reference(pocket(), &content(n)) else { continue };
+                    // Write-ahead: the shred runs only once its record is durable, so a power
+                    // loss can never leave references to removed content unexplained. A failed
+                    // shred is retried once; the record already covers whatever it removed.
+                    if journal.append(shredded_record(chunk, n)).is_ok() && journal.sync().is_ok()
+                        && store.shred(pocket(), chunk).is_err()
+                    {
+                        let _outcome = store.shred(pocket(), chunk);
+                    }
+                }
+                Op::Shred(_) => {}
                 // Failures are part of the schedule; the checks after each crash judge the outcome.
                 Op::Sync => { let _outcome = journal.sync(); }
-                Op::FailNextSync => w.fs.fail_next_sync(),
+                Op::FailSyncAfter(n) => w.sim.fail_sync_after(n),
+                Op::FailAppend => w.fs.fail_segment_append_after(0),
+                Op::Tick => w.clock.advance(1_100_000_000),
                 Op::Recover => { let _outcome = journal.recover(); }
                 Op::Crash | Op::PowerLoss => {
                     let power = matches!(op, Op::PowerLoss);
                     let flushed = journal.flushed_through().map(|s| s.0);
                     let os_holds_unflushed = journal.health() != JournalHealth::FlushFailed;
-                    let (_, reported_before) = w.survey();
+                    let (_, reported_before, _) = w.survey();
                     drop(journal);
-                    w.fs.fail_sync_after(u32::MAX);
-                    if power { w.fs.power_loss() } else { w.fs.crash() }
+                    drop(store);
+                    if power { w.sim.power_loss() } else { w.sim.crash() }
+                    // Faults armed before the crash may still hit this open; then open again.
+                    // A failed open must not cost anything the OS held (it copies the previous
+                    // run's records instead of flushing their file again).
                     store = w.store();
-                    journal = w.open(&store).unwrap();
+                    journal = if let Ok(j) = w.open(&store) {
+                        j
+                    } else {
+                        w.sim.fail_sync_after(u32::MAX);
+                        w.fs.clear_append_fault();
+                        drop(store);
+                        w.sim.crash();
+                        store = w.store();
+                        w.open(&store).unwrap()
+                    };
                     check(&w, &store, &acked, flushed, power, os_holds_unflushed, &reported_before);
-                    // What survives is the new truth; the model follows it.
-                    let (records, _) = w.survey();
+                    let (records, _, _) = w.survey();
                     let present: BTreeSet<u64> = records.iter().map(|(s, _, _)| *s).collect();
                     acked.retain(|s, _| present.contains(s));
                 }
@@ -427,117 +1139,35 @@ proptest! {
     }
 }
 
-// ── S-6: two writers of one chunk ───────────────────────────────────────────────────────────
-
-/// A filesystem that holds the first key-file write until released, so a test can place a
-/// second writer exactly between another writer's data file and its key file.
-#[derive(Debug, Clone)]
-struct GateFs {
-    inner: SimFs,
-    gate: Arc<Gate>,
-}
-
-#[derive(Debug, Default)]
-struct Gate {
-    armed: AtomicBool,
-    held: AtomicBool,
-    open: Mutex<bool>,
-    opened: Condvar,
-}
-
-impl GateFs {
-    fn hold_first_key_write(&self, path: &Path) {
-        let is_key = path.extension().and_then(|e| e.to_str()) == Some("key");
-        if is_key && self.gate.armed.swap(false, Ordering::SeqCst) {
-            self.gate.held.store(true, Ordering::SeqCst);
-            let mut open = self.gate.open.lock().unwrap();
-            while !*open {
-                open = self.gate.opened.wait(open).unwrap();
-            }
-        }
-    }
-
-    fn release(&self) {
-        *self.gate.open.lock().unwrap() = true;
-        self.gate.opened.notify_all();
-    }
-}
-
-impl Fs for GateFs {
-    fn create_dir_all(&self, path: &Path) -> Result<(), FsError> {
-        self.inner.create_dir_all(path)
-    }
-    fn open_append(&self, path: &Path) -> Result<Box<dyn AppendFile>, FsError> {
-        self.inner.open_append(path)
-    }
-    fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
-        self.inner.read(path)
-    }
-    fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
-        self.inner.list_dir(path)
-    }
-    fn rename(&self, from: &Path, to: &Path) -> Result<(), FsError> {
-        self.inner.rename(from, to)
-    }
-    fn remove_file(&self, path: &Path) -> Result<(), FsError> {
-        self.inner.remove_file(path)
-    }
-    fn sync_dir(&self, path: &Path) -> Result<(), FsError> {
-        self.inner.sync_dir(path)
-    }
-    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
-        self.hold_first_key_write(path);
-        self.inner.write_atomic(path, bytes)
-    }
-    fn write_unsynced(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
-        self.hold_first_key_write(path);
-        self.inner.write_unsynced(path, bytes)
-    }
-    fn sync_file(&self, path: &Path) -> Result<(), FsError> {
-        self.inner.sync_file(path)
-    }
-    fn try_lock_exclusive(&self, path: &Path) -> Result<Box<dyn LockGuard>, FsError> {
-        self.inner.try_lock_exclusive(path)
-    }
-}
+// ── S-6: two writers of one chunk ──────────────────────────────────────────────────────────
 
 #[test]
 fn concurrent_puts_of_one_chunk_never_pair_data_with_the_wrong_key() {
     for durability in [ChunkDurability::Balanced, ChunkDurability::Strict] {
-        let sim = SimFs::new();
-        sim.create_dir_all(Path::new(DATA)).unwrap();
-        let fs = GateFs {
-            inner: sim,
-            gate: Arc::new(Gate::default()),
-        };
-        let rng: Arc<dyn Rng> = Arc::new(SimRng::new(9));
-        let keys: Arc<dyn PocketKeyring> = Arc::new(MemoryKeyring::new(Arc::clone(&rng)));
-        let store =
-            Arc::new(ChunkStore::open_with(Arc::new(fs.clone()), rng, keys, Path::new(DATA), durability).unwrap());
+        let w = World::new(9);
+        let store = w.try_store(durability).unwrap();
         let body = content(42);
-        fs.gate.armed.store(true, Ordering::SeqCst);
+        w.fs.key_write.arm();
 
         // Writer A stores its data file, then is held before its key file.
         let a = {
             let (store, body) = (Arc::clone(&store), body.clone());
             std::thread::spawn(move || store.put(pocket(), &body))
         };
-        while !fs.gate.held.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        w.fs.key_write.wait_held();
         // Writer B arrives for the same content. Without one writer per chunk it would replace
         // A's data file and write its own key, and A's late key would then open nothing.
         let b = {
             let (store, body) = (Arc::clone(&store), body.clone());
             std::thread::spawn(move || store.put(pocket(), &body))
         };
-        for _ in 0..200 {
+        for _ in 0..50 {
             if b.is_finished() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        fs.release();
+        w.fs.key_write.release();
         let chunk = a.join().unwrap().unwrap();
         assert_eq!(b.join().unwrap().unwrap(), chunk);
         assert_eq!(

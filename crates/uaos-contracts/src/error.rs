@@ -193,6 +193,9 @@ registry! {
     JOURNAL_READER_TOO_OLD = Journal 6, Config, S3, retryable: false, leak: false,
         "error-journal-reader-too-old", "This binary is older than the journal's minimum reader version; it refuses to run instead of risking corruption.",
         "Upgrade, or restore the matching data-directory backup before downgrading.";
+    JOURNAL_PAYLOAD_NOT_STORED = Journal 7, Internal, S2, retryable: false, leak: false,
+        "error-journal-payload-not-stored", "UAOS tried to record a reference to content it had not stored; nothing was recorded.",
+        "Report this with `uaos trace`; it indicates a defect, not a problem with your data.";
     STORE_CHUNK_UNAVAILABLE = Store 1, User, Info, retryable: false, leak: false,
         "error-store-chunk-unavailable", "The content is not available: it was never stored here, or it was deliberately shredded.",
         "Check `uaos trace` for a chunk.shredded event; shredded content cannot be recovered by design.";
@@ -202,6 +205,12 @@ registry! {
     STORE_KEYRING_UNAVAILABLE = Store 3, Internal, S2, retryable: true, leak: false,
         "error-store-keyring-unavailable", "The encryption keys for this pocket could not be loaded, so its content cannot be read or written.",
         "Run `uaos doctor` to check keychain access.";
+    STORE_PAYLOAD_LOST = Store 4, Internal, S2, retryable: false, leak: false,
+        "error-store-payload-lost", "Content a journal record refers to could not be read back after a crash or a failed flush. The record is kept and the loss is recorded as chunk.lost.",
+        "The content cannot be restored. Check disk health with `uaos doctor`; the damaged files are kept in the pocket's quarantine folder.";
+    STORE_PAYLOAD_FLUSH_FAILED = Store 5, Internal, S2, retryable: false, leak: false,
+        "error-store-payload-flush-failed", "Making stored content durable failed. New records are refused until recovery has read the content back and recorded anything lost.",
+        "Free space or fix the disk, then let UAOS recover; `uaos doctor` shows the cause.";
     POLICY_DENIED = Policy 1, Policy, Info, retryable: false, leak: false,
         "error-policy-denied", "Policy denied the operation.",
         "Run `uaos policy explain <operation>` to see the matching rules.";
