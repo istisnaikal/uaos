@@ -8,9 +8,27 @@ use std::path::{Path, PathBuf};
 
 use crate::fs::{AppendFile, Fs, FsError, LockGuard, temp_sibling};
 
-/// `std::fs`-backed implementation of [`Fs`].
+/// `std::fs`-backed implementation of [`Fs`]. It works only on local paths: a Windows UNC path
+/// (`\\host\share`, `\\?\UNC\...`) resolves its host and opens SMB to it, and a device
+/// path (`\\.\...`, `\\?\GLOBALROOT\...`) reaches past the file system, so both are refused
+/// with [`FsError::PermissionDenied`] before any call (review WP3.A5, round 7, M2). Data stays
+/// local (red line 1).
 #[derive(Debug, Default)]
 pub struct OsFs;
+
+/// Refuses a path that is not on a local disk.
+fn local(path: &Path, op: &'static str) -> Result<(), FsError> {
+    #[cfg(windows)]
+    if let Some(std::path::Component::Prefix(prefix)) = path.components().next() {
+        use std::path::Prefix;
+        if !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) {
+            return Err(FsError::PermissionDenied { op });
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (path, op);
+    Ok(())
+}
 
 #[derive(Debug)]
 struct OsAppendFile(File);
@@ -45,10 +63,12 @@ impl LockGuard for OsLockGuard {}
 #[allow(clippy::disallowed_methods, reason = "uaos-platform is the filesystem owner (D15)")]
 impl Fs for OsFs {
     fn create_dir_all(&self, path: &Path) -> Result<(), FsError> {
+        local(path, "create_dir_all")?;
         std::fs::create_dir_all(path).map_err(|e| FsError::from_io("create_dir_all", &e))
     }
 
     fn open_append(&self, path: &Path) -> Result<Box<dyn AppendFile>, FsError> {
+        local(path, "open_append")?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -58,10 +78,12 @@ impl Fs for OsFs {
     }
 
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+        local(path, "read")?;
         std::fs::read(path).map_err(|e| FsError::from_io("read", &e))
     }
 
     fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
+        local(path, "list_dir")?;
         let mut out = Vec::new();
         for entry in std::fs::read_dir(path).map_err(|e| FsError::from_io("list_dir", &e))? {
             out.push(entry.map_err(|e| FsError::from_io("list_dir", &e))?.path());
@@ -71,15 +93,19 @@ impl Fs for OsFs {
     }
 
     fn rename(&self, from: &Path, to: &Path) -> Result<(), FsError> {
+        local(from, "rename")?;
+        local(to, "rename")?;
         std::fs::rename(from, to).map_err(|e| FsError::from_io("rename", &e))
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+        local(path, "remove_file")?;
         std::fs::remove_file(path).map_err(|e| FsError::from_io("remove_file", &e))
     }
 
     #[cfg(unix)]
     fn sync_dir(&self, path: &Path) -> Result<(), FsError> {
+        local(path, "sync_dir")?;
         File::open(path)
             .and_then(|dir| dir.sync_all())
             .map_err(|_| FsError::SyncFailed { op: "sync_dir" })
@@ -89,12 +115,14 @@ impl Fs for OsFs {
     fn sync_dir(&self, path: &Path) -> Result<(), FsError> {
         // NTFS journals directory metadata; there is no portable way (and no need) to flush a
         // directory handle on Windows. Confirm the directory exists so callers get NotFound.
+        local(path, "sync_dir")?;
         std::fs::metadata(path)
             .map(|_| ())
             .map_err(|e| FsError::from_io("sync_dir", &e))
     }
 
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+        local(path, "write_atomic")?;
         let tmp = temp_sibling(path);
         let result = (|| {
             let mut file = File::create(&tmp).map_err(|e| FsError::from_io("write_atomic", &e))?;
@@ -118,6 +146,7 @@ impl Fs for OsFs {
     }
 
     fn try_lock_exclusive(&self, path: &Path) -> Result<Box<dyn LockGuard>, FsError> {
+        local(path, "lock")?;
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -135,6 +164,27 @@ impl Fs for OsFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round 7, M2: network and device paths are refused before any call; local ones pass.
+    #[cfg(windows)]
+    #[test]
+    fn network_and_device_paths_are_refused() {
+        for path in [
+            r"\\uaos-canary.invalid\share\x",
+            r"\\?\UNC\uaos-canary.invalid\share\x",
+            r"\\.\pipe\uaos-canary",
+            r"\\?\GLOBALROOT\Device\uaos-canary",
+        ] {
+            assert_eq!(
+                OsFs.read(Path::new(path)),
+                Err(FsError::PermissionDenied { op: "read" }),
+                "{path}"
+            );
+        }
+        assert!(local(Path::new(r"C:\data"), "read").is_ok());
+        assert!(local(Path::new(r"\\?\C:\data"), "read").is_ok());
+        assert!(local(Path::new("relative"), "read").is_ok());
+    }
 
     /// A unique scratch directory under the OS temp dir, removed on drop.
     struct Scratch(PathBuf);
