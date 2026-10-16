@@ -79,11 +79,12 @@ overhead bench must include a concurrent scenario.
   classified.
 - Slow-client test: 1 KB/s for 1 h with bounded RSS.
 
-## Amendment 1 (proposed 2026-10-16; the maintainer decides)
+## Amendment 1 (accepted by the maintainer on 2026-10-16)
 
 The V1 review of the first implementation ([WP3.A5](../reviews/WP3.A5-egress.md)) showed that
-Decision 3's verifier breaks Decision 4 and red line 1. This amendment is implemented on the
-PR-5 branch, which stays a draft until it is accepted.
+Decision 3's verifier breaks Decision 4 and red line 1. The maintainer accepted this amendment
+on 2026-10-16, both parts, as an explicit instruction in the working session; it is implemented
+on the PR-5 branch.
 
 **A. TLS trust: system roots, verified by rustls, nothing fetched (amends Decisions 3 and 5).**
 - **Finding (H1).** `rustls-platform-verifier` hands the server's chain to the operating system.
