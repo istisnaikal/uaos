@@ -186,9 +186,12 @@ fn classify_v6(ip: Ipv6Addr) -> Reach {
     if in_v6(ip, [0; 8], 96) {
         return embedded(low_v4(ip), Blocked::Reserved);
     }
-    // NAT64 well-known prefix (64:ff9b::/96): a translator may forward to the inner address.
+    // NAT64 well-known prefix (64:ff9b::/96): a translator forwards to the inner address. It
+    // carries only global IPv4 addresses (RFC 6052 §3.1), which is how DNS64 lets an IPv6-only
+    // network reach an IPv4-only provider, so a public inner address is public; any other inner
+    // address is refused with its own range (review WP3.A5, round 3, L4).
     if in_v6(ip, [0x64, 0xff9b, 0, 0, 0, 0, 0, 0], 96) {
-        return embedded(low_v4(ip), Blocked::ProtocolAssignment);
+        return classify_v4(low_v4(ip));
     }
     // Local-use NAT64 prefix (64:ff9b:1::/48, RFC 8215). Its IPv4 bits depend on the operator's
     // prefix length, so it is refused as a whole rather than decoded.
@@ -311,8 +314,10 @@ mod tests {
         ] {
             assert_eq!(v(addr), Reach::Blocked(why), "{addr}");
         }
-        // NAT64 and 6to4 of a *public* address are still refused: nothing legitimate needs them.
-        assert!(matches!(v("64:ff9b::808:808"), Reach::Blocked(_)));
+        // A DNS64 answer for a public IPv4-only provider is public (round 3, L4); 6to4 of a public
+        // address is still refused (the relay is deprecated, RFC 7526).
+        assert_eq!(v("64:ff9b::808:808"), Reach::Public);
+        assert_eq!(v("64:ff9b::a29f:8c0a"), Reach::Public);
         assert!(matches!(v("2002:808:808::1"), Reach::Blocked(_)));
         // IPv4-mapped public addresses behave like the IPv4 address.
         assert_eq!(v("::ffff:8.8.8.8"), Reach::Public);
@@ -336,14 +341,19 @@ mod tests {
             }
         }
 
-        /// Every form that embeds an IPv4 address, apart from IPv4-mapped, is refused whatever
-        /// the inner address.
+        /// A NAT64 well-known address gets exactly its IPv4 address's verdict.
+        #[test]
+        fn nat64_well_known_follows_its_ipv4_address(inner in any::<u32>()) {
+            let ip = (0x64_u128 << 112) | (0xff9b_u128 << 96) | u128::from(inner);
+            prop_assert_eq!(classify(IpAddr::V6(Ipv6Addr::from(ip))), classify(IpAddr::V4(Ipv4Addr::from(inner))));
+        }
+
+        /// Every other form that embeds an IPv4 address is refused whatever the inner address.
         #[test]
         fn embedding_forms_are_never_public(inner in any::<u32>(), tail in any::<u64>()) {
             let v4 = u128::from(inner);
             for ip in [
                 v4,                                                   // IPv4-compatible
-                (0x64_u128 << 112) | (0xff9b_u128 << 96) | v4,        // NAT64 well-known
                 (0x64_u128 << 112) | (0xff9b_u128 << 96) | (1_u128 << 80) | u128::from(tail), // NAT64 local-use
                 (0x2002_u128 << 112) | (v4 << 80) | u128::from(tail), // 6to4
                 (0x2001_u128 << 112) | u128::from(tail),              // Teredo

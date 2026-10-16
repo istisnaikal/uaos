@@ -48,6 +48,13 @@ disallowed-methods = [
   { path = "hyper_util::client::legacy::connect::HttpConnector::new", reason = "the egress door is the only HTTP client; it owns DNS and classification (owner: uaos-egress)" },
   { path = "hyper_util::client::legacy::Builder::build_http", reason = "the egress door is the only HTTP client; it owns DNS and classification (owner: uaos-egress)" },
   { path = "hyper_util::client::legacy::connect::HttpConnector::new_with_resolver", reason = "the egress door is the only HTTP client; it owns DNS and classification (owner: uaos-egress)" },
+  # Review WP3.A5 round 3: hyper-util's own resolver (a DNS lookup on the blocking pool), a raw
+  # socket's listen, and the other Unix-socket and named-pipe connects.
+  { path = "hyper_util::client::legacy::connect::dns::GaiResolver::new", reason = "name resolution belongs to the egress door, which classifies every answer (owner: uaos-egress)" },
+  { path = "tokio::net::TcpSocket::listen", reason = "only the API crate listens, on loopback (owner: uaos-api)" },
+  { path = "tokio::net::UnixSocket::connect", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "std::os::unix::net::UnixStream::connect_addr", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "tokio::net::windows::named_pipe::ClientOptions::open", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
   { path = "std::os::unix::net::UnixStream::connect", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
   { path = "tokio::net::UnixStream::connect", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
   # Review WP3.A5 round 2, M2: binding a listener opens a network handle, and `bind` with a name
@@ -68,6 +75,8 @@ disallowed-methods = [
   { path = "tokio::task::JoinSet::spawn_blocking", reason = "CPU work runs on the supervisor's bounded pool (owner: uaos-runtime)" },
   { path = "tokio::task::JoinSet::spawn_on", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
   { path = "tokio::task::JoinSet::spawn_local", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
+  { path = "tokio::task::JoinSet::spawn_local_on", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
+  { path = "tokio::task::JoinSet::spawn_blocking_on", reason = "CPU work runs on the supervisor's bounded pool (owner: uaos-runtime)" },
   { path = "tokio::task::LocalSet::spawn_local", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
   # The door: built in one place and handed only to the runtime (ADR-0010; where, ADR-0013 amendment).
   { path = "uaos_egress::Door::new", reason = "the one door is built in one place and handed only to the runtime (ADR-0010)" },
@@ -80,4 +89,7 @@ disallowed-types = [
   # Random iteration order is hidden nondeterminism; it breaks seed-reproducible simulation.
   { path = "std::collections::HashMap", reason = "use BTreeMap (deterministic order) or justify with #[allow]" },
   { path = "std::collections::HashSet", reason = "use BTreeSet (deterministic order) or justify with #[allow]" },
+  # Task sets spawn through `collect` and `extend` too, which no method ban can name (round 3, L3).
+  { path = "tokio::task::JoinSet", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
+  { path = "tokio::task::LocalSet", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
 ]

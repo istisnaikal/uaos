@@ -137,9 +137,18 @@ on the PR-5 branch.
 **What is built.** `crates/uaos-egress`, the one outbound path:
 - `addr::classify` refuses every special-purpose range in the IANA registries, `3fff::/20`
   included. It looks through IPv4-mapped, IPv4-compatible, NAT64 well-known and 6to4 forms, and
-  refuses Teredo and the local-use NAT64 prefix whole. Network-specific NAT64 prefixes and cloud
-  host endpoints on public unicast (such as `168.63.129.16`) cannot be told apart by address;
-  they are reachable only over HTTPS with a verified certificate for the declared name.
+  refuses Teredo and the local-use NAT64 prefix whole. An IPv4-mapped or NAT64 well-known
+  address (`64:ff9b::/96`) gets its IPv4 address's verdict: that prefix carries only global
+  IPv4 addresses (RFC 6052 §3.1), and DNS64 uses it to let an IPv6-only network reach an
+  IPv4-only provider. IPv4-compatible and 6to4 forms are refused whatever they embed.
+  Network-specific NAT64 prefixes and cloud host endpoints on public unicast (such as
+  `168.63.129.16`) cannot be told apart by address; they are reachable only over HTTPS with a
+  verified certificate for the declared name.
+- **Known limitation: fake-IP proxies.** A local proxy that answers every lookup with an
+  address in `198.18.0.0/15` (the benchmarking range) is refused. The user sees
+  `UAOS-EGRESS-0001` ("destination refused: it resolved only to Benchmarking addresses").
+  Admitting that range would let any resolver steer the door to a local service; a user who
+  needs such a proxy declares it as a private upstream at a pinned address.
 - `HostName` refuses address literals in every spelling: decimal, hexadecimal, octal,
   shortened and bracketed.
 - **The connector.**
@@ -170,7 +179,12 @@ on the PR-5 branch.
     transparent retry is switched off.
   - **Breaker:** each upstream has a circuit that counts only transport failures and, after its
     cooldown, lets exactly one probe through. Every admitted attempt is settled exactly once,
-    also when its caller drops the request: a cancelled probe lets the next attempt probe.
+    also when its caller drops the request: a cancelled probe lets the next attempt probe. Each
+    probe carries a generation, so a probe that settles after the circuit has moved on (another
+    attempt answered, or a newer probe is in flight) changes nothing unless it answered. While
+    the circuit is open, `retry_after` is the time left in the cooldown; while a probe is in
+    flight, it is a hint (`PROBE_RECHECK`, 1 s), because the probe may settle sooner or take up
+    to the response timeout.
 - **The credential's value** is marked sensitive when the `Credential` is built and never
   appears in its `Debug` output.
 - **Connection tasks.** They run on an executor the caller passes in. The runtime passes its
@@ -180,17 +194,21 @@ on the PR-5 branch.
 **How it is enforced.**
 - **`clippy.toml`.** These are banned outside `uaos-egress/src/{connect,resolve}.rs`:
   - outbound connections: `connect` (std and tokio, `TcpSocket` included);
-  - name resolution: `lookup_host` and `ToSocketAddrs::to_socket_addrs`, which needs no
-    dependency at all;
+  - name resolution: `lookup_host`, `ToSocketAddrs::to_socket_addrs`, which needs no
+    dependency at all, and hyper-util's own resolver (`GaiResolver::new`), which looks names up
+    on the blocking pool;
   - UDP: `UdpSocket::bind` (std and tokio);
   - another HTTP client: hyper-util's `HttpConnector::new`, `new_with_resolver` and
     `build_http`;
-  - Unix-socket connects (std and tokio; these paths exist only on Unix);
-  - listening: `TcpListener::bind` (std and tokio), whose owner will be the API crate, because
-    binding opens a network handle and `bind` with a name resolves it.
+  - local IPC connects: Unix sockets (std's `UnixStream::connect` and `connect_addr`, tokio's
+    `UnixStream::connect` and `UnixSocket::connect`; these paths exist only on Unix) and
+    Windows named pipes (`ClientOptions::open`);
+  - listening: `TcpListener::bind` (std and tokio) and `TcpSocket::listen`, whose owner will be
+    the API crate, because binding opens a network handle and `bind` with a name resolves it.
 
-  Spawning (`tokio::task::{spawn, spawn_blocking, spawn_local}`, the `JoinSet` and `LocalSet`
-  spawns, `Handle`/`Runtime` spawns, `std::thread::{spawn, Builder::spawn, scope}`) is banned
+  Spawning (`tokio::task::{spawn, spawn_blocking, spawn_local}`, every `JoinSet` and `LocalSet`
+  spawn method, the `JoinSet` and `LocalSet` types themselves, because `collect` and `extend`
+  spawn too, `Handle`/`Runtime` spawns, `std::thread::{spawn, Builder::spawn, scope}`) is banned
   outside the runtime, and `Door::new` everywhere but its one owner. These bans cover the
   listed entry points. A dependency that opens sockets itself is kept out by `arch.toml` and
   supply-chain review. `cargo xtask allow-audit` checks owners per lint, not per method, so a
@@ -201,7 +219,7 @@ on the PR-5 branch.
 - **`arch.toml`.**
   - The bin's allow list is explicit and leaves out `uaos-egress` (Amendment 1B).
   - `uaos-module-api` and every Ring 1 crate are banned, transitively, from tokio, hyper,
-    hyper-util, mio, socket2, rustls and the door.
+    hyper-util, mio, socket2, rustls, tokio-rustls and the door.
 - **`deny.toml`.** `ring` is banned, so TLS stays on aws-lc-rs.
 - **Seeded violations:**
   - for the door's behaviour: `egress-dials-private-range`, `egress-numeric-host`,
@@ -209,16 +227,18 @@ on the PR-5 branch.
     `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel` and
     `egress-embedded-local`;
   - for the clippy bans: `egress-ctor-outside-root`, `net-dns-outside-egress`,
-    `net-connect-outside-egress`, `net-udp-outside-egress`, `net-listen-outside-api` and
-    `spawn-outside-supervisor`;
+    `net-resolver-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
+    `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor` and
+    `net-unix-connect-outside-egress`, which runs only on Unix (the CI negative job runs on
+    Linux) and proves the Unix-only paths resolve;
   - for the arch rules: `arch-ring1-depends-on-hyper`.
 
 **Verified.**
-- **17 unit tests**, including six property tests, the breaker's state machine and the
-  dial path's own refusals:
-  - IPv4-mapped addresses follow their IPv4 verdict;
+- **20 unit tests**, including seven property tests, the breaker's state machine (with a
+  stale probe settling late, both ways) and the dial path's own refusals:
+  - IPv4-mapped and NAT64 well-known addresses follow their IPv4 verdict;
   - nothing outside 2000::/3 is public;
-  - every embedding form is refused whatever its inner address;
+  - every other embedding form is refused whatever its inner address;
   - the local network is exactly loopback, private and unique-local, and no embedding form
     is ever local;
   - nothing the standard library calls special is ever allowed.

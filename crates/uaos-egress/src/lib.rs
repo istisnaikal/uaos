@@ -48,7 +48,7 @@ pub mod upstream;
 pub use connect::{CounterSnapshot, MAX_ADDRESSES_TRIED, Stream};
 pub use door::{
     CREDENTIAL_HEADERS, Credential, Door, DoorLimits, EgressRequest, EgressResponse, MAX_IDLE_PER_UPSTREAM,
-    REPLAY_WINDOW,
+    PROBE_RECHECK, REPLAY_WINDOW,
 };
 pub use host::{HostError, HostName};
 pub use resolve::{Resolve, SystemResolver};
@@ -74,7 +74,8 @@ pub enum EgressError {
     /// The upstream's circuit is open.
     #[error("recent attempts failed; retry after {retry_after:?}")]
     CircuitOpen {
-        /// Time until attempts are let through again.
+        /// A hint, not a promise: the time left in the cooldown, or, while a probe is in flight,
+        /// [`PROBE_RECHECK`].
         retry_after: Duration,
     },
     /// The door's own rules refused the request before any contact.
