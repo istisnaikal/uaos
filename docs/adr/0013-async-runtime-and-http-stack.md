@@ -206,8 +206,13 @@ on the PR-5 branch.
   - local IPC: Unix stream connects (std's and tokio's `UnixStream::connect` and
     `connect_addr`, tokio's `UnixSocket::connect`), Unix datagram sockets (std's and tokio's
     `UnixDatagram` `bind`, `unbound`, `connect` and `send_to`, std's `bind_addr`, `connect_addr`
-    and `send_to_addr`, tokio's `UnixSocket::datagram`; these paths exist only on Unix, and
-    std's need no dependency at all) and Windows named-pipe clients (`ClientOptions::open`);
+    and `send_to_addr`, tokio's `pair`, `from_std`, `try_send_to`, `poll_send_to` and
+    `UnixSocket::datagram`), tokio's FIFOs (`unix::pipe::OpenOptions::{open_sender,
+    open_receiver}`) (these paths exist only on Unix, and std's need no dependency at all) and
+    Windows named-pipe clients (`ClientOptions::open`);
+  - the file system: every std `fs` and `Path` call that reads, writes or queries it, outside
+    `uaos-platform`, which owns file access. On Windows a UNC path (`\\host\share`) resolves
+    its host and opens SMB to it, so these are network entry points that need no dependency;
   - listening: `TcpListener::bind` (std and tokio), `TcpSocket::listen`, Unix listeners (std's
     and tokio's `UnixListener::bind` and `bind_addr`, tokio's `UnixSocket::listen`) and Windows
     pipe servers (`ServerOptions::create`), whose owner will be the API crate, because binding
@@ -227,7 +232,17 @@ on the PR-5 branch.
   `crates/uaos-egress/tests/bans.rs` (or `uaos-platform`'s, for `getrandom`): a call of the
   banned item under `#[expect(...)]`, compiled only on the systems where the item exists. A
   ban that stops firing leaves its expectation unfulfilled, which fails clippy in the CI clippy
-  job on Linux, macOS and Windows; a test fails if a ban has no canary. A dependency that opens sockets itself is kept out by `arch.toml` and
+  job on Linux, macOS and Windows. `cargo xtask allow-audit` fails if a ban has no canary
+  (reading `clippy.toml` as TOML, in any layout), and if lints are switched off where no
+  attribute shows: a `clippy.toml` below the root, a member whose `[lints]` is not exactly
+  `workspace = true`, a workspace lint table that does not deny a guarded lint, or Cargo
+  configuration naming `CLIPPY_CONF_DIR` or lint flags.
+
+  **Known residual: network paths for the data directory.** `uaos-platform`'s `Fs`, the owner
+  of file access, does not refuse a UNC or device path. A data directory placed on a network
+  share would put the journal and chunks on another machine and send their I/O over the
+  network. The data directory is chosen by the user's configuration, read by the bin (M3);
+  refusing network paths there is owed with it. A dependency that opens sockets itself is kept out by `arch.toml` and
   supply-chain review. `cargo xtask allow-audit` checks owners per lint, not per method, so a
   file that owns one disallowed method could allow another; review of each `allow` covers that.
   **Known exception:** the system resolver (`tokio::net::lookup_host`) runs `getaddrinfo` on
@@ -248,6 +263,8 @@ on the PR-5 branch.
     `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor`,
     `spawn-through-tokio-executor`, and `clippy-ban-path-unresolved` and
     `clippy-ban-silenced` for the gate itself and its canaries;
+  - for the configuration and canary checks: `clippy-config-nested`, `lints-not-inherited`,
+    `cargo-config-clippy-override`, `clippy-ban-without-canary`;
   - for each `allow-invalid` ban, on its own system: `net-unix-connect-outside-egress`,
     `net-unix-connect-addr-outside-egress`, `net-tokio-unix-connect-outside-egress` and
     `net-unix-socket-connect-outside-egress` (Unix), `net-named-pipe-outside-egress`
@@ -265,8 +282,8 @@ on the PR-5 branch.
   - the local network is exactly loopback, private and unique-local, and no embedding form
     is ever local;
   - nothing the standard library calls special is ever allowed.
-- **The ban canaries** (`tests/bans.rs`), one per `clippy.toml` entry, and the test that
-  every entry has one.
+- **The ban canaries** (`tests/bans.rs`), one per `clippy.toml` entry; the Unix ones were
+  also cross-checked with clippy for a Linux target (all fulfilled; a removed ban fails).
 - **21 integration tests** against loopback mocks. They read what the mock received and the
   door's own counters, and cover:
   - the header policy;
