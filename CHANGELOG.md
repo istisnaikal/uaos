@@ -214,8 +214,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     flags; it reads every mention of a guarded lint in code (macro-built attributes, lint
     groups, old names), refuses `#[path]` and `include!` outside owners, allows only `[alias]`
     in Cargo configuration (names in any case), refuses build scripts (every one `cargo
-    metadata` lists) that set clippy's variables, reads `.rs` files in any case, and checks each
-    canary's shape, its item's type or module included. `cargo xtask clippy` neutralises the
+    metadata` lists) that name one of clippy's variables, reads `.rs` files in any case, and
+    checks each canary's shape: one call of its item, spelled by the item's own path. `cargo
+    xtask clippy` neutralises the
     environment of the clippy it runs (compiler flags, wrapper, clippy's arguments) and pins
     clippy's configuration to the workspace root.
   - **`arch.toml`.** The bin's allow list is now explicit and leaves out the door; the bin
@@ -223,7 +224,7 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     transitively, from network, TLS and async-I/O crates (new `[ring1] ban`, enforced by
     `cargo xtask arch-check`).
   - **`deny.toml`** bans `ring`.
-  - **Seeded violations (40):** `egress-dials-private-range`, `egress-numeric-host`,
+  - **Seeded violations (41):** `egress-dials-private-range`, `egress-numeric-host`,
     `egress-private-reaches-link-local`, `egress-plaintext-resolved`,
     `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel`,
     `egress-embedded-local`, `egress-sends-trace`, `egress-ctor-outside-root`,
@@ -236,14 +237,16 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `allow-audit-path-module`, `allow-audit-nested-target`, `workspace-lints-group-allowed`,
     `clippy-config-case`, `cargo-config-not-alias`, `build-script-clippy-env`,
     `build-script-declared-path`, `canary-malformed`, `canary-calls-another-item`,
+    `canary-copied-from-sibling`,
     `arch-ring1-depends-on-hyper`; on Unix only `net-unix-connect-outside-egress`,
     `net-unix-connect-addr-outside-egress`, `net-tokio-unix-connect-outside-egress`,
     `net-unix-socket-connect-outside-egress`; on Windows only (not run in CI)
     `net-named-pipe-outside-egress`.
-  - **Review:** `docs/reviews/WP3.A5-egress.md`, nine rounds, all resolved: 2 High, 4 Medium,
+  - **Review:** `docs/reviews/WP3.A5-egress.md`, ten rounds, all resolved: 2 High, 4 Medium,
     9 Low; then 1 High, 2 Medium, 7 Low; then 1 Medium, 5 Low; then 1 Medium, 5 Low; then
     2 Medium, 4 Low; then 2 Medium, 2 Low; then 1 High, 2 Medium, 3 Low; then 1 Medium, 7 Low;
-    then 4 Low. Two fixes rest on ADR-0013 Amendment 1, accepted by the maintainer on
+    then 4 Low; then 2 Low. Two fixes rest on ADR-0013 Amendment 1, accepted by the maintainer
+    on
     2026-10-16.
 - Dependencies for the ADR-0013 stack: tokio, hyper 1, hyper-util, http, rustls 0.23
   (aws-lc-rs only), tokio-rustls, rustls-native-certs, and rcgen for tests only.
