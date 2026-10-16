@@ -822,6 +822,73 @@ async fn methods_the_door_does_not_send_are_refused_before_contact() {
     assert_eq!(mock.seen.lock().unwrap().len(), 1);
 }
 
+/// A plain loopback upstream, pinned and declared private, that answers every request with
+/// `raw`, whatever it asked.
+async fn raw_upstream(raw: &'static [u8]) -> Door {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut tcp, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut request = vec![0u8; 8192];
+                let _read = tcp.read(&mut request).await;
+                let _written = tcp.write_all(raw).await;
+                let mut rest = vec![0u8; 64];
+                let _closed = tokio::time::timeout(Duration::from_secs(2), tcp.read(&mut rest)).await;
+            });
+        }
+    });
+    let up = Upstream {
+        id: UpstreamId::new("local"),
+        host: HostName::parse("ollama.lan").unwrap(),
+        port,
+        scheme: Scheme::Http,
+        pinned: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        allow_private: true,
+        trust: Trust::System,
+    };
+    door(vec![up], Table::default(), DoorLimits::default())
+}
+
+/// Round 13, L1: an upstream that answers `101 Switching Protocols` to a request that asked for
+/// no upgrade gets an error, not a response a relay could pass on to its client.
+#[tokio::test]
+async fn a_switching_protocols_answer_is_an_error() {
+    let door = raw_upstream(
+        b"HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: upgrade\r\n\r\nRAW-TUNNEL-BYTES",
+    )
+    .await;
+    let got = door.send(op(1), request(op(1), "local"), None).await;
+    assert!(
+        matches!(
+            got,
+            Err(EgressError::Unreachable("the upstream switched protocols unasked"))
+        ),
+        "a 101 reached the caller: {:?}",
+        got.map(|r| r.status)
+    );
+}
+
+/// Round 13, L2: a body framed by `transfer-encoding` reaches the caller decoded, without the
+/// `content-length` the upstream sent beside it.
+#[tokio::test]
+async fn a_content_length_beside_transfer_encoding_is_dropped() {
+    let door = raw_upstream(
+        b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\ntransfer-encoding: chunked\r\n\r\n1a\r\nabcdefghijklmnopqrstuvwxyz\r\n0\r\n\r\n",
+    )
+    .await;
+    let got = door.send(op(1), request(op(1), "local"), None).await.unwrap();
+    assert!(
+        got.headers.get("content-length").is_none(),
+        "a content-length contradicting the decoded body was forwarded"
+    );
+    assert!(got.headers.get("transfer-encoding").is_none());
+    assert_eq!(
+        &got.body.collect().await.unwrap().to_bytes()[..],
+        b"abcdefghijklmnopqrstuvwxyz"
+    );
+}
+
 /// L2: a caller's `content-length` cannot truncate the body; the door frames it.
 #[tokio::test]
 async fn a_caller_content_length_is_dropped() {

@@ -39,7 +39,7 @@ source = "CLAUDE.md §4 CI merge blocker: fmt/clippy/test"
 lane = "merge"
 status = "active"
 job = "test"
-negative = ["test-failure", "identity-epoch-check-skipped", "egress-dials-private-range", "egress-numeric-host", "egress-private-reaches-link-local", "egress-plaintext-resolved", "egress-breaker-admits-after-cooldown", "egress-probe-stuck-on-cancel", "egress-embedded-local", "egress-sends-trace"]
+negative = ["test-failure", "identity-epoch-check-skipped", "egress-dials-private-range", "egress-numeric-host", "egress-private-reaches-link-local", "egress-plaintext-resolved", "egress-breaker-admits-after-cooldown", "egress-probe-stuck-on-cancel", "egress-embedded-local", "egress-sends-trace", "egress-forwards-switching-protocols", "egress-forwards-contradicting-length", "osfs-doubled-separator-unc"]
 
 # ── supply chain and hygiene ─────────────────────────────────────────────────────────────
 [[gate]]
