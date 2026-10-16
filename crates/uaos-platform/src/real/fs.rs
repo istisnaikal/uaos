@@ -17,6 +17,13 @@ use crate::fs::{AppendFile, Fs, FsError, LockGuard, temp_sibling};
 pub struct OsFs;
 
 /// Refuses a path that is not on a local disk.
+#[cfg_attr(
+    not(windows),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "only Windows has network and device path spellings to refuse"
+    )
+)]
 fn local(path: &Path, op: &'static str) -> Result<(), FsError> {
     #[cfg(windows)]
     {
