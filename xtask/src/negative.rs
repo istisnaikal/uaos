@@ -520,8 +520,8 @@ pub(crate) fn cases() -> Vec<Case> {
             // Review WP3.A5 round 13, L2: a content-length beside transfer-encoding forwarded.
             seed: replace(
                 "crates/uaos-egress/src/door.rs",
-                "        headers.remove(header::CONTENT_LENGTH);\n        return Ok(());",
-                "        return Ok(());",
+                "        }\n        headers.remove(header::CONTENT_LENGTH);\n        return Ok(());",
+                "        }\n        return Ok(());",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -564,12 +564,33 @@ pub(crate) fn cases() -> Vec<Case> {
             gate: "test",
             tool: None,
             // Review WP3.A5 round 14, L2: a repeated content-length passed on as is.
-            seed: replace("crates/uaos-egress/src/door.rs", "    if lengths.len() > 1 {", "    if lengths.len() > 1 && false {"),
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "            headers.insert(header::CONTENT_LENGTH, single);",
+                "            let _ = single;",
+            ),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-egress", "--test", "door", "a_repeated_content_length_is_forwarded_once"],
             },
             expect: "a repeated content-length was forwarded",
+        },
+        Case {
+            id: "egress-forwards-bodiless-length",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 15, L2: a 204 forwarded with the content-length it should not
+            // carry.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "    if status == StatusCode::NO_CONTENT {",
+                "    if status == StatusCode::NO_CONTENT && status.as_u16() == 0 {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "content_length_on_answers_without_a_body"],
+            },
+            expect: "a 204 kept its content-length",
         },
         Case {
             id: "osfs-bare-volume",

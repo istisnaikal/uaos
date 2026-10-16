@@ -178,27 +178,32 @@ pub const CREDENTIAL_HEADERS: [&str; 9] = [
 ];
 
 /// Makes the response's framing headers describe the body the caller receives, which hyper has
-/// already de-framed (review WP3.A5, rounds 13 and 14):
-/// * a transfer coding other than `chunked` is an error: the door asks for none (it strips
-///   `te`), and hyper decodes only `chunked`, so a coded body would reach the caller unmarked
-///   once `transfer-encoding` is stripped as hop-by-hop;
+/// already de-framed (review WP3.A5, rounds 13 to 15):
+/// * `transfer-encoding` must be exactly what hyper decodes, one field whose value is `chunked`;
+///   anything else is an error. The door asks for no coding (it strips `te`), and another
+///   coding, `chunked` twice, an empty element after it or a second field would leave the body
+///   still coded or still framed once `transfer-encoding` is stripped as hop-by-hop;
 /// * a `content-length` beside `transfer-encoding` is dropped (RFC 9112 §6.3);
-/// * a repeated `content-length` (as a list or as several fields, which hyper accepts only when
-///   all are equal) is forwarded once.
-fn frame_for_caller(headers: &mut HeaderMap) -> Result<(), EgressError> {
+/// * a `204 No Content` keeps no `content-length`;
+/// * otherwise `content-length` is forwarded as one value when all its values (as a list or as
+///   several fields) are the same digits, and dropped when not. hyper checks them only where it
+///   reads a body; for a HEAD request or a `304` they describe the resource, unchecked.
+fn frame_for_caller(headers: &mut HeaderMap, status: StatusCode) -> Result<(), EgressError> {
     if headers.contains_key(header::TRANSFER_ENCODING) {
-        let chunked_only = headers
-            .get_all(header::TRANSFER_ENCODING)
-            .iter()
-            .flat_map(|v| v.to_str().unwrap_or("?").split(','))
-            .map(str::trim)
-            .filter(|coding| !coding.is_empty())
-            .all(|coding| coding.eq_ignore_ascii_case("chunked"));
+        let mut fields = headers.get_all(header::TRANSFER_ENCODING).iter();
+        let chunked_only = match (fields.next(), fields.next()) {
+            (Some(only), None) => only.to_str().is_ok_and(|v| v.trim().eq_ignore_ascii_case("chunked")),
+            _ => false,
+        };
         if !chunked_only {
             return Err(EgressError::Unreachable(
                 "the upstream used a transfer coding the door does not decode",
             ));
         }
+        headers.remove(header::CONTENT_LENGTH);
+        return Ok(());
+    }
+    if status == StatusCode::NO_CONTENT {
         headers.remove(header::CONTENT_LENGTH);
         return Ok(());
     }
@@ -208,14 +213,16 @@ fn frame_for_caller(headers: &mut HeaderMap) -> Result<(), EgressError> {
         .flat_map(|v| v.to_str().unwrap_or_default().split(','))
         .map(|l| l.trim().to_owned())
         .collect();
-    if lengths.len() > 1 {
-        match lengths.first().and_then(|l| HeaderValue::from_str(l).ok()) {
-            Some(single) => {
-                headers.insert(header::CONTENT_LENGTH, single);
-            }
-            None => {
-                headers.remove(header::CONTENT_LENGTH);
-            }
+    let Some(first) = lengths.first() else {
+        return Ok(());
+    };
+    let one = !first.is_empty() && first.bytes().all(|b| b.is_ascii_digit()) && lengths.iter().all(|l| l == first);
+    match HeaderValue::from_str(first).ok().filter(|_| one) {
+        Some(single) => {
+            headers.insert(header::CONTENT_LENGTH, single);
+        }
+        None => {
+            headers.remove(header::CONTENT_LENGTH);
         }
     }
     Ok(())
@@ -418,8 +425,8 @@ impl Door {
     /// client, even a failed one, a retry needs a new Operation. The URI is built from the
     /// upstream's own name and port, so nothing in the request can redirect it. The credential
     /// is inserted last. Redirects are returned, never followed. A `101 Switching Protocols`
-    /// answer and a transfer coding other than `chunked` are errors; the response's framing
-    /// headers are made to describe the de-framed body (see `frame_for_caller`).
+    /// answer and any `transfer-encoding` but one `chunked` field are errors; the response's
+    /// framing headers are made to describe the de-framed body (see `frame_for_caller`).
     ///
     /// # Errors
     /// [`EgressError`].
@@ -522,7 +529,7 @@ impl Door {
             return Err(EgressError::Unreachable("the upstream switched protocols unasked"));
         }
         let mut headers = parts.headers;
-        frame_for_caller(&mut headers)?;
+        frame_for_caller(&mut headers, parts.status)?;
         strip_hop_by_hop(&mut headers);
         Ok(EgressResponse {
             status: parts.status,

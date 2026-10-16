@@ -10,7 +10,7 @@ Low findings fixed or accepted with a reason. Two fixes change accepted decision
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
 fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
 1 Medium and 5 Low, a fifth 2 Medium and 4 Low, a sixth 2 Medium and 2 Low, a seventh
-1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, an eleventh 3 Low, a twelfth 2 Low, a thirteenth 1 Medium and 2 Low, and a fourteenth 2 Low, all resolved below. The PR stays a draft until a review comes back clean.
+1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, an eleventh 3 Low, a twelfth 2 Low, a thirteenth 1 Medium and 2 Low, a fourteenth 2 Low, and a fifteenth 2 Low, all resolved below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -335,3 +335,25 @@ hand on Windows, and `.invalid` never resolves.
 **Verified locally (Windows, dedicated target directory):** 24 egress unit and 26 integration
 tests; 24 platform tests; 29 xtask tests; `cargo xtask clippy`, `allow-audit`; all 51 egress
 negatives, of which 47 PROVEN here and the four Unix ones left to Linux CI.
+
+## Fifteenth review (2026-10-16)
+
+**Reviewed:** `88eb134` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export, weighted toward the door and `OsFs`. **Result:** 0 High · 0 Medium · 2 Low, both in
+the fourteenth round's `frame_for_caller`. `OsFs` held against every spelling tried (device
+namespaces, volume GUIDs, `\\?\` with forward slashes and lowercase `unc`, drive-relative paths,
+alternate data streams, trailing dots and spaces), and nothing in the door reaches a refused
+address, leaks a credential, gets past TLS, retries or redirects.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | The fourteenth round's "only `chunked`" check read the codings differently from hyper, which looks only at the last element of the last field: `transfer-encoding: chunked,` (an empty last element), `chunked` followed by an empty second field, and `chunked, chunked` passed the door while hyper left the body framed, so the caller got chunked framing as the body with both framing headers stripped | `transfer-encoding` must be exactly what hyper decodes: one field whose trimmed value is `chunked`, in any case; anything else is the existing error | `a_transfer_coding_other_than_chunked_is_an_error` with all four spellings; checked to fail with the fourteenth round's reading put back; negative `egress-forwards-unknown-transfer-coding` **PROVEN** |
+| L2 | The doc said a repeated `content-length` passes only when all are equal, but hyper checks it only where it reads a body: for a HEAD request, a `204` or a `304` it passed unchecked (`5, 7`, `100` on a `204`, `abc, 9`, non-UTF-8 bytes) | A `204` keeps no `content-length`; otherwise it is forwarded as one value only when all its values are the same digits, and dropped when not; the doc comment, ADR-0013 and the CHANGELOG say so. The T5 row's wording is fixed | `content_length_on_answers_without_a_body`; negative `egress-forwards-bodiless-length` **PROVEN** |
+
+Also found while verifying: the round-13 and round-14 negatives' seed anchors moved with the code
+(one now matched two sites, one none); the anchor-uniqueness check caught both, and each names its
+own site again.
+
+**Verified locally (Windows, dedicated target directory):** 24 egress unit and 27 integration
+tests; 24 platform tests; 29 xtask tests; `cargo xtask clippy`, `allow-audit`; all 52 egress
+negatives, of which 48 PROVEN here and the four Unix ones left to Linux CI.
