@@ -182,11 +182,14 @@ on the PR-5 branch.
     transparent retry is switched off. A `101 Switching Protocols` answer is an error: nothing
     the door sends asks for an upgrade, and passed on it would let a relay switch its client's
     connection. The response's framing headers describe the body the caller receives, which
-    hyper has de-framed: a transfer coding other than `chunked` is an error (the door strips
-    `te`, so it asks for none, and hyper decodes only `chunked`; a coded body would otherwise
-    reach the caller unmarked), a `content-length` beside `transfer-encoding` is dropped (RFC
-    9112 §6.3), and a repeated `content-length` is forwarded once. The relay frames the body it
-    forwards.
+    hyper has de-framed. `transfer-encoding` must be exactly what hyper decodes, one field
+    whose value is `chunked`; anything else (another coding, `chunked` twice, an empty element
+    after it, a second field) is an error, since the door asks for no coding (it strips `te`)
+    and the body would otherwise reach the caller still coded or still framed. A
+    `content-length` beside `transfer-encoding` is dropped (RFC 9112 §6.3), a `204` keeps none,
+    and otherwise `content-length` is forwarded as one value when all its values are the same
+    digits and dropped when not: hyper checks them only where it reads a body, and for a HEAD
+    request or a `304` they describe the resource. The relay frames the body it forwards.
   - **Breaker:** each upstream has a circuit that counts only transport failures and, after its
     cooldown, lets exactly one probe through. Every admitted attempt is settled exactly once,
     also when its caller drops the request: a cancelled probe lets the next attempt probe. Each
@@ -317,8 +320,9 @@ on the PR-5 branch.
     `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel`,
     `egress-embedded-local`, `egress-sends-trace`, `egress-forwards-switching-protocols` and
     `egress-forwards-contradicting-length`, `egress-forwards-unknown-transfer-coding` and
-    `egress-forwards-repeated-length`, and `osfs-doubled-separator-unc` and `osfs-bare-volume`
-    (Windows) for the platform's file system;
+    `egress-forwards-repeated-length` and `egress-forwards-bodiless-length`, and
+    `osfs-doubled-separator-unc` and `osfs-bare-volume` (Windows) for the platform's file
+    system;
   - for the clippy bans: `egress-ctor-outside-root`, `net-dns-outside-egress`,
     `net-resolver-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
     `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor`,
@@ -351,7 +355,7 @@ on the PR-5 branch.
   - nothing the standard library calls special is ever allowed.
 - **The ban canaries** (`tests/bans.rs`), one per `clippy.toml` entry; the Unix ones were
   also cross-checked with clippy for a Linux target (all fulfilled; a removed ban fails).
-- **26 integration tests** against loopback mocks. They read what the mock received and the
+- **27 integration tests** against loopback mocks. They read what the mock received and the
   door's own counters, and cover:
   - the header policy;
   - op binding and replay;
@@ -370,9 +374,10 @@ on the PR-5 branch.
   - a path without a leading `/` refused without consuming the Operation;
   - TRACE, CONNECT and an extension method refused before contact, without consuming the
     Operation;
-  - a `101 Switching Protocols` answer and a transfer coding other than `chunked` returned as
-    errors, a `content-length` beside `transfer-encoding` dropped from the response, and a
-    repeated one forwarded once;
+  - a `101 Switching Protocols` answer and any `transfer-encoding` but one `chunked` field
+    returned as errors (four spellings); a `content-length` beside `transfer-encoding`
+    dropped, a repeated one forwarded once, none kept on a `204`, and an unchecked one on a
+    HEAD answer or a `304` forwarded only as one length in digits;
   - the address cap;
   - the credential never printed;
   - **a certificate naming issuer, OCSP and CRL URLs on a local listener: the handshake fails
