@@ -43,7 +43,7 @@ use uaos_platform::sim::fs::SimFs;
 use uaos_platform::sim::{SimClock, SimRng};
 use uaos_platform::{Clock, Rng};
 use uaos_state::chunks::keyring::{KekVersion, MemoryKeyring, PocketKeyring};
-use uaos_state::chunks::{CHUNKS_DIR, ChunkDurability, ChunkError, ChunkStore, QUARANTINE_DIR};
+use uaos_state::chunks::{CHUNKS_DIR, ChunkDurability, ChunkError, ChunkStore, MAX_PENDING, QUARANTINE_DIR};
 use uaos_state::journal::{
     CHUNK_METADATA_KEY, EventDraft, FlushPolicy, JOURNAL_DIR, Journal, JournalError, JournalHealth,
     RECORD_SEQ_METADATA_KEY, read_verified,
@@ -112,6 +112,10 @@ struct FaultFs {
     key_write: Arc<Gate>,
     /// The first key-file rename (quarantine).
     key_rename: Arc<Gate>,
+    /// The next key-file rename fails, once.
+    fail_key_rename: Arc<AtomicBool>,
+    /// The next key-file removal fails, once.
+    fail_key_remove: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -141,6 +145,13 @@ impl AppendFile for FaultAppend {
     }
     fn os_len(&self) -> Result<u64, FsError> {
         self.inner.os_len()
+    }
+}
+
+fn injected(op: &'static str) -> FsError {
+    FsError::Io {
+        op,
+        kind: "injected".to_owned(),
     }
 }
 
@@ -179,10 +190,16 @@ impl Fs for FaultFs {
     fn rename(&self, from: &Path, to: &Path) -> Result<(), FsError> {
         if is_key(from) {
             self.key_rename.hold_if_armed();
+            if self.fail_key_rename.swap(false, Ordering::SeqCst) {
+                return Err(injected("rename"));
+            }
         }
         self.sim.rename(from, to)
     }
     fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+        if is_key(path) && self.fail_key_remove.swap(false, Ordering::SeqCst) {
+            return Err(injected("remove"));
+        }
         self.sim.remove_file(path)
     }
     fn sync_dir(&self, path: &Path) -> Result<(), FsError> {
@@ -236,6 +253,8 @@ impl World {
                 segment_append_fault: Arc::new(Mutex::new(None)),
                 key_write: Arc::new(Gate::default()),
                 key_rename: Arc::new(Gate::default()),
+                fail_key_rename: Arc::new(AtomicBool::new(false)),
+                fail_key_remove: Arc::new(AtomicBool::new(false)),
             },
             sim,
             clock: Arc::new(SimClock::new(
@@ -990,6 +1009,429 @@ fn n4_open_copies_the_previous_runs_records_instead_of_flushing_their_file_again
     }
 }
 
+// ── Second review of the fixes (WP3.A1, second round) ──────────────────────────────────────
+
+/// Stops all I/O right after the `n`th successful MANIFEST write: the machine dies at that
+/// instant. Used to cut an open between its manifest write and whatever follows.
+#[derive(Debug, Clone)]
+struct DieFs {
+    inner: FaultFs,
+    manifests_left: Arc<Mutex<u32>>,
+    dead: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct DieAppend {
+    inner: Box<dyn AppendFile>,
+    dead: Arc<AtomicBool>,
+}
+
+impl AppendFile for DieAppend {
+    fn append(&mut self, bytes: &[u8]) -> Result<(), FsError> {
+        if self.dead.load(Ordering::SeqCst) {
+            return Err(injected("dead"));
+        }
+        self.inner.append(bytes)
+    }
+    fn sync_data(&mut self) -> Result<(), FsError> {
+        if self.dead.load(Ordering::SeqCst) {
+            return Err(injected("dead"));
+        }
+        self.inner.sync_data()
+    }
+    fn os_len(&self) -> Result<u64, FsError> {
+        self.inner.os_len()
+    }
+}
+
+impl DieFs {
+    fn new(inner: FaultFs, manifests: u32) -> Self {
+        Self {
+            inner,
+            manifests_left: Arc::new(Mutex::new(manifests)),
+            dead: Arc::new(AtomicBool::new(false)),
+        }
+    }
+    fn alive(&self) -> Result<(), FsError> {
+        if self.dead.load(Ordering::SeqCst) {
+            Err(injected("dead"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Fs for DieFs {
+    fn create_dir_all(&self, p: &Path) -> Result<(), FsError> {
+        self.alive()?;
+        self.inner.create_dir_all(p)
+    }
+    fn open_append(&self, p: &Path) -> Result<Box<dyn AppendFile>, FsError> {
+        self.alive()?;
+        Ok(Box::new(DieAppend {
+            inner: self.inner.open_append(p)?,
+            dead: Arc::clone(&self.dead),
+        }))
+    }
+    fn read(&self, p: &Path) -> Result<Vec<u8>, FsError> {
+        self.alive()?;
+        self.inner.read(p)
+    }
+    fn list_dir(&self, p: &Path) -> Result<Vec<PathBuf>, FsError> {
+        self.alive()?;
+        self.inner.list_dir(p)
+    }
+    fn rename(&self, a: &Path, b: &Path) -> Result<(), FsError> {
+        self.alive()?;
+        self.inner.rename(a, b)
+    }
+    fn remove_file(&self, p: &Path) -> Result<(), FsError> {
+        self.alive()?;
+        self.inner.remove_file(p)
+    }
+    fn sync_dir(&self, p: &Path) -> Result<(), FsError> {
+        self.alive()?;
+        self.inner.sync_dir(p)
+    }
+    fn write_atomic(&self, p: &Path, b: &[u8]) -> Result<(), FsError> {
+        self.alive()?;
+        let written = self.inner.write_atomic(p, b);
+        if written.is_ok() && p.file_name().and_then(|n| n.to_str()) == Some("MANIFEST") {
+            let mut left = self.manifests_left.lock().unwrap();
+            if *left == 0 {
+                self.dead.store(true, Ordering::SeqCst);
+            } else {
+                *left -= 1;
+            }
+        }
+        written
+    }
+    fn write_unsynced(&self, p: &Path, b: &[u8]) -> Result<(), FsError> {
+        self.alive()?;
+        self.inner.write_unsynced(p, b)
+    }
+    fn sync_file(&self, p: &Path) -> Result<(), FsError> {
+        self.alive()?;
+        self.inner.sync_file(p)
+    }
+    fn try_lock_exclusive(&self, p: &Path) -> Result<Box<dyn LockGuard>, FsError> {
+        self.alive()?;
+        self.inner.try_lock_exclusive(p)
+    }
+}
+
+/// Second-round H1: the previous run flushed three records with its marker lagging, then
+/// crashed. The next open dies right after its first manifest write and the power goes: the
+/// records it had acknowledged as durable must survive.
+#[test]
+fn r2_h1_a_power_loss_during_open_keeps_what_the_previous_run_flushed() {
+    let w = World::new(900);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    for n in 0..3 {
+        write(&store, &mut j, n);
+    }
+    j.sync().unwrap();
+    let flushed = j.flushed_through().unwrap().0;
+    drop(j);
+    drop(store);
+    w.sim.crash();
+
+    let store = w.store();
+    let die = DieFs::new(w.fs.clone(), 0);
+    let clock: Arc<dyn Clock> = w.clock.clone();
+    let rng: Arc<dyn Rng> = w.rng.clone();
+    let opened = Journal::open_with_payloads(Arc::new(die.clone()), clock, rng, &w.data, NEVER, Arc::clone(&store));
+    assert!(die.dead.load(Ordering::SeqCst), "the open stored a manifest");
+    assert!(opened.is_err());
+    drop(opened);
+    drop(store);
+    w.sim.power_loss();
+    let (_store, _j) = w.restart(false);
+    let present: BTreeSet<u64> = w.survey().0.iter().map(|r| r.0).collect();
+    assert!(
+        (0..=flushed).all(|s| present.contains(&s)),
+        "records flushed and acknowledged by the previous run vanished: present {present:?}"
+    );
+}
+
+/// Second-round H1, with faults: whatever flush or append fails during the open, and whether a
+/// crash or a power loss follows, the records the previous run flushed survive.
+#[test]
+fn r2_h1_a_failed_open_keeps_what_the_previous_run_flushed() {
+    let mut failures = Vec::new();
+    for power in [false, true] {
+        for keep_cache in [false, true] {
+            for k in 0..30u32 {
+                let w = World::new(901);
+                w.sim.set_failed_sync_keeps_cache(keep_cache);
+                let store = w.store();
+                let mut j = w.open(&store).unwrap();
+                for n in 0..3 {
+                    write(&store, &mut j, n);
+                }
+                j.sync().unwrap();
+                let flushed = j.flushed_through().unwrap().0;
+                drop(j);
+                drop(store);
+                w.sim.crash();
+                w.fs.fail_segment_append_after(1);
+                w.sim.fail_sync_after(k);
+                let store = w.store();
+                let first = w.open(&store);
+                let failed = first.is_err();
+                drop(first);
+                drop(store);
+                w.fs.clear_append_fault();
+                let (_s, _j) = w.restart(power);
+                let present: BTreeSet<u64> = w.survey().0.iter().map(|r| r.0).collect();
+                if !(0..=flushed).all(|s| present.contains(&s)) {
+                    failures.push(format!(
+                        "power {power}, cache kept {keep_cache}, fault after {k}, open failed {failed}: present {present:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "flushed records lost:\n{}", failures.join("\n"));
+}
+
+/// Second-round L1: a store poisoned before the journal attached is recovered at open, and the
+/// marker is still written, so the journal cannot then be opened without its store.
+#[test]
+fn r2_l1_a_store_poisoned_before_the_journal_attached_is_recovered_at_open() {
+    let w = World::new(902);
+    let store = w.store();
+    store.put(pocket(), &content(1)).unwrap();
+    w.sim.fail_next_sync();
+    assert!(store.sync_pending().is_err());
+    let j = w.open(&store).unwrap();
+    assert_eq!(j.health(), JournalHealth::Healthy);
+    assert!(!store.is_poisoned(), "open left the store poisoned");
+    drop(j);
+    drop(store);
+    w.sim.crash();
+    let clock: Arc<dyn Clock> = w.clock.clone();
+    let rng: Arc<dyn Rng> = w.rng.clone();
+    let plain = Journal::open(Arc::new(w.fs.clone()), clock, rng, &w.data, NEVER);
+    assert_eq!(
+        plain.err(),
+        Some(JournalError::PayloadsRequired),
+        "a coordinated journal opened without its store"
+    );
+}
+
+/// Second-round M1 (1): recovery from a full disk while a loss waits to be journaled moves the
+/// unflushed records without flushing them, so a power loss cannot leave a record durable
+/// ahead of its loss record.
+#[test]
+fn r2_m1_disk_full_recovery_never_flushes_a_record_before_its_loss_record() {
+    let w = World::new(903);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, _) = write(&store, &mut j, 1);
+    w.sim.fail_next_sync(); // the chunk's data file: the OS drops its unflushed pages
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    w.fs.fail_segment_append_after(0);
+    assert!(j.recover().is_err(), "the loss record could not be appended");
+    // The next recovery moves the records, then its loss-record append fails again.
+    w.fs.fail_segment_append_after(1);
+    assert!(j.recover().is_err());
+    drop(j);
+    drop(store);
+    w.sim.power_loss();
+    let (records, reported, _) = w.survey();
+    assert!(
+        !records.iter().any(|(s, _, _)| *s == seq) || reported.contains(&seq),
+        "the record became durable before its loss record"
+    );
+}
+
+/// Second-round M1 (2): the same after a failed relocation (`FlushFailed`): retrying it does not
+/// flush the records ahead of their loss record either.
+#[test]
+fn r2_m1_a_failed_relocation_never_flushes_a_record_before_its_loss_record() {
+    let w = World::new(904);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, _) = write(&store, &mut j, 1);
+    w.sim.fail_next_sync();
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    w.fs.fail_segment_append_after(0);
+    assert!(j.recover().is_err(), "the loss record could not be appended");
+    w.fs.fail_segment_append_after(0); // the relocation's own append fails
+    assert!(j.recover().is_err());
+    assert_eq!(j.health(), JournalHealth::FlushFailed);
+    w.fs.fail_segment_append_after(1); // the relocation succeeds, the loss record fails again
+    assert!(j.recover().is_err());
+    drop(j);
+    drop(store);
+    w.sim.power_loss();
+    let (records, reported, _) = w.survey();
+    assert!(
+        !records.iter().any(|(s, _, _)| *s == seq) || reported.contains(&seq),
+        "the record became durable before its loss record"
+    );
+}
+
+/// Second-round M1 (4): a pair left unflushed by an earlier process is rewritten, flushed,
+/// before a record may reference it, so a power loss after the marker passed the record
+/// cannot take the payload.
+#[test]
+fn r2_m1_is_stored_rewrites_an_earlier_processs_unflushed_pair() {
+    let w = World::new(905);
+    let store = w.store();
+    let x = store.put(pocket(), &content(1)).unwrap(); // never flushed, no record
+    drop(store);
+    w.sim.crash();
+    let (store, mut j) = w.restart(false);
+    j.append(draft(Some(pocket()), Some(x), 1)).unwrap();
+    w.clock.advance(1_100_000_000);
+    j.sync().unwrap(); // the marker now passes the record
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    assert!(
+        store.get(pocket(), x).is_ok() || w.survey().1.contains(&0),
+        "a record became durable over a payload only an earlier process had written"
+    );
+}
+
+/// Second-round M1 (5): a pending chunk whose files vanished is a flush failure, never success.
+#[test]
+fn r2_m1_a_pending_file_removed_underneath_is_a_flush_failure() {
+    let w = World::new(906);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, x) = write(&store, &mut j, 1);
+    let name = x.to_string();
+    let key_file = w
+        .data
+        .join(CHUNKS_DIR)
+        .join(pocket().to_string())
+        .join("keys")
+        .join(format!("{}.key", name.strip_prefix("hmac-sha256:").unwrap()));
+    w.sim.remove_file(&key_file).unwrap();
+    assert_eq!(
+        j.sync(),
+        Err(JournalError::PayloadFlushFailed),
+        "a flush succeeded although a pending payload's file was gone"
+    );
+    j.recover().unwrap();
+    assert_eq!(j.lost_payloads().len(), 1);
+    assert_eq!(j.lost_payloads()[0].record_seq.0, seq);
+}
+
+/// Second-round M1 (6): a loss found by recovery survives a failed quarantine and is reported
+/// by the next recovery.
+#[test]
+fn r2_m1_a_failed_quarantine_never_drops_a_loss() {
+    let w = World::new(907);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, _) = write(&store, &mut j, 1);
+    w.sim.fail_next_sync();
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    w.fs.fail_key_rename.store(true, Ordering::SeqCst); // the quarantine fails
+    assert!(j.recover().is_err());
+    j.recover().unwrap();
+    assert_eq!(
+        j.lost_payloads().iter().map(|l| l.record_seq.0).collect::<Vec<_>>(),
+        vec![seq],
+        "the loss was dropped by the failed quarantine"
+    );
+}
+
+/// Second-round L2: in balanced mode a failed directory flush poisons the store.
+#[test]
+fn r2_l2_a_failed_directory_flush_poisons_a_balanced_store() {
+    let w = World::new(908);
+    let store = w.store();
+    let keep = store.put(pocket(), &content(1)).unwrap();
+    let doomed = store.put(pocket(), &content(2)).unwrap();
+    store.sync_pending().unwrap();
+    let _pending = store.put(pocket(), &content(3)).unwrap();
+    w.sim.fail_next_sync(); // the shred's first directory flush
+    assert!(store.shred(pocket(), doomed).is_err());
+    assert!(store.is_poisoned(), "a failed directory flush did not poison the store");
+    assert_eq!(store.put(pocket(), &content(4)), Err(ChunkError::FlushFailed));
+    assert!(store.get(pocket(), keep).is_ok());
+}
+
+/// Second-round L5: puts past the pending bound are refused, and a journal flush clears it.
+#[test]
+fn r2_l5_pending_full_is_refused_and_cleared_by_a_flush() {
+    let w = World::new(909);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let base = 1_000_000u64;
+    for n in 0..u64::try_from(MAX_PENDING).unwrap() {
+        store.put(pocket(), &content(base + n)).unwrap();
+    }
+    assert_eq!(store.put(pocket(), &content(1)), Err(ChunkError::PendingFull));
+    j.append(draft(None, None, 1)).unwrap();
+    j.sync().unwrap();
+    assert_eq!(store.pending_len(), 0);
+    store.put(pocket(), &content(1)).unwrap();
+}
+
+/// A shred whose record is durable but whose files a crash left behind is completed when the
+/// journal opens; without that, the store's startup re-wraps the leftover key and the content
+/// stays readable (pre-existing, found by the second review).
+#[test]
+fn a_shred_interrupted_after_its_record_is_completed_at_open() {
+    let w = World::new(910);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    let (_, y) = write(&store, &mut j, 2);
+    j.sync().unwrap();
+    j.append(shredded_record(x, 3)).unwrap();
+    j.sync().unwrap(); // write-ahead: the shred's record is durable first
+    w.fs.fail_key_remove.store(true, Ordering::SeqCst);
+    assert!(
+        store.shred(pocket(), x).is_err(),
+        "the KEK rotated, then the removal failed"
+    );
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    assert_eq!(
+        store.get(pocket(), x).err(),
+        Some(ChunkError::Unavailable),
+        "content whose shred was journaled is still readable"
+    );
+    assert_eq!(store.get(pocket(), y).ok(), Some(content(2)));
+    w.assert_never_silent(&store, "interrupted shred");
+}
+
+/// A shred is completed at open only once its record is durable. Here the record was with the
+/// OS only, the open fails before its flush, and the power goes: the record is gone, so the
+/// content it named must still be there (found by the crash schedules in the second round).
+#[test]
+fn r2_a_shred_is_completed_only_once_its_record_is_durable() {
+    let w = World::new(911);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    j.sync().unwrap();
+    j.append(shredded_record(x, 2)).unwrap(); // with the OS only; the shred never ran
+    drop(j);
+    drop(store);
+    w.sim.crash();
+    w.fs.fail_segment_append_after(0); // the open's copy of the shred record fails
+    let store = w.store();
+    assert!(w.open(&store).is_err());
+    drop(store);
+    w.sim.power_loss(); // the shred record is gone
+    let store = w.store();
+    assert_eq!(
+        store.get(pocket(), x).ok(),
+        Some(content(1)),
+        "a shred ran on a record a power loss took away"
+    );
+}
+
 // ── Random crash schedules ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -1119,17 +1561,25 @@ proptest! {
                     // A failed open must not cost anything the OS held (it copies the previous
                     // run's records instead of flushing their file again).
                     store = w.store();
+                    // After a failed open, the machine either crashes or loses power (alternating
+                    // by schedule); after a power loss only flushed records are owed.
+                    let mut lost_power = power;
                     journal = if let Ok(j) = w.open(&store) {
                         j
                     } else {
                         w.sim.fail_sync_after(u32::MAX);
                         w.fs.clear_append_fault();
                         drop(store);
-                        w.sim.crash();
+                        if acked.len().is_multiple_of(2) {
+                            w.sim.power_loss();
+                            lost_power = true;
+                        } else {
+                            w.sim.crash();
+                        }
                         store = w.store();
                         w.open(&store).unwrap()
                     };
-                    check(&w, &store, &acked, flushed, power, os_holds_unflushed, &reported_before);
+                    check(&w, &store, &acked, flushed, lost_power, os_holds_unflushed, &reported_before);
                     let (records, _, _) = w.survey();
                     let present: BTreeSet<u64> = records.iter().map(|(s, _, _)| *s).collect();
                     acked.retain(|s, _| present.contains(s));

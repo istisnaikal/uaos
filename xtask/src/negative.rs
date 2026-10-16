@@ -1230,21 +1230,14 @@ pub(crate) fn cases() -> Vec<Case> {
             seed: both(
                 replace(
                     "crates/uaos-state/src/journal/writer.rs",
-                    "        journal.report_lost()?;
-        journal.sync()?;
-        journal.update_marker(true).map_err(storage)?;",
-                    "        journal.sync()?;
-        journal.update_marker(true).map_err(storage)?;
-        journal.report_lost()?;",
+                    "        journal.report_lost()?;\n        journal.sync()?;\n        journal.store_manifest_if_unstored()?;\n",
+                    "        journal.sync()?;\n        journal.store_manifest_if_unstored()?;\n        journal.update_marker(true).map_err(storage)?;\n        journal.report_lost()?;\n",
                 ),
                 both(
                     replace(
                         "crates/uaos-state/src/journal/writer.rs",
-                        "        if !self.unreported.is_empty() || store.has_untaken_losses() || store.is_poisoned() {
-            return Ok(());
-        }
-",
-                        "",
+                        "        if !self.unreported.is_empty() || store.has_untaken_losses() || store.is_poisoned() || self.manifest_unstored {",
+                        "        let _ = store;\n        if self.manifest_unstored {",
                     ),
                     replace(
                         "crates/uaos-state/src/journal/writer.rs",
@@ -1268,6 +1261,121 @@ pub(crate) fn cases() -> Vec<Case> {
                 ],
             },
             expect: "has an unreadable payload and no chunk.lost record",
+        },
+        Case {
+            id: "open-stores-manifest-before-flush",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 second round H1: an open that disowns the old copies before the new ones are durable.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "    file.append(tail).map_err(storage)?;\n    let lines",
+                "    file.append(tail).map_err(storage)?;\n    manifest.store(fs, dir)?;\n    let lines",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "r2_h1_a_power_loss_during_open_keeps_what_the_previous_run_flushed",
+                ],
+            },
+            expect: "vanished",
+        },
+        Case {
+            id: "is-stored-trusts-earlier-pair",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 second round M1: a store that vouches for an earlier process's pair without rewriting it.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "                self.adopt(key, &content, Some(data_key), Flush::Now)?;\n                Ok(true)",
+                "                drop((content, data_key));\n                self.remember(key);\n                Ok(true)",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "r2_m1_is_stored_rewrites_an_earlier_processs_unflushed_pair",
+                ],
+            },
+            expect: "only an earlier process had written",
+        },
+        Case {
+            id: "flush-skips-missing-pending-file",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 second round M1: a flush that treats a vanished pending file as flushed.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "                self.fs.sync_file(&path).map_err(storage)?;",
+                "                match self.fs.sync_file(&path) {\n                    Ok(()) | Err(FsError::NotFound { .. }) => {}\n                    Err(e) => return Err(storage(e)),\n                }",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "r2_m1_a_pending_file_removed_underneath_is_a_flush_failure",
+                ],
+            },
+            expect: "pending payload's file was gone",
+        },
+        Case {
+            id: "loss-set-aside-after-quarantine",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 second round M1: recovery that remembers a loss only once its quarantine succeeded.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "            // Set aside first: from here on the loss is remembered whatever fails next.\n            locked(&self.lost).push(LostChunk {\n                pocket: key.0,\n                chunk: key.1,\n                cause,\n            });\n            self.forget(key);\n            self.quarantine_pair(key.0, key.1)?;",
+                "            self.forget(key);\n            self.quarantine_pair(key.0, key.1)?;\n            locked(&self.lost).push(LostChunk {\n                pocket: key.0,\n                chunk: key.1,\n                cause,\n            });",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "r2_m1_a_failed_quarantine_never_drops_a_loss",
+                ],
+            },
+            expect: "dropped by the failed quarantine",
+        },
+        Case {
+            id: "shred-not-completed-at-open",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 second round: a journaled shred a crash interrupted, left readable.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "                if store.has_pair(pocket, chunk).map_err(JournalError::Payload)? {",
+                "                if false && store.has_pair(pocket, chunk).map_err(JournalError::Payload)? {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "a_shred_interrupted_after_its_record_is_completed_at_open",
+                ],
+            },
+            expect: "is still readable",
         },
         Case {
             id: "store-flush-failure-forgotten",
