@@ -34,15 +34,16 @@
 //!   its process would be made durable empty by the next directory flush. It also keeps the
 //!   pair's data key, so a failure between the data-file and key-file writes leaves a pair that
 //!   still opens.
-//! * **Shredding:** delete the key file (content becomes unreadable), delete the chunk, then
-//!   rotate the pocket KEK: re-wrap every surviving data key under a new version and destroy the
-//!   old versions. A stale copy of the shredded key file — a backup, an SSD remnant — can then
-//!   no longer be unwrapped. A crash after the rotation began but before the files went leaves
-//!   them in place: [`ChunkStore::open`] finishes the rotation (re-wrapping them too), and the
-//!   journal, which recorded the shred first, completes it when it opens
-//!   ([`crate::journal::Journal::open_with_payloads`]). A store a journal coordinates shreds only
-//!   through [`crate::journal::Journal::shred`]. Rotation excludes concurrent puts, reads and
-//!   flushes in the same stripe of pockets from a version it is about to destroy, and its
+//! * **Shredding:** refuse the chunk, rotate the pocket KEK, delete the key file (content becomes
+//!   unreadable) and the chunk, then re-wrap every surviving data key under the new version and
+//!   destroy the old versions. A stale copy of the shredded key file — a backup, an SSD remnant —
+//!   can then no longer be unwrapped. Through the journal, the re-wrap runs once the journal
+//!   writer is free ([`PendingRewrap`]). A crash after the rotation began but before the files
+//!   went leaves them in place: [`ChunkStore::open`] finishes the rotation (re-wrapping them
+//!   too), and the journal, which recorded the shred first, completes it when it opens
+//!   ([`crate::journal::Journal::open_with_payloads`]). A store a journal coordinates shreds
+//!   only through [`crate::journal::Journal::shred`]. Rotation excludes concurrent puts, reads
+//!   and flushes in the same stripe of pockets from a version it is about to destroy, and its
 //!   re-wraps are always flushed.
 //!
 //! Honest limit: copies of key material held by the OS keychain's own backups are outside UAOS's
@@ -211,6 +212,51 @@ pub struct ShredReport {
     pub kek_version: KekVersion,
 }
 
+/// The second half of a shred done through [`crate::journal::Journal::shred`]: the chunk is
+/// gone and its record is durable, but the pocket's other keys are still wrapped under the old
+/// KEK, which lives until [`PendingRewrap::finish`] re-wraps them and destroys it. It runs
+/// without the journal writer, so a large pocket stalls only its stripe of the store, never the
+/// journal (review WP3.A1, fourth round, M2). Dropped unfinished, it finishes on the dropping
+/// thread; if that fails, or the process dies first, the next shred in the pocket or the
+/// store's next open finishes the rotation.
+#[derive(Debug)]
+#[must_use = "the old KEK lives until `finish` runs or this is dropped"]
+pub struct PendingRewrap {
+    store: Arc<ChunkStore>,
+    pocket: PocketId,
+    removed: bool,
+    finished: bool,
+}
+
+impl PendingRewrap {
+    pub(crate) fn new(store: Arc<ChunkStore>, pocket: PocketId, removed: bool) -> Self {
+        Self {
+            store,
+            pocket,
+            removed,
+            finished: false,
+        }
+    }
+
+    /// Re-wraps the pocket's other keys under the new KEK and destroys every older version.
+    ///
+    /// # Errors
+    /// Storage or keyring failures. The shred then stays unfinished: the next shred in the
+    /// pocket or the store's next open finishes it.
+    pub fn finish(mut self) -> Result<ShredReport, ChunkError> {
+        self.finished = true;
+        self.store.finish_shred(self.pocket, self.removed)
+    }
+}
+
+impl Drop for PendingRewrap {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _finished_later_if_this_fails = self.store.finish_shred(self.pocket, self.removed);
+        }
+    }
+}
+
 type Key = (PocketId, ChunkRef);
 
 /// The result of reading a chunk back.
@@ -265,6 +311,17 @@ pub struct ChunkStore {
     keyed_pockets: Mutex<BTreeSet<PocketId>>,
     /// Set when a journal coordinates the store; direct shreds are then refused.
     attached: AtomicBool,
+    /// Chunks a shred has begun on and not yet removed: neither vouched for nor served until
+    /// they are stored again or removed (review WP3.A1, fourth round, L2). Only a failed shred
+    /// leaves an entry, and a retry of it or a put of the content clears it.
+    shredding: Mutex<BTreeSet<Key>>,
+}
+
+/// The first 8 bytes of a reference, which index the key files present (see `earlier`).
+fn fingerprint(chunk: ChunkRef) -> u64 {
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&chunk.as_bytes()[..8]);
+    u64::from_be_bytes(head)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -355,6 +412,7 @@ impl ChunkStore {
             cleared: AtomicU64::new(0),
             keyed_pockets: Mutex::new(BTreeSet::new()),
             attached: AtomicBool::new(false),
+            shredding: Mutex::new(BTreeSet::new()),
         };
         for pocket in store.pockets()? {
             store.sweep_temporaries(pocket)?;
@@ -501,15 +559,31 @@ impl ChunkStore {
         Ok(())
     }
 
-    /// Whether a pair for `chunk` may be on disk from an earlier process (see `earlier`).
+    /// Whether a pair for `chunk` may be on disk from an earlier process (see `earlier`), or
+    /// from this one after it forgot the chunk (see [`ChunkStore::forget_on_disk`]).
     fn may_be_on_disk(&self, chunk: ChunkRef) -> bool {
-        let bytes = chunk.as_bytes();
-        let mut head = [0u8; 8];
-        head.copy_from_slice(&bytes[..8]);
-        let fingerprint = u64::from_be_bytes(head);
         locked(&self.earlier)
             .as_ref()
-            .is_none_or(|index| index.binary_search(&fingerprint).is_ok())
+            .is_none_or(|index| index.binary_search(&fingerprint(chunk)).is_ok())
+    }
+
+    /// Forgets a chunk whose files may stay on disk (a shred that fails before removing them).
+    /// It is then indexed as possibly on disk, so a later put reads its name back and replaces
+    /// the pair only by a flushed write that keeps its data key, never by a fresh pair written
+    /// with the journal (found while fixing review WP3.A1, fourth round, L2).
+    fn forget_on_disk(&self, key: Key) {
+        self.forget(key);
+        let mut earlier = locked(&self.earlier);
+        if let Some(index) = earlier.as_mut() {
+            let f = fingerprint(key.1);
+            if let Err(at) = index.binary_search(&f) {
+                if index.len() >= MAX_INDEXED {
+                    *earlier = None;
+                } else {
+                    index.insert(at, f);
+                }
+            }
+        }
     }
 
     /// Waits for, then takes, exclusive use of one chunk.
@@ -590,6 +664,8 @@ impl ChunkStore {
         let _slot = self.slot(key);
         // Under the slot: a flush that failed while this put waited is seen here.
         self.check_poison()?;
+        // Stored again: a shred that failed after its record no longer covers this content.
+        locked(&self.shredding).remove(&key);
         if locked(&self.known).contains(&key) {
             // Written by this process and, in balanced mode, still pending or already flushed.
             return Ok(chunk);
@@ -616,14 +692,21 @@ impl ChunkStore {
         if with_journal && locked(&self.pending).len() >= MAX_PENDING {
             return Err(ChunkError::PendingFull);
         }
+        let started = self.poison.load(Ordering::SeqCst);
         self.write_pair(key.0, key.1, content, data_key, flush)?;
         // Both before the slot opens: a waiting put of the same chunk then sees it written and
         // already pending (review WP3.A1 M1).
         self.remember(key);
         if with_journal {
             locked(&self.pending).insert(key);
-            // A flush that failed while this pair was written may have missed it; the caller
-            // must not reference it until recovery has run (third round, L4).
+            // A flush that failed while this pair was written may have missed it, and a
+            // recovery that began before it joined `pending` did not see it. Poisoned again,
+            // the store is recovered with it before anything references it (third round, L4;
+            // fourth round, L1).
+            if self.poison.load(Ordering::SeqCst) != started {
+                self.poison();
+                return Err(ChunkError::FlushFailed);
+            }
             self.check_poison()?;
         } else {
             locked(&self.pending).remove(&key);
@@ -803,6 +886,9 @@ impl ChunkStore {
         let key = (pocket, chunk);
         let _slot = self.slot(key);
         self.check_poison()?;
+        if locked(&self.shredding).contains(&key) {
+            return Ok(false);
+        }
         if locked(&self.known).contains(&key) {
             return Ok(true);
         }
@@ -992,9 +1078,13 @@ impl ChunkStore {
     /// Reads and authenticates a chunk.
     ///
     /// # Errors
-    /// `Unavailable` if never stored or shredded; `Corrupt` if anything fails authentication,
-    /// including the end-to-end check that the content still matches its reference.
+    /// `Unavailable` if never stored, shredded, or a shred of it has begun; `Corrupt` if
+    /// anything fails authentication, including the end-to-end check that the content still
+    /// matches its reference.
     pub fn get(&self, pocket: PocketId, chunk: ChunkRef) -> Result<Vec<u8>, ChunkError> {
+        if locked(&self.shredding).contains(&(pocket, chunk)) {
+            return Err(ChunkError::Unavailable);
+        }
         // Held shared, so a rotation cannot destroy the KEK between reading the key file and
         // unwrapping it, which would report existing content as unavailable.
         let _shared = self.rotation_shared(pocket);
@@ -1015,9 +1105,10 @@ impl ChunkStore {
 
     /// Crypto-shreds a chunk (see module docs). Idempotent: shredding twice is safe.
     ///
-    /// Order matters. The KEK is rotated **first**: from then on an unfinished rotation is the
-    /// durable marker of an unfinished shred. After a crash, [`ChunkStore::open`] finishes the
-    /// rotation and the journal completes the shred it recorded. Deleting first would let a crash
+    /// Order matters. The chunk is refused in memory, then the KEK is rotated before any file
+    /// goes: from then on an unfinished rotation is the durable marker of an unfinished shred.
+    /// After a crash, [`ChunkStore::open`] finishes the rotation and the journal completes the
+    /// shred it recorded. Deleting first would let a crash
     /// leave the files gone but the old KEK alive, so a backup of the key file would still
     /// unwrap.
     ///
@@ -1043,12 +1134,11 @@ impl ChunkStore {
         self.shred_now(pocket, chunk)
     }
 
-    /// Whether a shred of `chunk` may be unfinished: a file of the pair remains, or the pocket
-    /// has more than one KEK version (a rotation that did not finish).
+    /// Whether a file of `chunk`'s pair remains: a shred of it is then unfinished.
     ///
     /// # Errors
-    /// Storage or keyring failures.
-    pub fn shred_incomplete(&self, pocket: PocketId, chunk: ChunkRef) -> Result<bool, ChunkError> {
+    /// Storage failures.
+    pub(crate) fn pair_remains(&self, pocket: PocketId, chunk: ChunkRef) -> Result<bool, ChunkError> {
         for path in [self.key_path(pocket, chunk), self.chunk_path(pocket, chunk)] {
             match self.fs.read(&path) {
                 Ok(_) => return Ok(true),
@@ -1056,21 +1146,39 @@ impl ChunkStore {
                 Err(e) => return Err(storage(e)),
             }
         }
+        Ok(false)
+    }
+
+    /// Whether `pocket` has more than one KEK version: a rotation, and so a shred, that did not
+    /// finish. One keychain query.
+    ///
+    /// # Errors
+    /// Keyring failures.
+    pub(crate) fn rotation_unfinished(&self, pocket: PocketId) -> Result<bool, ChunkError> {
         Ok(self.keys.kek_versions(pocket).map_err(ChunkError::Keyring)?.len() > 1)
     }
 
-    /// The shred itself (see [`ChunkStore::shred`]); the journal calls it once the record is
-    /// durable.
+    /// The whole shred (see [`ChunkStore::shred`]); the journal calls it at open for a shred
+    /// whose record is durable.
     pub(crate) fn shred_now(&self, pocket: PocketId, chunk: ChunkRef) -> Result<ShredReport, ChunkError> {
-        self.prepare(pocket)?;
+        let removed = self.shred_remove(pocket, chunk)?;
+        self.finish_shred(pocket, removed)
+    }
+
+    /// A shred's first half: rotates the KEK and removes the chunk's files and their directory
+    /// entries; returns whether the chunk existed. Before anything else, under the chunk's slot
+    /// (so a concurrent put cannot undo it), the chunk is refused and forgotten: whichever step
+    /// fails, nothing vouches for the content or serves it until it is stored again (review
+    /// WP3.A1, fourth round, L2).
+    pub(crate) fn shred_remove(&self, pocket: PocketId, chunk: ChunkRef) -> Result<bool, ChunkError> {
         let key = (pocket, chunk);
         // Slot first, then rotation: the same order as a put, so the two never deadlock.
         let _slot = self.slot(key);
+        locked(&self.shredding).insert(key);
+        self.forget_on_disk(key);
+        self.prepare(pocket)?;
         let _exclusive = self.rotation_exclusive(pocket);
         self.keys.rotate_kek(pocket).map_err(ChunkError::Keyring)?;
-        // Forgotten before any file goes: if a removal then fails, a later put rewrites the
-        // chunk instead of vouching for it from memory.
-        self.forget(key);
         let mut removed = false;
         for path in [self.key_path(pocket, chunk), self.chunk_path(pocket, chunk)] {
             match self.fs.remove_file(&path) {
@@ -1085,6 +1193,14 @@ impl ChunkStore {
                 return Err(storage(e));
             }
         }
+        locked(&self.shredding).remove(&key);
+        Ok(removed)
+    }
+
+    /// A shred's second half: re-wraps the pocket's other keys under the new KEK and destroys
+    /// the older versions, holding only the pocket's stripe (fourth round, M2).
+    pub(crate) fn finish_shred(&self, pocket: PocketId, removed: bool) -> Result<ShredReport, ChunkError> {
+        let _exclusive = self.rotation_exclusive(pocket);
         let rewrapped = self.finish_rotation(pocket)?;
         let (kek_version, _) = self.keys.current_kek(pocket).map_err(ChunkError::Keyring)?;
         Ok(ShredReport {
@@ -1098,8 +1214,8 @@ impl ChunkStore {
     /// versions. No-op when only one version exists. Re-wraps are flushed in either durability
     /// mode: the old versions are destroyed right after, so an unflushed re-wrap lost to a power
     /// loss would leave a key file only a destroyed KEK can open. Runs at open (no other user
-    /// yet) or inside [`ChunkStore::shred`] (holding rotation exclusively). Returns the number
-    /// of re-wrapped keys.
+    /// yet) or as a shred's second half (holding the pocket's stripe exclusively). Returns the
+    /// number of re-wrapped keys.
     ///
     /// It never creates a KEK: a pocket whose keys are gone from the keychain (a reset, a moved
     /// data directory) must fail closed when its chunks are read, not get a fresh version 1

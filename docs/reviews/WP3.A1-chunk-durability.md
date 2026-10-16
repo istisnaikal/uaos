@@ -10,8 +10,8 @@ process. The High findings blocked merge.
 accepted with a reason. The property test, extended as M6 asked, then found four more defects
 (N1–N4), all fixed and pinned. One item needs a maintainer decision (L7). A second V1 review of
 the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up,
-and a third found 1 High, 3 Medium and 5 Low; all are fixed below. The PR stays a draft until a
-review comes back clean.
+a third found 1 High, 3 Medium and 5 Low, and a fourth 2 Medium and 4 Low; all are fixed below.
+The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -160,3 +160,22 @@ export. **Result:** 1 High · 3 Medium · 5 Low.
 The crash schedules also found, after these fixes, that a store open can fail while it finishes an
 interrupted rotation under an armed fault; the harness now retries a failed store open the way it
 retries a failed journal open.
+
+## Fourth review (2026-10-16)
+
+**Reviewed:** `a6e8255` (on `555494b`) by a fresh-context agent, in a scratch export.
+**Result:** 0 High · 2 Medium · 4 Low. No failure, crash or power-loss order through
+`finish_open` and `Journal::shred` dropped a flushed record, made a record durable before its loss
+record, removed a segment file the durable manifest still named, or left shredded content
+readable or an old KEK alive; 6,000 crash schedules and the 42 tests passed in the export.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| M1 | Since every journal keeps a marker (third round, M1), a plain journal's marker was trusted by the first open with a store as "payloads checked up to here", so a record whose payload was never stored stayed unreadable with no `chunk.lost` | The marker is the payload check's starting point only if `PAYLOADS` existed when the journal opened; otherwise the whole journal is checked and the marker bounds only the copy. Three docs corrected | `r4_m1_a_plain_journals_marker_does_not_skip_the_payload_check`; negative `plain-marker-trusted` **PROVEN** |
+| M2 | `Journal::shred` re-wrapped the whole pocket (one flushed write per key file) while holding the journal writer: shredding one chunk in a pocket of 10,000 blocked every append and flush for seconds | Under the writer: append, flush, rotate the KEK, remove the chunk and flush its directories. The re-wrap and the destruction of the old KEK run after, holding only the stripe, through the returned `PendingRewrap` (`finish`, or on drop); an unfinished one is completed by the next shred in the pocket or the store's next open | `r4_m2_the_rewrap_runs_after_the_writer_is_free` (the writer takes a record while the old KEK still lives; 19 re-wraps after; a dropped remainder finishes) |
+| L1 | A put whose data file entered `data/` before a failed directory flush, and which joined the pending set after a recovery cleared the poisoning, got `Ok` and was never rewritten | A put reads the poisoning generation before it writes; if it changed by the time the chunk joins the pending set, the store is poisoned again and the put refused, so the next recovery includes it. **Found while fixing it:** `Journal::recover` was a no-op when the store was poisoned but the writer healthy (also reachable through `prepare`'s directory flush), so the refusals outlasted every recovery; it now recovers such a store | `r4_l1_a_put_spanning_a_failed_directory_flush_is_recovered_with_it` (bites with either fix reverted); negative `put-overlapping-failed-flush` **PROVEN** |
+| L2 | A shred whose KEK rotation failed left the chunk remembered, so a later record referenced it without the content being stored again, and that record cancelled the shred at every later open | Reordering `forget` alone was not enough: the store re-reads the pair from disk and vouches for it. A shred now marks its chunk before anything else, under the chunk's slot so a concurrent put cannot undo the mark (by construction; no deterministic test reaches that window); until the content is stored again or the shred completes, the store neither vouches for it nor serves it. Tested on both the rotation-failure and the removal-failure path. **Found while fixing it:** after a failed removal the forgotten pair was no longer indexed as on disk, so a put of the same content would have written a fresh pair with the journal over it, against the store's own rule; it is now indexed | `r4_l2_a_failed_shred_never_vouches_for_its_content`, `r4_l2_storing_the_content_again_lifts_the_refusal`; negative `failed-shred-vouched` **PROVEN** |
+| L3 | Open made one uncached keychain query per recorded shred | Asked once per pocket; completing a shred finishes its pocket's rotation | `r4_l3_open_asks_the_keychain_once_per_pocket` |
+| L4 | ADR-0018 claimed every review fix was pinned by a test that fails with it reverted; `claims.md` said "two review rounds" | The ADR lists the fixes held by construction (second round L3, L4; third round M3, the marker half of M1, the data-file half of L3, two parts of L4); `claims.md` says four rounds | review of the text |
+
+Each round-four test was checked to fail with its fix reverted (eleven mutations, all bite).
