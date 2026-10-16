@@ -183,6 +183,11 @@ negative = [
   "chunk-rewrite-new-data-key",
   "loss-flushed-before-report",
   "open-trusts-previous-segment",
+  "open-stores-manifest-before-flush",
+  "is-stored-trusts-earlier-pair",
+  "flush-skips-missing-pending-file",
+  "loss-set-aside-after-quarantine",
+  "shred-not-completed-at-open",
 ]
 
 [[gate]]
