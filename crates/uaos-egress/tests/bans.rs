@@ -5,8 +5,9 @@
 //! no longer resolves, an item moved upstream, a typo, a wrong kind, a first segment that names no
 //! crate), its expectation goes unfulfilled, and `unfulfilled_lint_expectations` fails clippy
 //! under `-D warnings` on every system that compiles the canary. Bans that exist only on some
-//! systems are compiled only there, so each CI system proves its own. `every_ban_has_a_canary`
-//! keeps this file complete. `getrandom::fill` is not a dependency here; its canary lives in
+//! systems are compiled only there, so each CI system proves its own. `cargo xtask allow-audit`
+//! keeps this file complete: it fails on a ban in `clippy.toml` with no `// canary:` marker here
+//! (round 6, L2). `getrandom::fill` is not a dependency here; its canary lives in
 //! `uaos-platform`'s tests.
 
 #![allow(clippy::unwrap_used, reason = "test harness")]
@@ -94,6 +95,156 @@ mod canaries {
     fn open_options_open() {
         // canary: `std::fs::OpenOptions::open`
         let _canary = std::fs::OpenOptions::new().open("canary");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_metadata() {
+        // canary: `std::fs::metadata`
+        let _canary = std::fs::metadata("canary");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_symlink_metadata() {
+        // canary: `std::fs::symlink_metadata`
+        let _canary = std::fs::symlink_metadata("canary");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_read_dir() {
+        // canary: `std::fs::read_dir`
+        let _canary = std::fs::read_dir("canary");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_copy() {
+        // canary: `std::fs::copy`
+        let _canary = std::fs::copy("canary", "canary2");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_hard_link() {
+        // canary: `std::fs::hard_link`
+        let _canary = std::fs::hard_link("canary", "canary2");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_read_link() {
+        // canary: `std::fs::read_link`
+        let _canary = std::fs::read_link("canary");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_canonicalize() {
+        // canary: `std::fs::canonicalize`
+        let _canary = std::fs::canonicalize("canary");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_create_dir() {
+        // canary: `std::fs::create_dir`
+        let _canary = std::fs::create_dir("canary");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_remove_dir() {
+        // canary: `std::fs::remove_dir`
+        let _canary = std::fs::remove_dir("canary");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_remove_dir_all() {
+        // canary: `std::fs::remove_dir_all`
+        let _canary = std::fs::remove_dir_all("canary");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_set_permissions(permissions: std::fs::Permissions) {
+        // canary: `std::fs::set_permissions`
+        let _canary = std::fs::set_permissions("canary", permissions);
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_exists() {
+        // canary: `std::fs::exists`
+        let _canary = std::fs::exists("canary");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_file_create_new() {
+        // canary: `std::fs::File::create_new`
+        let _canary = std::fs::File::create_new("canary");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn fs_dirbuilder_create() {
+        // canary: `std::fs::DirBuilder::create`
+        let _canary = std::fs::DirBuilder::new().create("canary");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn path_path_exists() {
+        // canary: `std::path::Path::exists`
+        let _canary = std::path::Path::new("canary").exists();
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn path_path_try_exists() {
+        // canary: `std::path::Path::try_exists`
+        let _canary = std::path::Path::new("canary").try_exists();
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn path_path_metadata() {
+        // canary: `std::path::Path::metadata`
+        let _canary = std::path::Path::new("canary").metadata();
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn path_path_symlink_metadata() {
+        // canary: `std::path::Path::symlink_metadata`
+        let _canary = std::path::Path::new("canary").symlink_metadata();
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn path_path_read_dir() {
+        // canary: `std::path::Path::read_dir`
+        let _canary = std::path::Path::new("canary").read_dir();
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn path_path_canonicalize() {
+        // canary: `std::path::Path::canonicalize`
+        let _canary = std::path::Path::new("canary").canonicalize();
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn path_path_read_link() {
+        // canary: `std::path::Path::read_link`
+        let _canary = std::path::Path::new("canary").read_link();
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn path_path_is_file() {
+        // canary: `std::path::Path::is_file`
+        let _canary = std::path::Path::new("canary").is_file();
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn path_path_is_dir() {
+        // canary: `std::path::Path::is_dir`
+        let _canary = std::path::Path::new("canary").is_dir();
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn path_path_is_symlink() {
+        // canary: `std::path::Path::is_symlink`
+        let _canary = std::path::Path::new("canary").is_symlink();
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn env_set_current_dir() {
+        // canary: `std::env::set_current_dir`
+        let _canary = std::env::set_current_dir("canary");
     }
 
     #[expect(clippy::disallowed_methods, reason = "canary")]
@@ -477,6 +628,42 @@ mod canaries {
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
+        fn tokio_datagram_pair() {
+            // canary: `tokio::net::UnixDatagram::pair`
+            let _canary = tokio::net::UnixDatagram::pair();
+        }
+
+        #[expect(clippy::disallowed_methods, reason = "canary")]
+        fn tokio_datagram_from_std(socket: UnixDatagram) {
+            // canary: `tokio::net::UnixDatagram::from_std`
+            let _canary = tokio::net::UnixDatagram::from_std(socket);
+        }
+
+        #[expect(clippy::disallowed_methods, reason = "canary")]
+        fn tokio_datagram_try_send_to(socket: &tokio::net::UnixDatagram) {
+            // canary: `tokio::net::UnixDatagram::try_send_to`
+            let _canary = socket.try_send_to(b"", "/canary");
+        }
+
+        #[expect(clippy::disallowed_methods, reason = "canary")]
+        fn tokio_datagram_poll_send_to(socket: &tokio::net::UnixDatagram, cx: &mut std::task::Context<'_>) {
+            // canary: `tokio::net::UnixDatagram::poll_send_to`
+            let _canary = socket.poll_send_to(cx, b"", "/canary");
+        }
+
+        #[expect(clippy::disallowed_methods, reason = "canary")]
+        fn tokio_pipe_open_sender() {
+            // canary: `tokio::net::unix::pipe::OpenOptions::open_sender`
+            let _canary = tokio::net::unix::pipe::OpenOptions::new().open_sender("/canary");
+        }
+
+        #[expect(clippy::disallowed_methods, reason = "canary")]
+        fn tokio_pipe_open_receiver() {
+            // canary: `tokio::net::unix::pipe::OpenOptions::open_receiver`
+            let _canary = tokio::net::unix::pipe::OpenOptions::new().open_receiver("/canary");
+        }
+
+        #[expect(clippy::disallowed_methods, reason = "canary")]
         fn tokio_listener_bind() {
             // canary: `tokio::net::UnixListener::bind`
             let _canary = tokio::net::UnixListener::bind("/canary");
@@ -507,22 +694,4 @@ mod canaries {
             let _canary = ServerOptions::new().create("canary");
         }
     }
-}
-
-/// Every path `clippy.toml` bans has a canary in this file, or in `uaos-platform`'s for crates
-/// this one cannot name, so adding a ban without proving it fires fails the tests.
-#[test]
-fn every_ban_has_a_canary() {
-    let config = include_str!("../../../clippy.toml");
-    let here = include_str!("bans.rs");
-    let platform = include_str!("../../uaos-platform/tests/bans.rs");
-    let missing: Vec<&str> = config
-        .lines()
-        .filter_map(|line| line.split("path = \"").nth(1)?.split('"').next())
-        .filter(|path| {
-            let marker = format!("// canary: `{path}`");
-            !here.contains(&marker) && !platform.contains(&marker)
-        })
-        .collect();
-    assert!(missing.is_empty(), "bans without a canary: {missing:?}");
 }

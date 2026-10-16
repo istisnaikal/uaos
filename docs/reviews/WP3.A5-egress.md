@@ -9,7 +9,8 @@ own documentation said were closed. They blocked merge.
 Low findings fixed or accepted with a reason. Two fixes change accepted decisions and are written
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
 fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
-1 Medium and 5 Low, and a fifth 2 Medium and 4 Low, all resolved below. The PR stays a draft until a review comes back clean.
+1 Medium and 5 Low, a fifth 2 Medium and 4 Low, and a sixth 2 Medium and 2 Low, all resolved
+below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -157,3 +158,17 @@ no stuck state, no second probe and no stale evidence counted.
 | L2 | "The gate fails if a listed path resolves to nothing" claimed too much: a first segment naming no crate draws no warning, and `allow-invalid` entries are silent everywhere | Every ban has a canary in `crates/uaos-egress/tests/bans.rs` (and `uaos-platform`'s for `getrandom`): a call under `#[expect]`, compiled where the item exists, so a ban that stops firing fails clippy in the CI clippy job on all three systems; a test fails if a ban has no canary. On Windows every canary that applies is fulfilled; the Unix ones are proven by the Linux and macOS clippy jobs | negative `clippy-ban-silenced` **PROVEN** (a removed ban fails clippy through its canary); `every_ban_has_a_canary` |
 | L3 | `crates/*/tests/` owning `clippy::disallowed_types` let every crate's tests use `HashMap`, including seed-reproducible simulations | The owner is `crates/uaos-egress/tests/` only | `cargo xtask allow-audit` |
 | L4 | `CONTRIBUTING.md` named raw `cargo clippy` as the lint gate | It names `cargo xtask clippy` | review of the text |
+
+## Sixth review (2026-10-16)
+
+**Reviewed:** `7986f52` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export. **Result:** 0 High · 2 Medium · 2 Low. Round five's changes held: the coloured
+output is handled, each canary holds one banned call, all 22 Unix canaries were fulfilled for
+Linux, and every count matched.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| M1 | std file-system calls not on the list (`fs::metadata`, `read_dir`, `copy`, `Path::exists` and others) reach the network on Windows through a UNC path: the reviewer's probe opened an SMB session to `127.0.0.1:445` from a crate banned from every network crate | Every std file-system and `Path` call that reads, writes or queries the file system is banned outside `uaos-platform`, each with a canary. **Residual, stated:** the platform's `Fs` does not refuse a UNC or device path, so a data directory on a network share would work; refusing it belongs to the configuration the bin reads (M3). ADR-0013 and T5 say so | the canaries (clippy on Windows); `cargo xtask allow-audit` (every ban has one) |
+| M2 | A crate-local `clippy.toml` replaces the root's bans for that crate, and a member's own `[lints]` replaces the workspace's; every gate stayed green | `cargo xtask allow-audit` fails on a `clippy.toml` below the root, a member whose `[lints]` is not exactly `workspace = true`, a workspace lint table that does not deny `disallowed_methods`, `disallowed_types` or `unsafe_code`, and Cargo configuration naming `CLIPPY_CONF_DIR` or lint flags | negatives `clippy-config-nested`, `lints-not-inherited`, `cargo-config-clippy-override` **PROVEN** |
+| L1 | tokio's Unix datagrams from `pair()` (`try_send_to`, `poll_send_to`, `from_std`) and FIFOs (`unix::pipe::OpenOptions`) were unbanned | Banned, with Unix canaries, cross-checked for Linux | the cross-check: all 28 Unix canaries fulfilled |
+| L2 | The canary completeness test matched `path = "` text, so a compact layout or a second entry on a line could add a ban without a canary | `cargo xtask allow-audit` reads `clippy.toml` as TOML (strings or tables, any spacing) and fails on a ban without a `// canary:` marker; the test in `bans.rs` is gone | `every_ban_layout_needs_a_canary`; negative `clippy-ban-without-canary` **PROVEN** (a compact entry) |

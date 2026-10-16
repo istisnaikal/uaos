@@ -612,6 +612,50 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "unfulfilled",
         },
         Case {
+            id: "clippy-config-nested",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 6, M2: a crate-local clippy.toml replaces every ban for its crate.
+            seed: write("crates/uaos-state/clippy.toml", "allow-unwrap-in-tests = true\n".to_owned()),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "a clippy.toml below the root",
+        },
+        Case {
+            id: "lints-not-inherited",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 6, M2: a member's own [lints] replaces the workspace's.
+            seed: replace(
+                "crates/uaos-state/Cargo.toml",
+                "[lints]\nworkspace = true",
+                "[lints.clippy]\ndisallowed_methods = \"allow\"",
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "must be exactly `workspace = true`",
+        },
+        Case {
+            id: "cargo-config-clippy-override",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 6, M2: Cargo configuration pointing clippy at another config.
+            seed: append(".cargo/config.toml", "\n[env]\nCLIPPY_CONF_DIR = \"crates/uaos-state\"\n"),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "`CLIPPY_CONF_DIR` can change lint levels",
+        },
+        Case {
+            id: "clippy-ban-without-canary",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 6, L2: a ban added without a canary, in a compact layout.
+            seed: replace(
+                "clippy.toml",
+                "disallowed-methods = [",
+                "disallowed-methods = [\n  { path=\"std::process::abort\", reason=\"seeded\" },",
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "`std::process::abort` has no canary",
+        },
+        Case {
             id: "net-unix-connect-outside-egress",
             gate: "clippy",
             tool: Some(UNIX_ONLY),

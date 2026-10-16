@@ -8,9 +8,15 @@
 //! finds every `#[allow(...)]` / `#[expect(...)]` (inner or outer, including inside `cfg_attr`)
 //! that names a guarded lint, and fails unless the file sits under one of that lint's owner
 //! paths in `arch.toml` `[allow_audit]`.
+//!
+//! Lints can also be switched off where no attribute shows: a `clippy.toml` below the root
+//! replaces the root's bans for its crate, a member's own `[lints]` replaces the workspace's,
+//! and Cargo configuration can point clippy elsewhere or pass lint flags. Those fail here too,
+//! and so does a `clippy.toml` ban without a canary in the ban canary files (review WP3.A5,
+//! round 6, M2 and L2).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -21,14 +27,44 @@ struct ArchFile {
     allow_audit: BTreeMap<String, Vec<String>>,
 }
 
+/// The bans in `clippy.toml`, in any layout TOML allows.
+#[derive(Debug, Deserialize)]
+struct ClippyFile {
+    #[serde(rename = "disallowed-methods", default)]
+    methods: Vec<Ban>,
+    #[serde(rename = "disallowed-types", default)]
+    types: Vec<Ban>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Ban {
+    Path(String),
+    Entry { path: String },
+}
+
+impl Ban {
+    fn path(&self) -> &str {
+        match self {
+            Self::Path(p) | Self::Entry { path: p } => p,
+        }
+    }
+}
+
+/// Where every `clippy.toml` ban has its canary: a call of the banned item under `#[expect]`,
+/// marked by a `// canary:` comment that names the path in backticks.
+const CANARY_FILES: &[&str] = &["crates/uaos-egress/tests/bans.rs", "crates/uaos-platform/tests/bans.rs"];
+
 pub(crate) fn check(root: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(root.join("arch.toml")).map_err(|e| format!("arch.toml: {e}"))?;
     let arch: ArchFile = toml::from_str(&text).map_err(|e| format!("arch.toml [allow_audit]: {e}"))?;
     let owners = arch.allow_audit;
 
-    let mut violations = Vec::new();
+    let files = walk_files(root)?;
+    let mut violations = config_overrides(root, &files)?;
+    violations.extend(canary_gaps(root)?);
     let mut found = 0usize;
-    for path in walk_files(root)? {
+    for path in files {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
@@ -53,15 +89,119 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         }
     }
     if violations.is_empty() {
-        println!("xtask allow-audit: {found} guarded-lint allow(s), all inside their owners");
+        println!(
+            "xtask allow-audit: {found} guarded-lint allow(s), all inside their owners; no lint override in configuration; every ban has a canary"
+        );
         Ok(())
     } else {
         Err(format!(
-            "{} guarded-lint allow(s) outside its owners (arch.toml [allow_audit]):\n  {}",
+            "{} way(s) to switch a guarded lint off outside its owners (arch.toml [allow_audit]):\n  {}",
             violations.len(),
             violations.join("\n  ")
         ))
     }
+}
+
+/// Lint switches outside attributes: a `clippy.toml` below the root, a workspace member whose
+/// `[lints]` is not exactly `workspace = true`, the workspace lint table not denying a guarded
+/// lint, and Cargo configuration that can change lint levels or clippy's configuration.
+fn config_overrides(root: &Path, files: &[PathBuf]) -> Result<Vec<String>, String> {
+    let mut problems = Vec::new();
+    for path in files {
+        let relative = rel(root, path);
+        match path.file_name().and_then(|n| n.to_str()) {
+            Some("clippy.toml" | ".clippy.toml") if relative != "clippy.toml" => problems.push(format!(
+                "{relative}: a clippy.toml below the root replaces the root's bans for its crate"
+            )),
+            Some("Cargo.toml") if is_member_manifest(&relative) => {
+                let doc = read_toml(root, path)?;
+                let inherits = doc
+                    .get("lints")
+                    .and_then(toml::Value::as_table)
+                    .is_some_and(|t| t.len() == 1 && t.get("workspace").and_then(toml::Value::as_bool) == Some(true));
+                if !inherits {
+                    problems.push(format!(
+                        "{relative}: [lints] must be exactly `workspace = true`, or the workspace's guarded lints do not apply"
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    let workspace = read_toml(root, &root.join("Cargo.toml"))?;
+    for (table, lint) in [
+        ("clippy", "disallowed_methods"),
+        ("clippy", "disallowed_types"),
+        ("rust", "unsafe_code"),
+    ] {
+        let level = workspace
+            .get("workspace")
+            .and_then(|w| w.get("lints"))
+            .and_then(|l| l.get(table))
+            .and_then(|t| t.get(lint));
+        let level = match level {
+            Some(toml::Value::String(s)) => Some(s.as_str()),
+            Some(toml::Value::Table(t)) => t.get("level").and_then(toml::Value::as_str),
+            _ => None,
+        };
+        if !matches!(level, Some("deny" | "forbid")) {
+            problems.push(format!("Cargo.toml: [workspace.lints.{table}] must deny `{lint}`"));
+        }
+    }
+    for config in [".cargo/config.toml", ".cargo/config"] {
+        let Ok(text) = std::fs::read_to_string(root.join(config)) else {
+            continue;
+        };
+        for word in ["CLIPPY_CONF_DIR", "rustflags", "RUSTFLAGS", "cap-lints"] {
+            if text.contains(word) {
+                problems.push(format!(
+                    "{config}: `{word}` can change lint levels or clippy's configuration outside the workspace lint table"
+                ));
+            }
+        }
+    }
+    Ok(problems)
+}
+
+/// `crates/<name>/Cargo.toml`, `modules/<name>/Cargo.toml` or `xtask/Cargo.toml`.
+fn is_member_manifest(relative: &str) -> bool {
+    let parts: Vec<&str> = relative.split('/').collect();
+    matches!(
+        parts.as_slice(),
+        ["crates" | "modules", _, "Cargo.toml"] | ["xtask", "Cargo.toml"]
+    )
+}
+
+fn read_toml(root: &Path, path: &Path) -> Result<toml::Value, String> {
+    let relative = rel(root, path);
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{relative}: {e}"))?;
+    toml::from_str(&text).map_err(|e| format!("{relative}: {e}"))
+}
+
+/// The bans in `clippy.toml` with no `// canary:` marker naming them in [`CANARY_FILES`].
+fn canary_gaps(root: &Path) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(root.join("clippy.toml")).map_err(|e| format!("clippy.toml: {e}"))?;
+    let canaries = CANARY_FILES
+        .iter()
+        .map(|f| std::fs::read_to_string(root.join(f)).map_err(|e| format!("{f}: {e}")))
+        .collect::<Result<Vec<_>, _>>()?
+        .concat();
+    Ok(bans_without_canary(&text, &canaries)?
+        .into_iter()
+        .map(|p| format!("clippy.toml: `{p}` has no canary in {}", CANARY_FILES.join(" or ")))
+        .collect())
+}
+
+fn bans_without_canary(clippy_toml: &str, canaries: &str) -> Result<Vec<String>, String> {
+    let config: ClippyFile = toml::from_str(clippy_toml).map_err(|e| format!("clippy.toml: {e}"))?;
+    Ok(config
+        .methods
+        .iter()
+        .chain(&config.types)
+        .map(Ban::path)
+        .filter(|p| !canaries.contains(&format!("// canary: `{p}`")))
+        .map(str::to_owned)
+        .collect())
 }
 
 /// `clippy::disallowed_methods` → `disallowed_methods`; `unsafe_code` stays as is.
@@ -302,5 +442,25 @@ mod tests {
             "crates/uaos-platform/src/os/",
             "crates/uaos-policy/src/os/x.rs"
         ));
+    }
+
+    /// Round 6, L2: every layout TOML allows is read, not only `path = "...` with spaces.
+    #[test]
+    fn every_ban_layout_needs_a_canary() {
+        let config = "disallowed-methods = [\n  { path=\"a::b\", reason = \"x\" }, { path = \"c::d\" },\n  \"e::f\",\n]\ndisallowed-types = [{ path = \"g::H\" }]\nallow-unwrap-in-tests = true\n";
+        let canaries = "// canary: `c::d`\n";
+        assert_eq!(
+            bans_without_canary(config, canaries).unwrap(),
+            vec!["a::b".to_owned(), "e::f".to_owned(), "g::H".to_owned()]
+        );
+    }
+
+    #[test]
+    fn member_manifests_are_recognised() {
+        assert!(is_member_manifest("crates/uaos-state/Cargo.toml"));
+        assert!(is_member_manifest("xtask/Cargo.toml"));
+        assert!(is_member_manifest("modules/mod-mock/Cargo.toml"));
+        assert!(!is_member_manifest("Cargo.toml"));
+        assert!(!is_member_manifest("crates/uaos-state/tests/fixtures/Cargo.toml"));
     }
 }
