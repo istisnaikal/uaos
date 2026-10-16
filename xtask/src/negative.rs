@@ -640,7 +640,7 @@ pub(crate) fn cases() -> Vec<Case> {
             // Review WP3.A5 round 6, M2: Cargo configuration pointing clippy at another config.
             seed: append(".cargo/config.toml", "\n[env]\nCLIPPY_CONF_DIR = \"crates/uaos-state\"\n"),
             runner: Runner::Xtask(&["allow-audit"]),
-            expect: "`CLIPPY_CONF_DIR` can change lint levels",
+            expect: "`env` is not allowed",
         },
         Case {
             id: "clippy-ban-without-canary",
@@ -654,6 +654,117 @@ pub(crate) fn cases() -> Vec<Case> {
             ),
             runner: Runner::Xtask(&["allow-audit"]),
             expect: "`std::process::abort` has no canary",
+        },
+        Case {
+            id: "allow-audit-lint-group",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, H1: a lint group that contains a guarded lint switches it off.
+            seed: append_owned(
+                LIB,
+                format!(
+                    "\n/// Seeded.\n#[{}({}, reason = \"seeded\")]\n#[must_use]\npub fn seeded_violation() -> u8 {{\n    1\n}}\n",
+                    "allow", "clippy::style"
+                ),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "names `clippy::style`",
+        },
+        Case {
+            id: "allow-audit-macro-attribute",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, H1: an attribute a macro builds from its arguments.
+            seed: append_owned(
+                LIB,
+                format!(
+                    "\nmacro_rules! seeded {{\n    ($a:meta) => {{\n        #[$a]\n        /// Seeded.\n        pub fn seeded_violation() {{}}\n    }};\n}}\nseeded!({}({}, reason = \"seeded\"));\n",
+                    "allow", "clippy::disallowed_methods"
+                ),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "names `disallowed_methods`",
+        },
+        Case {
+            id: "allow-audit-path-module",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, H1: library code compiled from a file under an owner path.
+            seed: both(
+                append(LIB, "\n#[path = \"../tests/seeded.rs\"]\nmod seeded;\n"),
+                write("crates/uaos-contracts/tests/seeded.rs", "//! Seeded.\n".to_owned()),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "a `#[path]` module",
+        },
+        Case {
+            id: "allow-audit-nested-target",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, H1: a nested folder named like the root's skipped build folder.
+            seed: write(
+                "crates/uaos-redact/src/target/seeded.rs",
+                format!("#[{}({}, reason = \"seeded\")]\nfn seeded() {{}}\n", "allow", "clippy::disallowed_methods"),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "src/target/seeded.rs",
+        },
+        Case {
+            id: "workspace-lints-group-allowed",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, M1: a group allowed in the workspace lint table.
+            seed: replace(
+                "Cargo.toml",
+                "disallowed_methods = \"deny\"",
+                "disallowed_methods = \"deny\"\nstyle = { level = \"allow\", priority = 1 }",
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "`style` set to `allow`",
+        },
+        Case {
+            id: "clippy-config-case",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, M1: a clippy.toml named in another case, which Windows and
+            // macOS read.
+            seed: write("crates/uaos-state/CLIPPY.TOML", "allow-unwrap-in-tests = true\n".to_owned()),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "replaces the root's bans",
+        },
+        Case {
+            id: "cargo-config-not-alias",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, M1: compiler flags in Cargo configuration.
+            seed: append(".cargo/config.toml", "\n[build]\nrustflags = [\"-Aclippy::disallowed_methods\"]\n"),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "`build` is not allowed",
+        },
+        Case {
+            id: "workflow-overriding-env",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, M1: compiler flags in a CI workflow.
+            seed: append(".github/workflows/ci.yml", "\n# seeded\n#   RUSTFLAGS: -Aclippy::disallowed_methods\n"),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "`RUSTFLAGS` can change",
+        },
+        Case {
+            id: "canary-malformed",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, L1: a marker that is not a canary.
+            seed: both(
+                replace(
+                    "clippy.toml",
+                    "disallowed-methods = [",
+                    "disallowed-methods = [\n  { path = \"std::process::abort\", reason = \"seeded\" },",
+                ),
+                append("crates/uaos-egress/tests/bans.rs", "\n// canary: `std::process::abort`\n"),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "is not one banned call",
         },
         Case {
             id: "net-unix-connect-outside-egress",

@@ -145,7 +145,7 @@ source = "plan v2 PD-19, §2.1 reachability: guarded lints (unsafe_code, disallo
 lane = "merge"
 status = "active"
 job = "arch"
-negative = ["allow-audit-guarded-lint-outside-owner", "allow-audit-unsafe-outside-owner", "clippy-config-nested", "lints-not-inherited", "cargo-config-clippy-override", "clippy-ban-without-canary"]
+negative = ["allow-audit-guarded-lint-outside-owner", "allow-audit-unsafe-outside-owner", "clippy-config-nested", "lints-not-inherited", "cargo-config-clippy-override", "clippy-ban-without-canary", "allow-audit-lint-group", "allow-audit-macro-attribute", "allow-audit-path-module", "allow-audit-nested-target", "workspace-lints-group-allowed", "clippy-config-case", "cargo-config-not-alias", "workflow-overriding-env", "canary-malformed"]
 
 [[gate]]
 id = "vet-ratchet"

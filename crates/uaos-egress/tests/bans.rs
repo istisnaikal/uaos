@@ -248,6 +248,13 @@ mod canaries {
     }
 
     #[expect(clippy::disallowed_methods, reason = "canary")]
+    #[allow(deprecated, reason = "the canary names the deprecated call")]
+    fn fs_soft_link() {
+        // canary: `std::fs::soft_link`
+        let _canary = std::fs::soft_link("canary", "canary2");
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
     fn env_var() {
         // canary: `std::env::var`
         let _canary = std::env::var("CANARY");
@@ -664,6 +671,30 @@ mod canaries {
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
+        fn unix_symlink() {
+            // canary: `std::os::unix::fs::symlink`
+            let _canary = std::os::unix::fs::symlink("canary", "canary2");
+        }
+
+        #[expect(clippy::disallowed_methods, reason = "canary")]
+        fn unix_chown() {
+            // canary: `std::os::unix::fs::chown`
+            let _canary = std::os::unix::fs::chown("canary", None, None);
+        }
+
+        #[expect(clippy::disallowed_methods, reason = "canary")]
+        fn unix_lchown() {
+            // canary: `std::os::unix::fs::lchown`
+            let _canary = std::os::unix::fs::lchown("canary", None, None);
+        }
+
+        #[expect(clippy::disallowed_methods, reason = "canary")]
+        fn unix_chroot() {
+            // canary: `std::os::unix::fs::chroot`
+            let _canary = std::os::unix::fs::chroot("canary");
+        }
+
+        #[expect(clippy::disallowed_methods, reason = "canary")]
         fn tokio_listener_bind() {
             // canary: `tokio::net::UnixListener::bind`
             let _canary = tokio::net::UnixListener::bind("/canary");
@@ -686,6 +717,18 @@ mod canaries {
         fn pipe_client_open() {
             // canary: `tokio::net::windows::named_pipe::ClientOptions::open`
             let _canary = ClientOptions::new().open("canary");
+        }
+
+        #[expect(clippy::disallowed_methods, reason = "canary")]
+        fn windows_symlink_file() {
+            // canary: `std::os::windows::fs::symlink_file`
+            let _canary = std::os::windows::fs::symlink_file("canary", "canary2");
+        }
+
+        #[expect(clippy::disallowed_methods, reason = "canary")]
+        fn windows_symlink_dir() {
+            // canary: `std::os::windows::fs::symlink_dir`
+            let _canary = std::os::windows::fs::symlink_dir("canary", "canary2");
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]

@@ -9,8 +9,8 @@ own documentation said were closed. They blocked merge.
 Low findings fixed or accepted with a reason. Two fixes change accepted decisions and are written
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
 fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
-1 Medium and 5 Low, a fifth 2 Medium and 4 Low, and a sixth 2 Medium and 2 Low, all resolved
-below. The PR stays a draft until a review comes back clean.
+1 Medium and 5 Low, a fifth 2 Medium and 4 Low, a sixth 2 Medium and 2 Low, and a seventh
+1 High, 2 Medium and 3 Low, all resolved below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -172,3 +172,22 @@ Linux, and every count matched.
 | M2 | A crate-local `clippy.toml` replaces the root's bans for that crate, and a member's own `[lints]` replaces the workspace's; every gate stayed green | `cargo xtask allow-audit` fails on a `clippy.toml` below the root, a member whose `[lints]` is not exactly `workspace = true`, a workspace lint table that does not deny `disallowed_methods`, `disallowed_types` or `unsafe_code`, and Cargo configuration naming `CLIPPY_CONF_DIR` or lint flags | negatives `clippy-config-nested`, `lints-not-inherited`, `cargo-config-clippy-override` **PROVEN** |
 | L1 | tokio's Unix datagrams from `pair()` (`try_send_to`, `poll_send_to`, `from_std`) and FIFOs (`unix::pipe::OpenOptions`) were unbanned | Banned, with Unix canaries, cross-checked for Linux | the cross-check: all 28 Unix canaries fulfilled |
 | L2 | The canary completeness test matched `path = "` text, so a compact layout or a second entry on a line could add a ban without a canary | `cargo xtask allow-audit` reads `clippy.toml` as TOML (strings or tables, any spacing) and fails on a ban without a `// canary:` marker; the test in `bans.rs` is gone | `every_ban_layout_needs_a_canary`; negative `clippy-ban-without-canary` **PROVEN** (a compact entry) |
+
+## Seventh review (2026-10-16)
+
+**Reviewed:** `b95205f` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export. **Result:** 1 High · 2 Medium · 3 Low. The reviewer's session was cut short;
+everything reported came from gate runs that had finished or from reading code.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| H1 | `allow-audit` read only attributes naming a guarded lint by its current name: `#[allow(clippy::style)]` or `clippy::all`, the old name `disallowed_method`, an attribute a macro builds from its arguments, a `#[path]` module or `include!` of a file under an owner path, and a nested folder named `target` all switched the bans off unseen. The scanner predates the PR, but round six cited it | Every mention of a guarded lint, its old name or a group holding it, anywhere in code, counts (`deny` and `forbid` excepted); `#[path]` and `include!` outside the owners fail; only the root's `target`, `.git` and `node_modules` are skipped | negatives `allow-audit-lint-group`, `allow-audit-macro-attribute`, `allow-audit-path-module`, `allow-audit-nested-target` **PROVEN**; unit tests for the scanner |
+| M1 | The configuration checks had gaps: a group allowed in the workspace lint table, `CLIPPY_ARGS` or `rustflags` in Cargo configuration, a `Clippy.toml` (read on Windows and macOS, never compared there by the Linux job), compiler-flag variables in CI | Groups holding a guarded lint must not be allowed in the workspace table; Cargo configuration may hold only `[alias]`, names in any case; `clippy.toml` names match in any case; CI workflows may not set flag, wrapper or clippy variables; `cargo xtask clippy` refuses such an environment; members come from `cargo metadata` | negatives `workspace-lints-group-allowed`, `cargo-config-not-alias`, `clippy-config-case`, `workflow-overriding-env` **PROVEN**; `an_overriding_environment_is_refused` |
+| M2 | Link and ownership calls (`soft_link`, Windows `symlink_file`/`symlink_dir`, Unix `symlink`, `chown`, `lchown`, `chroot`) were unbanned, and any crate could build `OsFs` and read a UNC path | Those calls are banned with canaries; `OsFs` refuses UNC and device paths before any call. The residual is restated: rusqlite opens the SQLite file by path outside `OsFs`, and macOS automount paths look local | `network_and_device_paths_are_refused` (Windows); the canaries, cross-checked for Linux |
+| L1 | A `// canary:` comment anywhere satisfied the completeness check | A canary must be the marker at the top of a function whose only `#[expect]` names a disallowed lint, with the banned item within three lines, under `cfg(unix)`, `cfg(windows)` or none | `a_canary_must_be_well_formed`; negative `canary-malformed` **PROVEN** |
+| L2 | The round-six checks were partly unpinned, and members were found by a path pattern | The negatives above; members from `cargo metadata` | as above |
+| L3 | `getrandom`'s `fill_uninit`, `u32`, `u64` and `SysRng` were unbanned | Banned, with canaries in `uaos-platform`'s tests | `cargo xtask clippy` |
+
+**Stated plainly, in ADR-0013:** these gates catch drift, mistakes and careless overrides and make
+exceptions visible in review. A contributor with write access could edit the gates themselves;
+the boundary there is review, CODEOWNERS and the `main` ruleset, which is not applied yet (PD-17).

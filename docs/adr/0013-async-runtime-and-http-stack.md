@@ -210,9 +210,14 @@ on the PR-5 branch.
     `UnixSocket::datagram`), tokio's FIFOs (`unix::pipe::OpenOptions::{open_sender,
     open_receiver}`) (these paths exist only on Unix, and std's need no dependency at all) and
     Windows named-pipe clients (`ClientOptions::open`);
-  - the file system: every std `fs` and `Path` call that reads, writes or queries it, outside
-    `uaos-platform`, which owns file access. On Windows a UNC path (`\\host\share`) resolves
-    its host and opens SMB to it, so these are network entry points that need no dependency;
+  - the file system: every std `fs` and `Path` call that reads, writes or queries it, and the
+    link and ownership calls (`soft_link`, Windows `symlink_file`/`symlink_dir`, Unix
+    `symlink`, `chown`, `lchown`, `chroot`), outside `uaos-platform`, which owns file access.
+    On Windows a UNC path (`\\host\share`) resolves its host and opens SMB to it, so these are
+    network entry points that need no dependency. The platform's own `OsFs` refuses UNC and
+    device paths (`PermissionDenied`) before any call, whoever builds it;
+  - randomness: `getrandom`'s `fill`, `fill_uninit`, `u32`, `u64` and `SysRng`, outside the
+    platform;
   - listening: `TcpListener::bind` (std and tokio), `TcpSocket::listen`, Unix listeners (std's
     and tokio's `UnixListener::bind` and `bind_addr`, tokio's `UnixSocket::listen`) and Windows
     pipe servers (`ServerOptions::create`), whose owner will be the API crate, because binding
@@ -236,15 +241,34 @@ on the PR-5 branch.
   (reading `clippy.toml` as TOML, in any layout), and if lints are switched off where no
   attribute shows: a `clippy.toml` below the root, a member whose `[lints]` is not exactly
   `workspace = true`, a workspace lint table that does not deny a guarded lint, or Cargo
-  configuration naming `CLIPPY_CONF_DIR` or lint flags.
+  configuration naming `CLIPPY_CONF_DIR` or lint flags. Since the seventh review it reads every
+  mention of a guarded lint in code, not only attributes, so an attribute a macro builds from
+  its arguments counts, and so do the lint groups that contain one (`clippy::all`,
+  `clippy::style`) and the old names; `deny(...)` and `forbid(...)` are left alone. It fails on
+  `#[path]` modules and `include!` outside the owners, scans nested folders named like the
+  root's skipped ones, matches `clippy.toml` and `.cargo/config` names in any case, allows only
+  `[alias]` in Cargo configuration, refuses compiler-flag, wrapper and clippy variables in CI
+  workflows and clippy's variables in build scripts, takes the member list from `cargo
+  metadata`, refuses a workspace lint table that allows a group holding a guarded lint, and
+  checks that each canary is one banned call under a single `#[expect]`, compiled under
+  `cfg(unix)` or `cfg(windows)` only. `cargo xtask clippy` refuses to run when the environment
+  sets compiler flags, a compiler wrapper or clippy's arguments or configuration.
 
-  **Known residual: network paths for the data directory.** `uaos-platform`'s `Fs`, the owner
-  of file access, does not refuse a UNC or device path. A data directory placed on a network
-  share would put the journal and chunks on another machine and send their I/O over the
-  network. The data directory is chosen by the user's configuration, read by the bin (M3);
-  refusing network paths there is owed with it. A dependency that opens sockets itself is kept out by `arch.toml` and
-  supply-chain review. `cargo xtask allow-audit` checks owners per lint, not per method, so a
-  file that owns one disallowed method could allow another; review of each `allow` covers that.
+  A dependency that opens sockets itself is kept out by `arch.toml` and supply-chain review.
+  `cargo xtask allow-audit` checks owners per lint, not per method, so a file that owns one
+  disallowed method could allow another; review of each `allow` covers that.
+
+  **What these gates are.** They catch drift, mistakes and careless overrides, and make every
+  exception visible in review. They are not a boundary against a contributor with write access,
+  who could edit the gates themselves (`clippy.toml`, `arch.toml`, `xtask`); that boundary is
+  review, CODEOWNERS and the protected `main` ruleset (ADR-0019), which is not applied yet
+  (PD-17).
+
+  **Known residual: network paths that do not go through `OsFs`.** `uaos-state` opens its
+  SQLite database by path through rusqlite, so a data directory on a network share would still
+  put that file on another machine. The data directory is chosen by the user's configuration,
+  read by the bin (M3); refusing network paths there is owed with it. macOS automount paths
+  (`/net/host`) look local and are not detected.
   **Known exception:** the system resolver (`tokio::net::lookup_host`) runs `getaddrinfo` on
   tokio's blocking pool, outside the supervisor; the resolution timeout stops the wait, not the
   thread. Moving resolution onto the supervisor's pool is runtime work (PR-6).
