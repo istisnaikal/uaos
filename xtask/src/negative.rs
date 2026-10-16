@@ -54,6 +54,9 @@ const CLIPPY: Runner = Runner::Program {
     ],
 };
 const LIB: &str = "crates/uaos-contracts/src/limits.rs";
+/// A case's `tool` when its seed only compiles on Unix: it is skipped elsewhere, and the CI
+/// negative job, which runs on Linux with `--require-all-tools`, runs it.
+const UNIX_ONLY: &str = "unix";
 
 fn append(path: &'static str, text: &'static str) -> Seed {
     Box::new(move |ws| {
@@ -391,8 +394,8 @@ pub(crate) fn cases() -> Vec<Case> {
             // Review WP3.A5 M4: a breaker with no half-open state.
             seed: replace(
                 "crates/uaos-egress/src/door.rs",
-                "Breaker::Probing => Err(cooldown),",
-                "Breaker::Probing => Ok(false),",
+                "Breaker::Probing { .. } => Err(PROBE_RECHECK.min(cooldown)),",
+                "Breaker::Probing { .. } => Ok(None),",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -492,6 +495,43 @@ pub(crate) fn cases() -> Vec<Case> {
             ),
             runner: CLIPPY,
             expect: "std::net::TcpListener::bind",
+        },
+        Case {
+            id: "net-resolver-outside-egress",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 round 3, M1: hyper-util's own resolver, a DNS lookup outside the door.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n#[must_use]\npub fn seeded_violation() -> hyper_util::client::legacy::connect::dns::GaiResolver {\n    hyper_util::client::legacy::connect::dns::GaiResolver::new()\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "GaiResolver::new",
+        },
+        Case {
+            id: "net-socket-listen-outside-api",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 round 3, M1: a raw socket turned into a listener outside the API crate.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\npub fn seeded_violation() -> std::io::Result<tokio::net::TcpListener> {\n    tokio::net::TcpSocket::new_v4()?.listen(1)\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::net::TcpSocket::listen",
+        },
+        Case {
+            id: "net-unix-connect-outside-egress",
+            gate: "clippy",
+            tool: Some(UNIX_ONLY),
+            // Review WP3.A5 round 3, L3: the Unix-socket bans are `allow-invalid`, so a wrong path
+            // would go silent; this proves they resolve where they exist.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\n#[cfg(unix)]\npub fn seeded_violation() -> std::io::Result<std::os::unix::net::UnixStream> {\n    std::os::unix::net::UnixStream::connect(\"/run/seeded.sock\")\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "std::os::unix::net::UnixStream::connect",
         },
         Case {
             id: "arch-ring1-depends-on-hyper",
@@ -769,7 +809,11 @@ fn run_case(case: &Case, root: &Path, base: &Path, shared_target: &Path) -> Outc
     if let Some(tool) = case.tool
         && !tool_available(tool)
     {
-        return Outcome::Skipped(format!("`{tool}` not installed"));
+        return Outcome::Skipped(if tool == UNIX_ONLY {
+            "runs on Unix only".to_owned()
+        } else {
+            format!("`{tool}` not installed")
+        });
     }
     if let Runner::History(gate, make_history) = &case.runner {
         let repo = base.join(case.id);
@@ -838,6 +882,9 @@ fn tail(s: &str) -> String {
 }
 
 fn tool_available(tool: &str) -> bool {
+    if tool == UNIX_ONLY {
+        return cfg!(unix);
+    }
     let (program, args): (&str, &[&str]) = match tool {
         "cargo-deny" => ("cargo", &["deny", "--version"]),
         "cargo-vet" => ("cargo", &["vet", "--version"]),

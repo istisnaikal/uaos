@@ -30,6 +30,9 @@ use crate::upstream::{Scheme, Trust, Upstream, UpstreamError, UpstreamId};
 pub const REPLAY_WINDOW: usize = 65_536;
 /// Idle pooled connections kept per upstream (I-08 bounded).
 pub const MAX_IDLE_PER_UPSTREAM: usize = 8;
+/// The `retry_after` hint while a probe is in flight: how soon to look again, not a promise. The
+/// probe may settle sooner or take up to the response timeout (review WP3.A5, round 3, L2).
+pub const PROBE_RECHECK: Duration = Duration::from_secs(1);
 
 /// Time and failure limits of the door.
 ///
@@ -184,8 +187,8 @@ enum Breaker {
     Closed { failures: u32 },
     /// Attempts are refused until the monotonic instant `until`.
     Open { until: u64 },
-    /// One probe is in flight after a cooldown; every other attempt is refused.
-    Probing,
+    /// One probe, numbered `generation`, is in flight after a cooldown; every other attempt is refused.
+    Probing { generation: u64 },
 }
 
 impl Default for Breaker {
@@ -220,7 +223,8 @@ impl Outcome {
 struct Admitted<'a> {
     door: &'a Door,
     upstream: &'a UpstreamId,
-    probe: bool,
+    /// The probe's generation, if this attempt is the probe.
+    probe: Option<u64>,
     settled: bool,
 }
 
@@ -461,12 +465,12 @@ impl Door {
         true
     }
 
-    fn breaker_admits(&self, id: &UpstreamId) -> Result<bool, Duration> {
+    fn breaker_admits(&self, id: &UpstreamId) -> Result<Option<u64>, Duration> {
         self.breakers
             .admits(id, self.clock.mono().0, self.limits.breaker_cooldown)
     }
 
-    fn breaker_record(&self, id: &UpstreamId, probe: bool, outcome: Outcome) {
+    fn breaker_record(&self, id: &UpstreamId, probe: Option<u64>, outcome: Outcome) {
         self.breakers.record(
             id,
             probe,
@@ -478,43 +482,58 @@ impl Door {
     }
 }
 
-/// Every upstream's circuit, keyed by id (bounded by the declared upstreams).
+/// Every upstream's circuit, keyed by id (bounded by the declared upstreams), and the count of
+/// probes ever admitted, which gives each probe its generation.
 #[derive(Debug, Default)]
-struct Breakers(Mutex<BTreeMap<UpstreamId, Breaker>>);
+struct Breakers(Mutex<(BTreeMap<UpstreamId, Breaker>, u64)>);
 
 impl Breakers {
-    /// `Ok(probe)` if the attempt may go, where `probe` says it is the single attempt let
-    /// through after a cooldown; `Err(retry_after)` while the circuit is open or a probe is in
-    /// flight. `now` is monotonic nanoseconds.
-    fn admits(&self, id: &UpstreamId, now: u64, cooldown: Duration) -> Result<bool, Duration> {
-        let mut breakers = locked(&self.0);
+    /// `Ok(probe)` if the attempt may go, where `probe` is the generation of the single attempt
+    /// let through after a cooldown, if this is it; `Err(retry_after)` while the circuit is open
+    /// (the time left) or a probe is in flight ([`PROBE_RECHECK`], a hint). `now` is monotonic
+    /// nanoseconds.
+    fn admits(&self, id: &UpstreamId, now: u64, cooldown: Duration) -> Result<Option<u64>, Duration> {
+        let mut state = locked(&self.0);
+        let (breakers, probes) = &mut *state;
         let breaker = breakers.entry(id.clone()).or_default();
         match *breaker {
-            Breaker::Closed { .. } => Ok(false),
+            Breaker::Closed { .. } => Ok(None),
             Breaker::Open { until } if until > now => Err(Duration::from_nanos(until - now)),
             Breaker::Open { .. } => {
-                *breaker = Breaker::Probing;
-                Ok(true)
+                *probes = probes.saturating_add(1);
+                *breaker = Breaker::Probing { generation: *probes };
+                Ok(Some(*probes))
             }
-            Breaker::Probing => Err(cooldown),
+            Breaker::Probing { .. } => Err(PROBE_RECHECK.min(cooldown)),
         }
     }
 
-    /// Settles an admitted attempt. Only transport failures count against the upstream. A
-    /// probe that fails reopens the circuit for another cooldown; a probe that never reached
-    /// the upstream (refused or blocked by the door, or dropped by its caller) lets the next
-    /// attempt probe instead.
-    fn record(&self, id: &UpstreamId, probe: bool, outcome: Outcome, now: u64, threshold: u32, cooldown: Duration) {
+    /// Settles an admitted attempt. Only transport failures count against the upstream, and
+    /// any answer closes the circuit. A probe that fails reopens it for another cooldown; a
+    /// probe that never reached the upstream (refused or blocked by the door, or dropped by its
+    /// caller) lets the next attempt probe instead. A probe whose generation is no longer the
+    /// one in flight is stale (another answer or probe has moved the circuit on since) and
+    /// changes nothing unless it answered (review WP3.A5, round 3, L1).
+    fn record(
+        &self,
+        id: &UpstreamId,
+        probe: Option<u64>,
+        outcome: Outcome,
+        now: u64,
+        threshold: u32,
+        cooldown: Duration,
+    ) {
         let cooldown = u64::try_from(cooldown.as_nanos()).unwrap_or(u64::MAX);
-        let mut breakers = locked(&self.0);
-        let breaker = breakers.entry(id.clone()).or_default();
+        let mut state = locked(&self.0);
+        let breaker = state.0.entry(id.clone()).or_default();
+        let current_probe = matches!((*breaker, probe), (Breaker::Probing { generation }, Some(p)) if generation == p);
         *breaker = match (outcome, probe, *breaker) {
             (Outcome::Answered, _, _) => Breaker::default(),
-            (Outcome::TransportFailure, true, _) => Breaker::Open {
+            (Outcome::TransportFailure, Some(_), _) if current_probe => Breaker::Open {
                 until: now.saturating_add(cooldown),
             },
-            (Outcome::NotAttempted, true, _) => Breaker::Open { until: now },
-            (Outcome::TransportFailure, false, Breaker::Closed { failures }) => {
+            (Outcome::NotAttempted, Some(_), _) if current_probe => Breaker::Open { until: now },
+            (Outcome::TransportFailure, None, Breaker::Closed { failures }) => {
                 let failures = failures.saturating_add(1);
                 if failures >= threshold {
                     Breaker::Open {
@@ -524,7 +543,8 @@ impl Breakers {
                     Breaker::Closed { failures }
                 }
             }
-            (_, false, current) => current,
+            // A stale probe, or a failure while open or probing: nothing changes.
+            (_, _, current) => current,
         };
     }
 }
@@ -609,40 +629,83 @@ mod tests {
         let id = UpstreamId::new("x");
         let cooldown = Duration::from_secs(30);
         let (threshold, mut now) = (2, 1_000_u64);
-        breakers.record(&id, false, Outcome::TransportFailure, now, threshold, cooldown);
+        breakers.record(&id, None, Outcome::TransportFailure, now, threshold, cooldown);
         assert_eq!(
             breakers.admits(&id, now, cooldown),
-            Ok(false),
+            Ok(None),
             "one failure keeps it closed"
         );
-        breakers.record(&id, false, Outcome::NotAttempted, now, threshold, cooldown);
-        breakers.record(&id, false, Outcome::TransportFailure, now, threshold, cooldown);
+        breakers.record(&id, None, Outcome::NotAttempted, now, threshold, cooldown);
+        breakers.record(&id, None, Outcome::TransportFailure, now, threshold, cooldown);
         assert!(breakers.admits(&id, now, cooldown).is_err(), "the threshold opens it");
         now += 31_000_000_000;
+        let probe = breakers.admits(&id, now, cooldown).unwrap();
+        assert!(probe.is_some(), "the first attempt after the cooldown probes");
         assert_eq!(
             breakers.admits(&id, now, cooldown),
-            Ok(true),
-            "the first attempt after the cooldown probes"
+            Err(PROBE_RECHECK),
+            "only one probe at a time"
         );
-        assert!(breakers.admits(&id, now, cooldown).is_err(), "only one probe at a time");
-        breakers.record(&id, true, Outcome::NotAttempted, now, threshold, cooldown);
-        assert_eq!(
-            breakers.admits(&id, now, cooldown),
-            Ok(true),
-            "a probe that never reached it lets the next one probe"
-        );
-        breakers.record(&id, true, Outcome::TransportFailure, now, threshold, cooldown);
+        breakers.record(&id, probe, Outcome::NotAttempted, now, threshold, cooldown);
+        let probe = breakers.admits(&id, now, cooldown).unwrap();
+        assert!(probe.is_some(), "a probe that never reached it lets the next one probe");
+        breakers.record(&id, probe, Outcome::TransportFailure, now, threshold, cooldown);
         assert!(
             breakers.admits(&id, now, cooldown).is_err(),
             "a failed probe reopens it"
         );
         now += 31_000_000_000;
-        assert_eq!(breakers.admits(&id, now, cooldown), Ok(true));
-        breakers.record(&id, true, Outcome::Answered, now, threshold, cooldown);
+        let probe = breakers.admits(&id, now, cooldown).unwrap();
+        breakers.record(&id, probe, Outcome::Answered, now, threshold, cooldown);
         assert_eq!(
             breakers.admits(&id, now, cooldown),
-            Ok(false),
+            Ok(None),
             "an answered probe closes it"
+        );
+    }
+
+    /// Round 3, L1: a stale probe's settlement does not undo a circuit a later answer closed.
+    #[test]
+    fn a_stale_probe_cannot_reopen_a_closed_circuit() {
+        let breakers = Breakers::default();
+        let id = UpstreamId::new("x");
+        let cooldown = Duration::from_secs(30);
+        let mut now = 1_000_u64;
+        assert_eq!(breakers.admits(&id, now, cooldown), Ok(None)); // X, long-running
+        breakers.record(&id, None, Outcome::TransportFailure, now, 1, cooldown); // Y opens it
+        now += 31_000_000_000;
+        let probe = breakers.admits(&id, now, cooldown).unwrap();
+        assert!(probe.is_some());
+        breakers.record(&id, None, Outcome::Answered, now, 1, cooldown); // X answers
+        breakers.record(&id, probe, Outcome::NotAttempted, now, 1, cooldown); // the probe gives up
+        assert_eq!(
+            (breakers.admits(&id, now, cooldown), breakers.admits(&id, now, cooldown)),
+            (Ok(None), Ok(None)),
+            "a healthy circuit became probe-only"
+        );
+    }
+
+    /// Round 3, L1: one probe in flight at a time, even when an older probe settles late.
+    #[test]
+    fn a_late_probe_settlement_does_not_admit_a_second_probe() {
+        let breakers = Breakers::default();
+        let id = UpstreamId::new("x");
+        let cooldown = Duration::from_secs(30);
+        let mut now = 1_000_u64;
+        assert_eq!(breakers.admits(&id, now, cooldown), Ok(None)); // X, long-running
+        breakers.record(&id, None, Outcome::TransportFailure, now, 1, cooldown); // opens
+        now += 31_000_000_000;
+        let first = breakers.admits(&id, now, cooldown).unwrap(); // P1
+        breakers.record(&id, None, Outcome::Answered, now, 1, cooldown); // X answers: closed
+        assert_eq!(breakers.admits(&id, now, cooldown), Ok(None)); // W
+        breakers.record(&id, None, Outcome::TransportFailure, now, 1, cooldown); // W fails: open
+        now += 31_000_000_000;
+        let second = breakers.admits(&id, now, cooldown).unwrap(); // P2, in flight
+        assert!(second.is_some() && second != first);
+        breakers.record(&id, first, Outcome::NotAttempted, now, 1, cooldown); // P1 settles late
+        assert!(
+            breakers.admits(&id, now, cooldown).is_err(),
+            "a second probe was admitted while P2 is in flight"
         );
     }
 }

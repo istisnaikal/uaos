@@ -156,7 +156,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     in every spelling.
   - **DNS.** The door resolves names itself, within a timeout, classifies every answer, and
     dials the classified address, at most four per attempt. It refuses every special-purpose
-    range, including IPv4 embedded in IPv4-mapped, NAT64 and 6to4 forms, and Teredo. An upstream
+    range, including IPv4 embedded in IPv4-mapped, NAT64 and 6to4 forms, and Teredo; a
+    well-known NAT64 address of a public IPv4 address is public, so IPv6-only networks reach
+    IPv4-only providers through DNS64. An upstream
     declared private may also reach loopback, private and unique-local addresses, never
     link-local (the metadata service). Plain HTTP is dialled only at pinned local addresses and
     never resolved.
@@ -173,29 +175,37 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - The provider credential is inserted last; its value is never printed.
     - One send per Operation; a request bound to another Operation is refused.
     - A circuit breaker per upstream counts transport failures and lets one probe through
-      after its cooldown; a probe whose caller gives up lets the next attempt probe.
+      after its cooldown; a probe whose caller gives up lets the next attempt probe, and a
+      probe that settles after the circuit moved on changes nothing unless it answered. While a
+      probe is in flight, `retry_after` is a 1 s hint.
     - IPv6 forms that embed a local IPv4 address are never treated as local, and the IPv6
       cloud metadata endpoints are refused.
   - **Connection tasks** run on an executor the runtime provides.
   - **Error codes** `UAOS-EGRESS-0001` to `0005`: blocked, unreachable, timeout, circuit open,
     refused.
 - Reachability rules for the door (ADR-0010).
-  - **`clippy.toml`.** Outbound connects (std and tokio, `TcpSocket` included), name
-    resolution (`lookup_host`, `to_socket_addrs`), UDP and building another HTTP client are
-    banned outside the door; listening (`TcpListener::bind`) outside the API crate; task and
-    thread spawning outside the runtime; `Door::new` outside its one owner.
+  - **`clippy.toml`.** Outbound connects (std and tokio, `TcpSocket` included, Unix sockets
+    and Windows named pipes), name resolution (`lookup_host`, `to_socket_addrs`, hyper-util's
+    `GaiResolver`), UDP and building another HTTP client are banned outside the door; listening
+    (`TcpListener::bind`, `TcpSocket::listen`) outside the API crate; task and thread spawning,
+    and the `JoinSet` and `LocalSet` types, outside the runtime; `Door::new` outside its one
+    owner.
   - **`arch.toml`.** The bin's allow list is now explicit and leaves out the door; the bin
     reaches it only through the runtime. `uaos-module-api` and every Ring 1 crate are banned,
-    transitively, from network and async-I/O crates (new `[ring1] ban`, enforced by
+    transitively, from network, TLS and async-I/O crates (new `[ring1] ban`, enforced by
     `cargo xtask arch-check`).
   - **`deny.toml`** bans `ring`.
-  - **Seeded violations:** `egress-dials-private-range`, `egress-numeric-host`,
+  - **Seeded violations (17):** `egress-dials-private-range`, `egress-numeric-host`,
     `egress-private-reaches-link-local`, `egress-plaintext-resolved`,
-    `egress-breaker-admits-after-cooldown`, `egress-ctor-outside-root`,
-    `net-dns-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
-    `spawn-outside-supervisor`, `arch-ring1-depends-on-hyper`.
-  - **Review:** `docs/reviews/WP3.A5-egress.md` (2 High, 4 Medium, 9 Low, all resolved; two
-    fixes rest on ADR-0013 Amendment 1, accepted by the maintainer on 2026-10-16).
+    `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel`,
+    `egress-embedded-local`, `egress-ctor-outside-root`, `net-dns-outside-egress`,
+    `net-resolver-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
+    `net-listen-outside-api`, `net-socket-listen-outside-api`,
+    `net-unix-connect-outside-egress` (Unix only), `spawn-outside-supervisor`,
+    `arch-ring1-depends-on-hyper`.
+  - **Review:** `docs/reviews/WP3.A5-egress.md`, three rounds, all resolved: 2 High, 4 Medium,
+    9 Low; then 1 High, 2 Medium, 7 Low; then 1 Medium, 5 Low. Two fixes rest on ADR-0013
+    Amendment 1, accepted by the maintainer on 2026-10-16.
 - Dependencies for the ADR-0013 stack: tokio, hyper 1, hyper-util, http, rustls 0.23
   (aws-lc-rs only), tokio-rustls, rustls-native-certs, and rcgen for tests only.
   - 48 cargo-vet exemptions, each with a written reason (the unnoted baseline is unchanged);

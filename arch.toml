@@ -58,7 +58,7 @@ ban = ["tokio", "hyper", "reqwest", "rusqlite"]
 ring = 0
 allow = ["uaos-contracts"]
 # The socket modules plug into carries no I/O of its own (ADR-0010, ADR-0014).
-ban = ["tokio", "hyper", "hyper-util", "reqwest", "mio", "socket2", "rusqlite", "uaos-egress"]
+ban = ["tokio", "hyper", "hyper-util", "reqwest", "mio", "socket2", "rustls", "tokio-rustls", "rusqlite", "uaos-egress"]
 
 [crate.uaos-egress]
 ring = 0
