@@ -140,6 +140,9 @@ impl AppendFile for FaultAppend {
             match *fault {
                 Some(0) => {
                     *fault = None;
+                    // As `write_all` on ENOSPC: part of the line reaches the file before the
+                    // failure (review WP3.A1, eleventh round, H1).
+                    let _partial = self.inner.append(bytes.get(..bytes.len() / 2).unwrap_or_default());
                     return Err(FsError::NoSpace { op: "append" });
                 }
                 Some(n) => *fault = Some(n - 1),
@@ -2572,6 +2575,76 @@ fn r10_a_recovery_out_of_space_also_recovers_a_poisoned_store() {
     store.put(pocket(), &content(4)).unwrap();
 }
 
+// ── Eleventh review (WP3.A1, eleventh round) ───────────────────────────────────────────────
+
+/// Eleventh-round H1: an append that runs out of space leaves half its line in the segment and
+/// the writer `DiskFull`. A payload flush failure then replaced `DiskFull` with
+/// `PayloadFlushFailed`, which `recover` cleared without leaving the torn segment: later records,
+/// the loss record among them, were appended after the torn bytes, and the journal no longer
+/// opened. Both ways in: a caller's flush, and a recovery whose own rotation fails.
+#[test]
+fn r11_h1_a_payload_failure_never_hides_a_torn_segment() {
+    for recover_twice in [false, true] {
+        let w = World::new(1101);
+        let store = w.store();
+        let mut j = w.open(&store).unwrap();
+        write(&store, &mut j, 1);
+        j.sync().unwrap();
+        write(&store, &mut j, 2); // unflushed, its payload pending
+        w.fs.fail_segment_append_after(0); // the next append writes half its line, then fails
+        assert_eq!(
+            j.append(draft(Some(pocket()), None, 3)).err(),
+            Some(JournalError::DiskFull)
+        );
+        w.sim.fail_next_sync(); // the store's next flush fails
+        if recover_twice {
+            assert!(j.recover().is_err(), "the rotation's payload flush did not fail");
+        } else {
+            assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+        }
+        assert_eq!(
+            j.health(),
+            JournalHealth::DiskFull,
+            "a payload failure hid the torn segment"
+        );
+        j.recover().unwrap();
+        let after = j.append(draft(Some(pocket()), None, 4)).unwrap().seq.0;
+        j.sync().unwrap();
+        drop(j);
+        drop(store);
+        let (store, j) = w.restart(false); // fails if a record follows torn bytes
+        assert!(j.next_seq().0 > after, "the record after the recovery is gone");
+        w.assert_never_silent(&store, "r11 h1");
+    }
+}
+
+/// Eleventh-round L1: a loss still waiting to be journaled was queued again when the same
+/// content was stored and lost once more before the report succeeded, so one record got two
+/// `chunk.lost` records.
+#[test]
+fn r11_l1_a_loss_is_queued_once() {
+    let w = World::new(1103);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, x) = write(&store, &mut j, 1); // unflushed, its payload pending
+    w.sim.fail_next_sync();
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed)); // the payload is dropped
+    w.fs.fail_segment_append_after(0); // the loss record's append fails
+    assert_eq!(j.recover().err(), Some(JournalError::DiskFull));
+    // The store still takes puts while the journal refuses records.
+    assert_eq!(store.put(pocket(), &content(1)).unwrap(), x);
+    w.sim.fail_next_sync();
+    assert!(store.sync_pending().is_err()); // lost again
+    j.recover().unwrap();
+    let (records, _) = read_verified(&w.sim, &w.data.join(JOURNAL_DIR)).unwrap();
+    let reports = records
+        .iter()
+        .filter(|r| r.envelope.event_type == types::CHUNK_LOST)
+        .filter(|r| r.envelope.metadata.as_map().get(RECORD_SEQ_METADATA_KEY) == Some(&seq.to_string()))
+        .count();
+    assert_eq!(reports, 1, "record {seq} has {reports} chunk.lost records");
+}
+
 /// First-round L4 and tenth-round L2: an open that finds one lost chunk referenced by more
 /// records than it lists journals a loss for every one and lists the latest `MAX_LOST_LISTED`.
 #[test]
@@ -2680,9 +2753,10 @@ fn check(
 }
 
 /// After a process crash: every acknowledged record that survived keeps a readable payload
-/// unless a flush failure armed since its acknowledgement may have dropped it, or a later shred
-/// removed it. A reported loss alone does not excuse it, so a store that loses payloads and
-/// reports every loss still fails (review WP3.A1, tenth round, L3).
+/// unless a failed flush may have dropped it (one armed while the record was not yet flushed,
+/// and only when a failed flush drops the unflushed bytes) or a later shred removed it. A
+/// reported loss alone does not excuse it, so a store that loses or discards payloads and
+/// reports every loss still fails (review WP3.A1, rounds 10 and 11, L3 and L2).
 fn check_crash_payloads(w: &World, store: &ChunkStore, acked: &BTreeMap<u64, u64>, exposed: &BTreeSet<u64>) {
     let (records, _, shreds) = w.survey();
     for (seq, _, chunk) in &records {
@@ -2692,21 +2766,41 @@ fn check_crash_payloads(w: &World, store: &ChunkStore, acked: &BTreeMap<u64, u64
         let shredded = shreds.iter().any(|(_, sc, ss)| *sc == chunk.to_string() && ss > seq);
         assert!(
             shredded || store.get(pocket(), *chunk).is_ok(),
-            "record {seq} lost its payload to a process crash with no flush failure armed since it was acknowledged"
+            "record {seq} lost its payload to a process crash, though no failed flush could have dropped it"
         );
     }
 }
 
 /// A recovery with no fault armed succeeds and leaves neither the journal nor the store
-/// refusing work (round 10, L3).
+/// refusing work (round 10, L3), and the journal then takes a record, flushes it and still reads
+/// back whole: no record lands after a torn line (round 11, H1).
 fn check_clean_recovery(
+    w: &World,
     outcome: &Result<(), JournalError>,
-    journal: &Journal,
+    journal: &mut Journal,
     store: &ChunkStore,
 ) -> Result<(), TestCaseError> {
     prop_assert!(outcome.is_ok(), "a recovery with no fault armed failed: {:?}", outcome);
     prop_assert_eq!(journal.health(), JournalHealth::Healthy);
     prop_assert!(!store.is_poisoned(), "the store stayed poisoned after a clean recovery");
+    let appended = journal.append(draft(Some(pocket()), None, 0));
+    prop_assert!(
+        appended.is_ok(),
+        "a clean recovery left the journal refusing records: {:?}",
+        appended
+    );
+    let synced = journal.sync();
+    prop_assert!(
+        synced.is_ok(),
+        "a clean recovery left the journal unable to flush: {:?}",
+        synced
+    );
+    let read = read_verified(&w.sim, &w.data.join(JOURNAL_DIR));
+    prop_assert!(
+        read.is_ok(),
+        "the journal no longer reads back after a clean recovery: {:?}",
+        read.err()
+    );
     Ok(())
 }
 
@@ -2748,7 +2842,7 @@ proptest! {
                     let Ok(chunk) = store.put(pocket(), &content(n)) else { continue };
                     if let Ok(a) = journal.append(draft(Some(pocket()), Some(chunk), n)) {
                         acked.insert(a.seq.0, n);
-                        if w.sim.sync_fault_pending() {
+                        if !keep_cache && w.sim.sync_fault_pending() {
                             exposed.insert(a.seq.0);
                         }
                     }
@@ -2768,7 +2862,12 @@ proptest! {
                 Op::Sync => { let _outcome = journal.sync(); }
                 Op::FailSyncAfter(n) => {
                     w.sim.fail_sync_after(n);
-                    exposed.extend(acked.keys().copied());
+                    // A failed flush drops only unflushed bytes, and none when the cache keeps
+                    // them (eleventh round, L2): records already flushed cannot lose their payload.
+                    if !keep_cache {
+                        let flushed = journal.flushed_through().map(|s| s.0);
+                        exposed.extend(acked.keys().copied().filter(|s| flushed.is_none_or(|f| *s > f)));
+                    }
                 }
                 Op::FailAppend => w.fs.fail_segment_append_after(0),
                 Op::Tick => w.clock.advance(1_100_000_000),
@@ -2781,7 +2880,7 @@ proptest! {
                     let clean = !w.sim.sync_fault_pending() && !w.fs.append_fault_pending();
                     let outcome = journal.recover();
                     if clean {
-                        check_clean_recovery(&outcome, &journal, &store)?;
+                        check_clean_recovery(&w, &outcome, &mut journal, &store)?;
                     }
                 }
                 Op::Crash | Op::PowerLoss => {
@@ -2947,7 +3046,7 @@ proptest! {
                     last_put.insert(n, idx);
                     if let Ok(a) = journal.append(draft(Some(pocket()), Some(chunk), n)) {
                         acked.insert(a.seq.0, n);
-                        if w.sim.sync_fault_pending() {
+                        if !keep_cache && w.sim.sync_fault_pending() {
                             exposed.insert(a.seq.0);
                         }
                     }
@@ -2960,7 +3059,7 @@ proptest! {
                     let written = journal.next_seq().0 > before;
                     if let Ok(a) = &res {
                         acked.insert(a.seq.0, n);
-                        if w.sim.sync_fault_pending() {
+                        if !keep_cache && w.sim.sync_fault_pending() {
                             exposed.insert(a.seq.0);
                         }
                     }
@@ -2989,7 +3088,12 @@ proptest! {
                 ShredOp::Sync => { let _outcome = journal.sync(); }
                 ShredOp::FailSyncAfter(n) => {
                     w.sim.fail_sync_after(n);
-                    exposed.extend(acked.keys().copied());
+                    // A failed flush drops only unflushed bytes, and none when the cache keeps
+                    // them (eleventh round, L2): records already flushed cannot lose their payload.
+                    if !keep_cache {
+                        let flushed = journal.flushed_through().map(|s| s.0);
+                        exposed.extend(acked.keys().copied().filter(|s| flushed.is_none_or(|f| *s > f)));
+                    }
                 }
                 ShredOp::FailAppend => w.fs.fail_segment_append_after(0),
                 ShredOp::Tick => w.clock.advance(1_100_000_000),
@@ -3002,7 +3106,7 @@ proptest! {
                     let clean = !w.sim.sync_fault_pending() && !w.fs.append_fault_pending();
                     let outcome = journal.recover();
                     if clean {
-                        check_clean_recovery(&outcome, &journal, &store)?;
+                        check_clean_recovery(&w, &outcome, &mut journal, &store)?;
                     }
                 }
                 ShredOp::Crash | ShredOp::PowerLoss => {

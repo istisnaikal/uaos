@@ -805,7 +805,14 @@ impl Journal {
         if let Some(store) = &self.payloads
             && (store.has_untaken_losses() || store.sync_pending().is_err())
         {
-            self.health = JournalHealth::PayloadFlushFailed;
+            // Only a healthy writer becomes `PayloadFlushFailed`. `DiskFull` and `WriteFailed`
+            // mean the active segment may end in a torn line, which only `recover`'s rotation or
+            // rewrite leaves behind; replacing them let `recover` return `Ok` and append after
+            // the torn bytes, so the journal no longer opened. `recover` handles a poisoned store
+            // first in every state (review WP3.A1, eleventh round, H1).
+            if self.health == JournalHealth::Healthy {
+                self.health = JournalHealth::PayloadFlushFailed;
+            }
             return Err(JournalError::PayloadFlushFailed);
         }
         Ok(())
@@ -889,10 +896,17 @@ impl Journal {
         {
             store.recover_pending_for_journal().map_err(JournalError::Payload)?;
             // Moved into `unreported` at once: from here on the marker cannot pass them,
-            // whatever fails next (review WP3.A1 H2).
+            // whatever fails next (review WP3.A1 H2). A record whose loss is already queued is
+            // not queued again: its content may have been stored and lost once more while the
+            // first report waited (eleventh round, L1).
             let lost = store.take_lost_for_journal();
+            let queued: BTreeSet<u64> = self.unreported.iter().map(|(p, _)| p.record_seq.0).collect();
             let referencing = self.unflushed_referencing(&lost);
-            self.unreported.extend(referencing);
+            self.unreported.extend(
+                referencing
+                    .into_iter()
+                    .filter(|(p, _)| !queued.contains(&p.record_seq.0)),
+            );
             if self.health == JournalHealth::PayloadFlushFailed {
                 self.health = JournalHealth::Healthy;
             }

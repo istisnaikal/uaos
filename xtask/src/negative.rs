@@ -837,6 +837,23 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "the store stayed poisoned after an Ok recovery",
         },
         Case {
+            id: "payload-failure-hides-torn-segment",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 eleventh round H1: a payload flush failure replaces `DiskFull`, so recovery
+            // appends after a torn line and the journal no longer opens.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "            if self.health == JournalHealth::Healthy {\n                self.health = JournalHealth::PayloadFlushFailed;\n            }",
+                "            self.health = JournalHealth::PayloadFlushFailed;",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r11_h1_a_payload_failure_never_hides_a_torn_segment"],
+            },
+            expect: "a payload failure hid the torn segment",
+        },
+        Case {
             id: "shred-incomplete-key-only",
             gate: "journal-durability",
             tool: None,
@@ -1448,5 +1465,44 @@ fn history_case(
         Ok(()) => Err("gate PASSED on the seeded violation — it does not bite".to_owned()),
         Err(e) if e.contains(expect) => Ok(()),
         Err(e) => Err(format!("gate failed without mentioning `{expect}`: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace;
+
+    /// A seed anchor names exactly one site: one that also matched elsewhere would seed the first
+    /// match, which may not be the case's site (review WP3.A1, round 10).
+    #[test]
+    fn a_seed_anchor_must_occur_exactly_once() {
+        let dir = std::env::temp_dir().join(format!("uaos-xtask-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("f.rs"),
+            "a
+b
+a
+",
+        )
+        .unwrap();
+        assert!(
+            replace(
+                "f.rs", "b
+", "c
+"
+            )(&dir)
+            .is_ok()
+        );
+        let twice = replace(
+            "f.rs", "a
+", "x
+",
+        )(&dir)
+        .unwrap_err();
+        assert!(twice.contains("occurs 2 times"), "{twice}");
+        let missing = replace("f.rs", "zzz", "y")(&dir).unwrap_err();
+        assert!(missing.contains("not found"), "{missing}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

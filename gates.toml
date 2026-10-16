@@ -204,6 +204,7 @@ negative = [
   "kernel-record-appended-directly",
   "store-losses-taken-by-caller",
   "recovery-leaves-store-poisoned",
+  "payload-failure-hides-torn-segment",
 ]
 
 [[gate]]
