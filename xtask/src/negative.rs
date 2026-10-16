@@ -1384,8 +1384,8 @@ pub(crate) fn cases() -> Vec<Case> {
             // WP3.A1 third round H1: a coordinated store that shreds without its journal's record.
             seed: replace(
                 "crates/uaos-state/src/chunks/mod.rs",
-                "        if self.attached.load(Ordering::SeqCst) {",
-                "        if false && self.attached.load(Ordering::SeqCst) {",
+                "        if self.attached.load(Ordering::SeqCst) {\n            return Err(ChunkError::ShredThroughJournal);",
+                "        if false && self.attached.load(Ordering::SeqCst) {\n            return Err(ChunkError::ShredThroughJournal);",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -1624,6 +1624,40 @@ pub(crate) fn cases() -> Vec<Case> {
                 args: &["test", "-p", "uaos-state", "--test", "durability", "r9_l1_kernel_records_cannot_be_appended_directly"],
             },
             expect: "a chunk.shredded record was appended directly",
+        },
+        Case {
+            id: "store-losses-taken-by-caller",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 tenth round L1: a coordinated store lets a caller recover it or take its
+            // losses, so the journal never reports them.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "        if self.attached.load(Ordering::SeqCst) {\n            return Err(ChunkError::LossesThroughJournal);",
+                "        if false && self.attached.load(Ordering::SeqCst) {\n            return Err(ChunkError::LossesThroughJournal);",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r10_l1_a_coordinated_stores_losses_go_through_its_journal"],
+            },
+            expect: "a caller recovered a coordinated store",
+        },
+        Case {
+            id: "recovery-leaves-store-poisoned",
+            gate: "journal-durability",
+            tool: None,
+            // Found by the tenth WP3.A1 round's stronger schedules: `recover` treats a poisoned
+            // store only while the writer is healthy.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "            && (self.health == JournalHealth::PayloadFlushFailed || store.is_poisoned() || store.has_untaken_losses())",
+                "            && (self.health == JournalHealth::PayloadFlushFailed\n                || (self.health == JournalHealth::Healthy && store.is_poisoned())\n                || store.has_untaken_losses())",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r10_a_recovery_out_of_space_also_recovers_a_poisoned_store"],
+            },
+            expect: "the store stayed poisoned after an Ok recovery",
         },
         Case {
             id: "shred-incomplete-key-only",

@@ -46,7 +46,7 @@
 //!   quarantined and journaled as `chunk.lost` ([`Journal::lost_payloads`]), and only then does
 //!   the marker move. Without a valid marker the whole journal is checked.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -233,7 +233,7 @@ pub struct Journal {
     /// Payloads reported lost since this journal was opened (the latest [`MAX_LOST_LISTED`]).
     lost: Vec<LostPayload>,
     /// Losses found but not yet journaled; kept across failures until their records are written.
-    unreported: Vec<(LostPayload, EventEnvelope)>,
+    unreported: VecDeque<(LostPayload, EventEnvelope)>,
     /// The in-memory manifest disowns segment contents that are not yet flushed; it is stored,
     /// and the marker may move, only after the next flush (open's carried tail).
     manifest_unstored: bool,
@@ -347,7 +347,7 @@ impl Journal {
         if let Some(store) = &payloads
             && store.is_poisoned()
         {
-            store.recover_pending().map_err(JournalError::Payload)?;
+            store.recover_pending_for_journal().map_err(JournalError::Payload)?;
         }
         let mut lost_in_tail = Vec::new();
         let mut shreds_to_complete = Vec::new();
@@ -377,7 +377,7 @@ impl Journal {
         } else {
             // No record exists yet, so no loss the store set aside can be referenced by one.
             if let Some(store) = &payloads {
-                let _unreferenced = store.take_lost();
+                let _unreferenced = store.take_lost_for_journal();
             }
             let manifest = new_manifest(fs.as_ref(), &dir, rng.as_ref())?;
             let head = genesis_hash(&manifest.journal_id);
@@ -416,7 +416,7 @@ impl Journal {
             payloads,
             last_marker_mono: last_flush_mono,
             lost: Vec::new(),
-            unreported: lost_in_tail,
+            unreported: lost_in_tail.into(),
             manifest_unstored: carried_tail,
         };
         // Losses are journaled first, then one flush makes the previous run's records durable
@@ -550,7 +550,7 @@ impl Journal {
         if self.unreported.is_empty() {
             return Ok(());
         }
-        while let Some((payload, referencing)) = self.unreported.first().cloned() {
+        while let Some((payload, referencing)) = self.unreported.front().cloned() {
             let metadata = Metadata::new(
                 [
                     (CHUNK_METADATA_KEY.to_owned(), payload.chunk.to_string()),
@@ -585,7 +585,9 @@ impl Journal {
                 Origin::Report,
             );
             if self.next_seq > before {
-                self.unreported.remove(0);
+                // From the front in O(1): an open may report one lost chunk for every record that
+                // references it (review WP3.A1, tenth round, L2).
+                self.unreported.pop_front();
                 if self.lost.len() >= MAX_LOST_LISTED {
                     self.lost.remove(0);
                 }
@@ -797,8 +799,11 @@ impl Journal {
     /// poisoned by a failure elsewhere (review WP3.A1 H3), the writer stops: the unflushed
     /// records' payloads may be gone, and only [`Journal::recover`] can tell.
     fn sync_payloads(&mut self) -> Result<(), JournalError> {
+        // A loss the store set aside and the journal has not taken stops the flush too: the
+        // records that reference it must not become durable before its `chunk.lost` record, and
+        // `recover` takes it (tenth round, L1).
         if let Some(store) = &self.payloads
-            && store.sync_pending().is_err()
+            && (store.has_untaken_losses() || store.sync_pending().is_err())
         {
             self.health = JournalHealth::PayloadFlushFailed;
             return Err(JournalError::PayloadFlushFailed);
@@ -873,11 +878,24 @@ impl Journal {
     /// `DiskFull` if there is still no space; `Stopped` if a flush still cannot be recovered;
     /// `Payload` if the chunk store cannot be read back.
     pub fn recover(&mut self) -> Result<(), JournalError> {
-        // A store poisoned while the writer stayed healthy (a failed flush outside `sync`, or a
-        // put whose write overlapped one) is recovered the same way; otherwise its refusals
-        // would outlast every call to `recover` (review WP3.A1, fourth round, L1).
-        if self.health == JournalHealth::Healthy && self.payloads.as_ref().is_some_and(|s| s.is_poisoned()) {
-            self.health = JournalHealth::PayloadFlushFailed;
+        // The store first, whatever state the writer is in: after a payload flush failure, or
+        // while the store is poisoned (a failed flush outside `sync`, a put whose write
+        // overlapped one) or holds losses not taken yet. Its losses reach `unreported` before
+        // any branch below could flush the records that reference them, and its refusals do
+        // not outlast this call (review WP3.A1, fourth round, L1; tenth round: a writer out of
+        // space left the store poisoned after an `Ok`).
+        if let Some(store) = self.payloads.clone()
+            && (self.health == JournalHealth::PayloadFlushFailed || store.is_poisoned() || store.has_untaken_losses())
+        {
+            store.recover_pending_for_journal().map_err(JournalError::Payload)?;
+            // Moved into `unreported` at once: from here on the marker cannot pass them,
+            // whatever fails next (review WP3.A1 H2).
+            let lost = store.take_lost_for_journal();
+            let referencing = self.unflushed_referencing(&lost);
+            self.unreported.extend(referencing);
+            if self.health == JournalHealth::PayloadFlushFailed {
+                self.health = JournalHealth::Healthy;
+            }
         }
         match self.health {
             JournalHealth::Healthy => {}
@@ -897,18 +915,8 @@ impl Journal {
                 self.rewrite_unflushed(flush)?;
                 self.health = JournalHealth::Healthy;
             }
-            JournalHealth::PayloadFlushFailed => {
-                let Some(store) = self.payloads.clone() else {
-                    return Err(JournalError::Stopped);
-                };
-                store.recover_pending().map_err(JournalError::Payload)?;
-                // Moved into `unreported` at once: from here on the marker cannot pass them,
-                // whatever fails next (review WP3.A1 H2).
-                let lost = store.take_lost();
-                let referencing = self.unflushed_referencing(&lost);
-                self.unreported.extend(referencing);
-                self.health = JournalHealth::Healthy;
-            }
+            // With a store, handled above; without one, nothing can recover it.
+            JournalHealth::PayloadFlushFailed => return Err(JournalError::Stopped),
         }
         // Appends the `chunk.lost` records, then one flush covers them together with the records
         // whose payloads they report; with nothing to report, it completes the flush that failed.
@@ -1340,8 +1348,10 @@ fn recover_tail_payloads(
         .map(|(pocket, chunk, _, e)| (*pocket, *chunk, *e))
         .collect();
     let refs: Vec<(PocketId, ChunkRef)> = referencing.iter().map(|(p, c, _)| (*p, *c)).collect();
-    store.verify_and_sync(&refs).map_err(JournalError::Payload)?;
-    let lost = store.take_lost();
+    store
+        .verify_and_sync_for_journal(&refs)
+        .map_err(JournalError::Payload)?;
+    let lost = store.take_lost_for_journal();
     if lost.is_empty() {
         return Ok(Vec::new());
     }

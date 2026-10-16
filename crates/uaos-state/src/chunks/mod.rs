@@ -143,6 +143,10 @@ pub enum ChunkError {
     /// [`crate::journal::Journal::shred`], which records it first.
     #[error("this store is coordinated by a journal; shred through the journal")]
     ShredThroughJournal,
+    /// A journal coordinates this store; its recovery and its losses go through the journal,
+    /// which reports each loss before it flushes the records that reference it.
+    #[error("this store is coordinated by a journal; recover through the journal")]
+    LossesThroughJournal,
     /// [`MAX_UNFINISHED_SHREDS`] shreds failed and were neither retried nor followed by a put
     /// of their content; retry them first.
     #[error("too many shreds left unfinished by failures; retry them first")]
@@ -161,7 +165,7 @@ impl ChunkError {
             Self::FlushFailed => codes::STORE_PAYLOAD_FLUSH_FAILED,
             Self::PendingFull | Self::ShredBacklog => codes::RUNTIME_OVERLOAD,
             Self::InstanceLocked => codes::JOURNAL_INSTANCE_LOCKED,
-            Self::ShredThroughJournal => codes::CONFIG_INVALID,
+            Self::ShredThroughJournal | Self::LossesThroughJournal => codes::CONFIG_INVALID,
             Self::TooLarge | Self::Storage(_) | Self::Platform(_) => codes::JOURNAL_WRITE_FAILED,
         }
     }
@@ -1051,9 +1055,20 @@ impl ChunkStore {
     /// [`ChunkStore::take_lost`]; what is set aside survives a failure of this call. On success
     /// the store is no longer poisoned.
     ///
+    /// A store that a journal coordinates refuses this call: [`crate::journal::Journal::recover`]
+    /// recovers it and reports each loss before it flushes the records that reference it
+    /// (review WP3.A1, tenth round, L1).
+    ///
     /// # Errors
-    /// Storage or keyring failures; the store then stays poisoned.
+    /// `LossesThroughJournal` if a journal coordinates the store; storage or keyring failures;
+    /// the store then stays poisoned.
     pub fn recover_pending(&self) -> Result<(), ChunkError> {
+        self.refuse_if_attached()?;
+        self.recover_pending_for_journal()
+    }
+
+    /// [`ChunkStore::recover_pending`] without the coordination check, for the journal.
+    pub(crate) fn recover_pending_for_journal(&self) -> Result<(), ChunkError> {
         let seen = self.poison.load(Ordering::SeqCst);
         let batch: Vec<Key> = locked(&self.pending).iter().copied().collect();
         for key in batch {
@@ -1086,9 +1101,26 @@ impl ChunkStore {
 
     /// Takes the chunks recovery found lost. The caller must report each (the journal writes a
     /// `chunk.lost` record, and holds its durable point back until it has).
-    #[must_use]
-    pub fn take_lost(&self) -> Vec<LostChunk> {
+    ///
+    /// # Errors
+    /// `LossesThroughJournal` if a journal coordinates the store: only the journal takes them,
+    /// since a loss taken elsewhere would never get its `chunk.lost` record (tenth round, L1).
+    pub fn take_lost(&self) -> Result<Vec<LostChunk>, ChunkError> {
+        self.refuse_if_attached()?;
+        Ok(self.take_lost_for_journal())
+    }
+
+    /// [`ChunkStore::take_lost`] without the coordination check, for the journal.
+    pub(crate) fn take_lost_for_journal(&self) -> Vec<LostChunk> {
         std::mem::take(&mut *locked(&self.lost))
+    }
+
+    /// Refuses a call that only the coordinating journal may make.
+    fn refuse_if_attached(&self) -> Result<(), ChunkError> {
+        if self.attached.load(Ordering::SeqCst) {
+            return Err(ChunkError::LossesThroughJournal);
+        }
+        Ok(())
     }
 
     /// At startup, before the journal makes a previous run's records durable: reads each
@@ -1098,9 +1130,15 @@ impl ChunkStore {
     /// failure of this call. `refs` may contain duplicates.
     ///
     /// # Errors
-    /// Storage or keyring failures. A chunk whose KEK cannot be loaded is a failure, never a
-    /// loss: its files are left untouched.
+    /// `LossesThroughJournal` if a journal coordinates the store; storage or keyring failures. A
+    /// chunk whose KEK cannot be loaded is a failure, never a loss: its files are left untouched.
     pub fn verify_and_sync(&self, refs: &[(PocketId, ChunkRef)]) -> Result<(), ChunkError> {
+        self.refuse_if_attached()?;
+        self.verify_and_sync_for_journal(refs)
+    }
+
+    /// [`ChunkStore::verify_and_sync`] without the coordination check, for the journal.
+    pub(crate) fn verify_and_sync_for_journal(&self, refs: &[(PocketId, ChunkRef)]) -> Result<(), ChunkError> {
         let unique: BTreeSet<Key> = refs.iter().copied().collect();
         for key in unique {
             let _slot = self.slot(key);

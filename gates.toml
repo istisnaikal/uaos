@@ -202,6 +202,8 @@ negative = [
   "shred-mark-not-restored",
   "shred-unmarked-after-written-record",
   "kernel-record-appended-directly",
+  "store-losses-taken-by-caller",
+  "recovery-leaves-store-poisoned",
 ]
 
 [[gate]]

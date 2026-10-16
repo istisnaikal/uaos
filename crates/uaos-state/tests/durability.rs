@@ -47,7 +47,7 @@ use uaos_state::chunks::{
     CHUNKS_DIR, ChunkDurability, ChunkError, ChunkStore, MAX_PENDING, MAX_UNFINISHED_SHREDS, QUARANTINE_DIR,
 };
 use uaos_state::journal::{
-    CHUNK_METADATA_KEY, EventDraft, FlushPolicy, JOURNAL_DIR, Journal, JournalError, JournalHealth,
+    CHUNK_METADATA_KEY, EventDraft, FlushPolicy, JOURNAL_DIR, Journal, JournalError, JournalHealth, MAX_LOST_LISTED,
     RECORD_SEQ_METADATA_KEY, read_verified,
 };
 
@@ -175,6 +175,10 @@ impl FaultFs {
 
     fn clear_append_fault(&self) {
         *self.segment_append_fault.lock().unwrap() = None;
+    }
+
+    fn append_fault_pending(&self) -> bool {
+        self.segment_append_fault.lock().unwrap().is_some()
     }
 }
 
@@ -2489,6 +2493,119 @@ fn r9_l1_kernel_records_cannot_be_appended_directly() {
     assert!(reported.is_empty() && shreds.is_empty(), "a kernel record was written");
 }
 
+// ── Tenth review (WP3.A1, tenth round) ─────────────────────────────────────────────────────
+
+/// Tenth-round L1: a coordinated store's recovery and losses go through its journal. A caller
+/// that took the store's losses, or recovered it itself, let the records referencing a lost
+/// payload become durable with no `chunk.lost` record.
+#[test]
+fn r10_l1_a_coordinated_stores_losses_go_through_its_journal() {
+    // A caller tries to take the losses after a failed payload flush.
+    let w = World::new(1010);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, x) = write(&store, &mut j, 1); // pending, unflushed
+    w.sim.fail_next_sync(); // the payload flush fails; the unflushed bytes are dropped
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    assert_eq!(
+        store.recover_pending(),
+        Err(ChunkError::LossesThroughJournal),
+        "a caller recovered a coordinated store"
+    );
+    assert_eq!(store.take_lost().err(), Some(ChunkError::LossesThroughJournal));
+    assert_eq!(
+        store.verify_and_sync(&[(pocket(), x)]),
+        Err(ChunkError::LossesThroughJournal)
+    );
+    w.clock.advance(1_100_000_000); // the marker may move on the next flush
+    j.recover().unwrap();
+    assert_eq!(j.lost_payloads().len(), 1, "the journal did not report the loss");
+    assert!(w.survey().1.contains(&seq));
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    w.assert_never_silent(&store, "r10 l1, taken");
+
+    // A caller's own flush fails and poisons the store; the journal's next flush refuses, and
+    // its recovery reports the loss first.
+    let w = World::new(1011);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, _x) = write(&store, &mut j, 1);
+    w.sim.fail_next_sync();
+    assert!(store.sync_pending().is_err());
+    assert_eq!(store.recover_pending(), Err(ChunkError::LossesThroughJournal));
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    j.recover().unwrap();
+    assert!(
+        w.survey().1.contains(&seq),
+        "record {seq} became durable before its loss record"
+    );
+    assert_eq!(
+        j.flushed_through().map(|s| s.0),
+        Some(seq + 1),
+        "the loss record is flushed with it"
+    );
+}
+
+/// Found by the tenth round's stronger schedules: with the writer out of space and the store
+/// poisoned by a failed flush of its own, `recover` rotated the segment, returned `Ok` and left
+/// the store refusing every put until a later flush failed and a second recovery ran.
+#[test]
+fn r10_a_recovery_out_of_space_also_recovers_a_poisoned_store() {
+    let w = World::new(1013);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    write(&store, &mut j, 1);
+    j.sync().unwrap();
+    w.fs.fail_segment_append_after(0);
+    assert_eq!(
+        j.append(draft(Some(pocket()), None, 2)).err(),
+        Some(JournalError::DiskFull)
+    );
+    store.put(pocket(), &content(3)).unwrap(); // pending
+    w.sim.fail_next_sync();
+    assert!(store.sync_pending().is_err(), "the store's flush did not fail");
+    j.recover().unwrap();
+    assert!(!store.is_poisoned(), "the store stayed poisoned after an Ok recovery");
+    assert_eq!(j.health(), JournalHealth::Healthy);
+    store.put(pocket(), &content(4)).unwrap();
+}
+
+/// First-round L4 and tenth-round L2: an open that finds one lost chunk referenced by more
+/// records than it lists journals a loss for every one and lists the latest `MAX_LOST_LISTED`.
+#[test]
+fn r10_l2_every_loss_at_open_is_journaled_and_the_list_is_bounded() {
+    let w = World::new(1012);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let n = u64::try_from(MAX_LOST_LISTED).unwrap() + 100;
+    let x = store.put(pocket(), &content(1)).unwrap();
+    for i in 0..n {
+        j.append(draft(Some(pocket()), Some(x), i)).unwrap();
+    }
+    j.sync().unwrap();
+    drop(j);
+    drop(store);
+    w.sim.crash();
+    let name = x.to_string()["hmac-sha256:".len()..].to_owned();
+    let data = w.data.join(CHUNKS_DIR).join(pocket().to_string()).join("data");
+    w.sim.remove_file(&data.join(format!("{name}.chunk"))).unwrap();
+    let store = w.store();
+    let j = w.open(&store).unwrap();
+    assert_eq!(j.lost_payloads().len(), MAX_LOST_LISTED);
+    assert_eq!(
+        j.lost_payloads().last().map(|l| l.record_seq.0),
+        Some(n - 1),
+        "not the latest"
+    );
+    assert_eq!(
+        w.survey().1.len(),
+        usize::try_from(n).unwrap(),
+        "a referencing record has no loss record"
+    );
+}
+
 // ── Random crash schedules ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -2562,6 +2679,37 @@ fn check(
     }
 }
 
+/// After a process crash: every acknowledged record that survived keeps a readable payload
+/// unless a flush failure armed since its acknowledgement may have dropped it, or a later shred
+/// removed it. A reported loss alone does not excuse it, so a store that loses payloads and
+/// reports every loss still fails (review WP3.A1, tenth round, L3).
+fn check_crash_payloads(w: &World, store: &ChunkStore, acked: &BTreeMap<u64, u64>, exposed: &BTreeSet<u64>) {
+    let (records, _, shreds) = w.survey();
+    for (seq, _, chunk) in &records {
+        if !acked.contains_key(seq) || exposed.contains(seq) {
+            continue;
+        }
+        let shredded = shreds.iter().any(|(_, sc, ss)| *sc == chunk.to_string() && ss > seq);
+        assert!(
+            shredded || store.get(pocket(), *chunk).is_ok(),
+            "record {seq} lost its payload to a process crash with no flush failure armed since it was acknowledged"
+        );
+    }
+}
+
+/// A recovery with no fault armed succeeds and leaves neither the journal nor the store
+/// refusing work (round 10, L3).
+fn check_clean_recovery(
+    outcome: &Result<(), JournalError>,
+    journal: &Journal,
+    store: &ChunkStore,
+) -> Result<(), TestCaseError> {
+    prop_assert!(outcome.is_ok(), "a recovery with no fault armed failed: {:?}", outcome);
+    prop_assert_eq!(journal.health(), JournalHealth::Healthy);
+    prop_assert!(!store.is_poisoned(), "the store stayed poisoned after a clean recovery");
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -2587,6 +2735,9 @@ proptest! {
         let mut acked: BTreeMap<u64, u64> = BTreeMap::new();
         let mut next = 0u64;
         let mut rewraps = Vec::new();
+        // Acknowledged records whose payload a flush failure armed since their acknowledgement
+        // may have dropped: only these may lose it to a process crash (round 10, L3).
+        let mut exposed: BTreeSet<u64> = BTreeSet::new();
         for op in ops {
             match op {
                 Op::Write | Op::Repeat(_) => {
@@ -2597,6 +2748,9 @@ proptest! {
                     let Ok(chunk) = store.put(pocket(), &content(n)) else { continue };
                     if let Ok(a) = journal.append(draft(Some(pocket()), Some(chunk), n)) {
                         acked.insert(a.seq.0, n);
+                        if w.sim.sync_fault_pending() {
+                            exposed.insert(a.seq.0);
+                        }
                     }
                 }
                 Op::Shred(i) if !contents.is_empty() => {
@@ -2612,7 +2766,10 @@ proptest! {
                 Op::Shred(_) => {}
                 // Failures are part of the schedule; the checks after each crash judge the outcome.
                 Op::Sync => { let _outcome = journal.sync(); }
-                Op::FailSyncAfter(n) => w.sim.fail_sync_after(n),
+                Op::FailSyncAfter(n) => {
+                    w.sim.fail_sync_after(n);
+                    exposed.extend(acked.keys().copied());
+                }
                 Op::FailAppend => w.fs.fail_segment_append_after(0),
                 Op::Tick => w.clock.advance(1_100_000_000),
                 Op::FinishRewraps => {
@@ -2620,7 +2777,13 @@ proptest! {
                         let _outcome = rewrap.finish();
                     }
                 }
-                Op::Recover => { let _outcome = journal.recover(); }
+                Op::Recover => {
+                    let clean = !w.sim.sync_fault_pending() && !w.fs.append_fault_pending();
+                    let outcome = journal.recover();
+                    if clean {
+                        check_clean_recovery(&outcome, &journal, &store)?;
+                    }
+                }
                 Op::Crash | Op::PowerLoss => {
                     let power = matches!(op, Op::PowerLoss);
                     let flushed = journal.flushed_through().map(|s| s.0);
@@ -2630,7 +2793,13 @@ proptest! {
                     rewraps.drain(..).for_each(std::mem::forget);
                     drop(journal);
                     drop(store);
-                    if power { w.sim.power_loss() } else { w.sim.crash() }
+                    let mut durable_reported = BTreeSet::new();
+                    if power {
+                        w.sim.power_loss();
+                        durable_reported = w.survey().1;
+                    } else {
+                        w.sim.crash();
+                    }
                     // Faults armed before the crash may still hit this open; then open again.
                     // A failed open must not cost anything the OS held (it copies the previous
                     // run's records instead of flushing their file again).
@@ -2646,20 +2815,27 @@ proptest! {
                     (store, journal) = if let Some(pair) = reopen(&w) {
                         pair
                     } else {
-                        w.sim.fail_sync_after(u32::MAX);
+                        w.sim.clear_sync_fault();
                         w.fs.clear_append_fault();
                         if acked.len().is_multiple_of(2) {
                             w.sim.power_loss();
+                            durable_reported = w.survey().1;
                             lost_power = true;
                         } else {
                             w.sim.crash();
                         }
                         reopen(&w).unwrap()
                     };
-                    check(&w, &store, &acked, flushed, lost_power, os_holds_unflushed, &reported_before);
+                    // After a power loss, only a loss record that survived it excuses a payload.
+                    let reported = if lost_power { &durable_reported } else { &reported_before };
+                    check(&w, &store, &acked, flushed, lost_power, os_holds_unflushed, reported);
+                    if !lost_power {
+                        check_crash_payloads(&w, &store, &acked, &exposed);
+                    }
                     let (records, _, _) = w.survey();
                     let present: BTreeSet<u64> = records.iter().map(|(s, _, _)| *s).collect();
                     acked.retain(|s, _| present.contains(s));
+                    exposed.retain(|s| acked.contains_key(s));
                 }
             }
         }
@@ -2752,6 +2928,9 @@ proptest! {
         let mut acked: BTreeMap<u64, u64> = BTreeMap::new();
         let mut next = 0u64;
         let mut rewraps = Vec::new();
+        // Acknowledged records whose payload a flush failure armed since their acknowledgement
+        // may have dropped: only these may lose it to a process crash (round 10, L3).
+        let mut exposed: BTreeSet<u64> = BTreeSet::new();
         // In this process: the op index of the latest shred of content n whose record was
         // written, and of the latest successful put of content n. A record referencing n written
         // after such a shred needs a put in between (the M1 class of round seven).
@@ -2768,6 +2947,9 @@ proptest! {
                     last_put.insert(n, idx);
                     if let Ok(a) = journal.append(draft(Some(pocket()), Some(chunk), n)) {
                         acked.insert(a.seq.0, n);
+                        if w.sim.sync_fault_pending() {
+                            exposed.insert(a.seq.0);
+                        }
                     }
                 }
                 ShredOp::RepeatNoPut(i) if !contents.is_empty() => {
@@ -2778,6 +2960,9 @@ proptest! {
                     let written = journal.next_seq().0 > before;
                     if let Ok(a) = &res {
                         acked.insert(a.seq.0, n);
+                        if w.sim.sync_fault_pending() {
+                            exposed.insert(a.seq.0);
+                        }
                     }
                     if written && let Some(s) = shred_written.get(&n) {
                         let reput = last_put.get(&n).is_some_and(|p| p > s);
@@ -2802,7 +2987,10 @@ proptest! {
                 }
                 ShredOp::RepeatNoPut(_) | ShredOp::Shred(_) => {}
                 ShredOp::Sync => { let _outcome = journal.sync(); }
-                ShredOp::FailSyncAfter(n) => w.sim.fail_sync_after(n),
+                ShredOp::FailSyncAfter(n) => {
+                    w.sim.fail_sync_after(n);
+                    exposed.extend(acked.keys().copied());
+                }
                 ShredOp::FailAppend => w.fs.fail_segment_append_after(0),
                 ShredOp::Tick => w.clock.advance(1_100_000_000),
                 ShredOp::FinishRewraps => {
@@ -2810,7 +2998,13 @@ proptest! {
                         let _outcome = rewrap.finish();
                     }
                 }
-                ShredOp::Recover => { let _outcome = journal.recover(); }
+                ShredOp::Recover => {
+                    let clean = !w.sim.sync_fault_pending() && !w.fs.append_fault_pending();
+                    let outcome = journal.recover();
+                    if clean {
+                        check_clean_recovery(&outcome, &journal, &store)?;
+                    }
+                }
                 ShredOp::Crash | ShredOp::PowerLoss => {
                     let power = matches!(op, ShredOp::PowerLoss);
                     let flushed = journal.flushed_through().map(|s| s.0);
@@ -2819,7 +3013,13 @@ proptest! {
                     rewraps.drain(..).for_each(std::mem::forget);
                     drop(journal);
                     drop(store);
-                    if power { w.sim.power_loss() } else { w.sim.crash() }
+                    let mut durable_reported = BTreeSet::new();
+                    if power {
+                        w.sim.power_loss();
+                        durable_reported = w.survey().1;
+                    } else {
+                        w.sim.crash();
+                    }
                     let reopen = |w: &World| -> Option<(Arc<ChunkStore>, Journal)> {
                         let s = w.try_store(ChunkDurability::Balanced).ok()?;
                         let j = w.open_with(&s, flush).ok()?;
@@ -2829,21 +3029,28 @@ proptest! {
                     (store, journal) = if let Some(pair) = reopen(&w) {
                         pair
                     } else {
-                        w.sim.fail_sync_after(u32::MAX);
+                        w.sim.clear_sync_fault();
                         w.fs.clear_append_fault();
                         if acked.len().is_multiple_of(2) {
                             w.sim.power_loss();
+                            durable_reported = w.survey().1;
                             lost_power = true;
                         } else {
                             w.sim.crash();
                         }
                         reopen(&w).unwrap()
                     };
-                    check(&w, &store, &acked, flushed, lost_power, os_holds_unflushed, &reported_before);
+                    // After a power loss, only a loss record that survived it excuses a payload.
+                    let reported = if lost_power { &durable_reported } else { &reported_before };
+                    check(&w, &store, &acked, flushed, lost_power, os_holds_unflushed, reported);
+                    if !lost_power {
+                        check_crash_payloads(&w, &store, &acked, &exposed);
+                    }
                     check_shreds_complete(&w, &store, "shred schedule");
                     let (records, _, _) = w.survey();
                     let present: BTreeSet<u64> = records.iter().map(|(s, _, _)| *s).collect();
                     acked.retain(|s, _| present.contains(s));
+                    exposed.retain(|s| acked.contains_key(s));
                     shred_written.clear();
                     last_put.clear();
                 }
