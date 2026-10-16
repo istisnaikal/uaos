@@ -39,8 +39,12 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     after the durable point to a fresh segment, and one flush covers them together with any loss
     records open appends for them. This also closes a latent P1 gap: a failed flush during open
     could drop records the OS still held.
-  - **Review:** `docs/reviews/WP3.A1-chunk-durability.md` (4 High, 7 Medium, 7 Low, and four
-    defects found by the extended property test after the fixes). New codes
+  - **A shred the journal recorded but a crash interrupted is completed when the journal
+    opens**; before, the store's startup re-wrapped the leftover key and the content stayed
+    readable (pre-existing).
+  - **Review:** `docs/reviews/WP3.A1-chunk-durability.md` (4 High, 7 Medium, 7 Low, four defects
+    found by the extended property test after the fixes, and a second round: 1 High, 1 Medium,
+    6 Low). New codes
     `STORE_PAYLOAD_LOST` and `STORE_PAYLOAD_FLUSH_FAILED`.
 
 - `uaos-policy` hardening after the retroactive review (`docs/reviews/WP2.1-policy.md`; ADR-0008
@@ -207,8 +211,8 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   balanced-put target is **not met** on Windows (1.55 ms after the review fixes), where file
   creation dominates. Until the state actor (WP3.3), the request whose append finds the flush
   window due pays for the flush.
-- Gate `journal-durability` gains seven seeded violations, one per failure class found by the
-  WP3.A1 review and the extended property test (eleven in all).
+- Gate `journal-durability` gains twelve seeded violations, one per silent-loss class found by
+  the two WP3.A1 review rounds and the extended property test (sixteen in all).
 - Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
   unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a
   forbid.
