@@ -1,6 +1,6 @@
 # ADR-0018: Chunk durability joins the journal's durability classes
 
-**Status:** Proposed (opened 2026-10-13; earliest decision 2026-10-15, 48 h) · **Plan refs:** v2 PD-18, I-02, §2.4 per-stage budget, B-06 · **Amends:** ADR-0003 §5 (chunked payloads) · **Evidence:** [ack-latency appendix](appendix/0003-ack-latency-2026-10-13.md)
+**Status:** Accepted by the maintainer on 2026-10-15, at the end of its 48 h window (opened 2026-10-13) · **Plan refs:** v2 PD-18, I-02, §2.4 per-stage budget, B-06 · **Amends:** ADR-0003 §5 (chunked payloads) · **Evidence:** [ack-latency appendix](appendix/0003-ack-latency-2026-10-13.md)
 
 ## Context
 

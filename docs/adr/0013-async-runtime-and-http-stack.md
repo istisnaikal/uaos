@@ -1,6 +1,6 @@
 # ADR-0013: Async runtime and HTTP stack
 
-**Status:** Proposed (opened 2026-10-13; earliest decision 2026-10-15, 48 h) · **Plan refs:** v1 D2, v2 D-26, I-07, I-14, §2.5 · **Builds on:** ADR-0005, ADR-0010
+**Status:** Accepted by the maintainer on 2026-10-15, at the end of its 48 h window (opened 2026-10-13); decides D-26 · **Plan refs:** v1 D2, v2 D-26, I-07, I-14, §2.5 · **Builds on:** ADR-0005, ADR-0010
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR-0010: Kernel tokens and reachability
 
-**Status:** Proposed (opened 2026-10-13; earliest decision 2026-10-15, 48 h) · **Plan refs:** v2 I-01, I-07, I-10, §2.1, PD-04, PD-13 · **Builds on:** ADR-0001, ADR-0002 (amended)
+**Status:** Accepted by the maintainer on 2026-10-15, as revised (Revision 1), at the end of its 48 h window (opened 2026-10-13) · **Plan refs:** v2 I-01, I-07, I-10, §2.1, PD-04, PD-13 · **Builds on:** ADR-0001, ADR-0002 (amended)
 
 **Revision 1 (2026-10-15, before the decision).** The P3 Move 1 design review found four gaps, and this text closes them before acceptance:
 - **The typestate lacked stages.** It omitted the hook, route and splice stages that ADR-0002's order requires (Decision 1).

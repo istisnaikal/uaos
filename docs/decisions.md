@@ -19,16 +19,12 @@ Merges, publishing, spending and repository-setting changes never default, whate
 | ID | Class | Decision | Recommended default | Deadline | Marker |
 |---|---|---|---|---|---|
 | D-08 | RL | Dedicated conduct address | A project mailbox once a legal entity or organisation exists | overdue (week 1) | in `GOVERNANCE.md` |
-| D-19 | RL | Code-signing path | OV/EV certificate and Apple Developer ID, as an individual, started now. Without them RC-1 ships unsigned, with attestations and checksums and the friction documented | overdue (week 1) | PENDING-DECISION(D-19) |
-| D-20 | R | Merge review rule with one maintainer | Every work package gets an adversarial review; the maintainer merges after reading it; a 24 h cool-off applies to crypto, `unsafe`, sandbox, contract freezes and gate removals. Applied as a conscious assumption; formalized by ADR-0019 | ADR-0019 window | PENDING-DECISION(D-20) |
-| D-21 | RL | Live-provider evidence lane | Both providers, CI-only keys with provider-side spend caps, a protected environment. **Without it the RC-1 tag is blocked**, because live prefix stability is an RC-1 threshold | before WP3.0d | PENDING-DECISION(D-21) |
-| D-22 | RL | Repository owner before release attestations | Move to an organisation before the RC-1 release work (WP3.9); attestations bind provenance to `owner/repo` | 2026-10-26 | PENDING-DECISION(D-22) |
 | D-06 | E | Ingress from containers and WSL | Off; a Unix socket or named pipe first | P3 | PENDING-DECISION(D-06) |
 | D-15 | R | Pricing updates | Manual; automatic updates opt-in | P3 (WP3.5) | PENDING-DECISION(D-15) |
 | D-24 | E | Final-scan caching | Scan every byte; caching only with an equivalence proof and under budget pressure | WP3.8 | PENDING-DECISION(D-24) |
-| D-26 | E | HTTP stack | hyper directly, no reqwest or axum (ADR-0013) | before WP3.2 | PENDING-DECISION(D-26) |
 | D-27 | R | Default pocket for `uaos run` | Project root; budget pools bound explicitly, never by pocket inference | WP3.7 | PENDING-DECISION(D-27) |
 | D-28 | E | Endpoint handling | Three classes, governed / metadata / denied, from a captured inventory | 72 h gate | PENDING-DECISION(D-28) |
+| D-29 | E | Compressed streams | Relay compressed bytes untouched when nothing must be observed; request `accept-encoding: identity` upstream only when the stream must be observed or rewritten (rehydration, the binding-mismatch SLI, loop detection). From the Claude Code capture, CAP-9 | WP3.4 | PENDING-DECISION(D-29) |
 
 ## Later phases (no marker yet)
 
@@ -55,3 +51,9 @@ Merges, publishing, spending and repository-setting changes never default, whate
 | D-14 | Policy engine: Cedar with evaluation errors denied | ADR-0008 |
 | D-18 | Default durability mode: balanced, W = 50 ms | ADR-0003 |
 | D-25 | `kernel-tokens` gate moves from P2 to P3 | ADR-0002 amendment, ADR-0010 |
+| D-19 | Code signing as an individual: an OV/EV certificate and an Apple Developer ID. The maintainer registers and buys; until then RC-1 ships with attestations and checksums | `docs/release/signing-and-identity.md` (2026-10-13, reaffirmed 2026-10-14) |
+| D-20 | Merge review rule with one maintainer: platform-enforced merges (a ruleset with no bypass), an adversarial review per work package, a selective 24 h cool-off | ADR-0019 (accepted by the maintainer 2026-10-15; ruleset id 25183857 applied the same day) |
+| D-26 | HTTP stack: tokio, hyper 1 directly and rustls on aws-lc-rs; no reqwest or axum at RC-1 | ADR-0013 (accepted by the maintainer 2026-10-15) |
+| D-21 | Live-provider lane: both providers, CI-only keys with spend caps, a protected `live-providers` environment that only `main` reaches | `docs/release/signing-and-identity.md`, `.github/workflows/live.yml` (2026-10-13, reaffirmed 2026-10-14) |
+| D-22 | Repository identity frozen as `uaos-project/uaos`, moved before WP3.9 | `docs/release/signing-and-identity.md` (2026-10-13, reaffirmed 2026-10-14) |
+| — | Grants satisfy ask policies and never override a forbid | ADR-0008 Amendment 1 (2026-10-14) |

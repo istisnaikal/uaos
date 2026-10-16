@@ -18,7 +18,7 @@ Each phase has two exits:
 |---|---|---|
 | P0 Bedrock | Contracts, platform boundary, merge gates that are proven to bite | built |
 | P1 Truth | Hash-chained journal, encrypted chunks, projections, OS keychain | built. Owed: the passphrase vault for hosts without a keychain; chunk durability joining the journal's flush schedule (ADR-0018) |
-| P2 Control | Scoped credentials, Cedar authorization, budget ledger, secret redaction | built. Owed: the signed threat-model review that closes the phase |
+| P2 Control | Scoped credentials, Cedar authorization, budget ledger, secret redaction | built; closed by the signed threat model v1 (2026-10-15) |
 | P3 Flow → **Kernel RC-1** | Runtime, the one network door, the module socket, proxy for Anthropic Messages and OpenAI Responses clients, CLI, pricing, release pipeline | **in progress.** First move: the module socket and the first governed Operation, end to end against a local mock provider |
 
 Work owed by finished phases is tracked as `phase-debt` and must be repaid before RC-1. The
