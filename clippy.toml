@@ -8,8 +8,10 @@
 # Paths for crates that are not dependencies yet (reqwest) are added in the phase that
 # introduces them. Clippy only warns about a path that resolves to nothing, and `-D warnings`
 # does not make that fatal, so the gate runs as `cargo xtask clippy`, which fails on it (review
-# WP3.A5, round 4, M1). Entries marked `allow-invalid` exist only on some systems and are not
-# reported anywhere; each has a seeded violation on the system where it exists.
+# WP3.A5, round 4, M1). Some broken paths draw no warning at all (a first segment that names no
+# crate, or an `allow-invalid` entry, which exists only on some systems), so every ban here also
+# has a canary in `crates/uaos-egress/tests/bans.rs` (or `uaos-platform`'s): a call under
+# `#[expect]` that fails clippy wherever the ban stops firing (round 5, L2).
 
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
@@ -60,6 +62,28 @@ disallowed-methods = [
   { path = "tokio::net::windows::named_pipe::ClientOptions::open", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
   { path = "std::os::unix::net::UnixStream::connect", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
   { path = "tokio::net::UnixStream::connect", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  # Review WP3.A5 round 5, M2: the remaining local-IPC sockets (Unix streams by address, Unix
+  # datagrams, std's needing no dependency at all) and the local listeners (Unix listeners and
+  # Windows pipe servers). `crates/uaos-egress/tests/bans.rs` proves each fires where it exists.
+  { path = "tokio::net::UnixStream::connect_addr", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "tokio::net::UnixSocket::datagram", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "tokio::net::UnixDatagram::bind", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "tokio::net::UnixDatagram::unbound", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "tokio::net::UnixDatagram::connect", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "tokio::net::UnixDatagram::send_to", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "std::os::unix::net::UnixDatagram::bind", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "std::os::unix::net::UnixDatagram::bind_addr", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "std::os::unix::net::UnixDatagram::unbound", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "std::os::unix::net::UnixDatagram::connect", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "std::os::unix::net::UnixDatagram::connect_addr", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "std::os::unix::net::UnixDatagram::send_to", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "std::os::unix::net::UnixDatagram::send_to_addr", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "tokio::net::UnixListener::bind", reason = "only the API crate listens, on loopback (owner: uaos-api)", allow-invalid = true },
+  { path = "tokio::net::UnixListener::bind_addr", reason = "only the API crate listens, on loopback (owner: uaos-api)", allow-invalid = true },
+  { path = "tokio::net::UnixSocket::listen", reason = "only the API crate listens, on loopback (owner: uaos-api)", allow-invalid = true },
+  { path = "std::os::unix::net::UnixListener::bind", reason = "only the API crate listens, on loopback (owner: uaos-api)", allow-invalid = true },
+  { path = "std::os::unix::net::UnixListener::bind_addr", reason = "only the API crate listens, on loopback (owner: uaos-api)", allow-invalid = true },
+  { path = "tokio::net::windows::named_pipe::ServerOptions::create", reason = "only the API crate listens, on loopback (owner: uaos-api)", allow-invalid = true },
   # Review WP3.A5 round 2, M2: binding a listener opens a network handle, and `bind` with a name
   # resolves it, a DNS leak that needs no dependency. Only the API crate listens.
   { path = "std::net::TcpListener::bind", reason = "only the API crate listens, on loopback (owner: uaos-api)" },

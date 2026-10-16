@@ -774,6 +774,41 @@ mod tests {
         assert!(admit(now).is_err(), "a second probe was admitted while P2 is in flight");
     }
 
+    /// Round 5, L1: every close after an outage begins a new epoch, also when an ordinary
+    /// attempt's late answer, not a probe, closes it.
+    #[test]
+    fn a_close_by_a_late_answer_begins_a_new_epoch() {
+        let breakers = Breakers::default();
+        let id = UpstreamId::new("x");
+        let cooldown = Duration::from_secs(30);
+        let now = 1_000_u64;
+        let admit = |now| breakers.admits(&id, now, cooldown);
+        let (c, d, x) = (admit(now).unwrap(), admit(now).unwrap(), admit(now).unwrap());
+        breakers.record(&id, c, Outcome::TransportFailure, now, 1, cooldown); // opens
+        breakers.record(&id, x, Outcome::Answered, now, 1, cooldown); // a late answer closes it
+        breakers.record(&id, d, Outcome::TransportFailure, now, 1, cooldown); // sent before the close
+        assert!(
+            ordinary(admit(now)),
+            "a failure sent before the close reopened the circuit"
+        );
+    }
+
+    /// Round 5, L1: an answer while closed resets the count but keeps the epoch, so failures of
+    /// attempts sent in the same epoch still count.
+    #[test]
+    fn failures_after_an_answer_in_the_same_epoch_still_count() {
+        let breakers = Breakers::default();
+        let id = UpstreamId::new("x");
+        let cooldown = Duration::from_secs(30);
+        let (threshold, now) = (2, 1_000_u64);
+        let admit = |now| breakers.admits(&id, now, cooldown);
+        let (a, b, x) = (admit(now).unwrap(), admit(now).unwrap(), admit(now).unwrap());
+        breakers.record(&id, x, Outcome::Answered, now, threshold, cooldown);
+        breakers.record(&id, a, Outcome::TransportFailure, now, threshold, cooldown);
+        breakers.record(&id, b, Outcome::TransportFailure, now, threshold, cooldown);
+        assert!(admit(now).is_err(), "two consecutive failures did not open the circuit");
+    }
+
     /// Round 4, L2: attempts sent during an outage that fail after a probe closed the circuit
     /// do not reopen it; failures of attempts sent since still count.
     #[test]

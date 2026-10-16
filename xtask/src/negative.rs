@@ -598,6 +598,20 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "resolve to nothing",
         },
         Case {
+            id: "clippy-ban-silenced",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 round 5, L2: a ban that stops firing (here, removed) leaves its
+            // canary's expectation unfulfilled, which fails clippy.
+            seed: replace(
+                "clippy.toml",
+                "  { path = \"tokio::net::TcpSocket::listen\", reason = \"only the API crate listens, on loopback (owner: uaos-api)\" },\n",
+                "",
+            ),
+            runner: CLIPPY,
+            expect: "unfulfilled",
+        },
+        Case {
             id: "net-unix-connect-outside-egress",
             gate: "clippy",
             tool: Some(UNIX_ONLY),

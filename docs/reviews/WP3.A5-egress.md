@@ -8,8 +8,8 @@ own documentation said were closed. They blocked merge.
 **Resolution:** every High and Medium finding fixed with a regression test or a seeded violation;
 Low findings fixed or accepted with a reason. Two fixes change accepted decisions and are written
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
-fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, and a fourth
-1 Medium and 5 Low, all resolved below. The PR stays a draft until a review comes back clean.
+fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
+1 Medium and 5 Low, and a fifth 2 Medium and 4 Low, all resolved below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -142,3 +142,18 @@ that resolves on Windows fired.
 | L3 | Half of round 3's stale-probe rule (a stale probe's transport failure) was pinned by no test | A test for it | `a_stale_probe_failure_cannot_reopen_a_closed_circuit` |
 | L4 | The property "nothing outside 2000::/3 is public" became false with round 3's NAT64 change and passed only because random draws never hit `64:ff9b::/96` | The property excludes well-known NAT64 addresses, which have their own property and deterministic cases; ADR-0013 is corrected | `nothing_outside_global_unicast_is_public`, `nat64_well_known_follows_its_ipv4_address` |
 | L5 | The data-flow document said the zero-egress capture confirmed no certificate fetches, though that capture is owed; this record's status line was stale | The data flow cites the test that proves it today and marks I-14 as owed; the status line is current | review of the text |
+
+## Fifth review (2026-10-16)
+
+**Reviewed:** `959a4e0` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export. **Result:** 0 High · 2 Medium · 4 Low. Every arm of the breaker was walked with
+no stuck state, no second probe and no stale evidence counted.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| M1 | `cargo xtask clippy` missed unresolved bans whenever cargo coloured its output, and CI sets `CARGO_TERM_COLOR: always`: the coloured header never starts with `warning:`, so the gate passed on the seeded typo and the CI negative would have reported it broken | The gate asks cargo for plain text (`--color never`) and strips colour codes anyway; a note with no warning above it fails the gate | `a_coloured_unresolved_ban_is_found` (the reviewer's captured output), `a_note_without_its_warning_fails_closed`; negative `clippy-ban-path-unresolved` **PROVEN** with `CARGO_TERM_COLOR=always`, as in CI |
+| M2 | Local-IPC and listen entry points were on no list: tokio's `UnixStream::connect_addr`, std's and tokio's Unix datagram sockets (std's need no dependency, so any crate could use them), Unix listeners and Windows pipe servers | All banned: the connects and datagrams outside the door, the listeners outside the API crate; T5 and the CHANGELOG corrected | the canaries below, on each system where the items exist |
+| L1 | Two properties the epoch fix rests on were pinned by no test: a close by a late ordinary answer must begin a new epoch, and an answer while closed must keep it | Two tests | `a_close_by_a_late_answer_begins_a_new_epoch`, `failures_after_an_answer_in_the_same_epoch_still_count` |
+| L2 | "The gate fails if a listed path resolves to nothing" claimed too much: a first segment naming no crate draws no warning, and `allow-invalid` entries are silent everywhere | Every ban has a canary in `crates/uaos-egress/tests/bans.rs` (and `uaos-platform`'s for `getrandom`): a call under `#[expect]`, compiled where the item exists, so a ban that stops firing fails clippy in the CI clippy job on all three systems; a test fails if a ban has no canary. On Windows every canary that applies is fulfilled; the Unix ones are proven by the Linux and macOS clippy jobs | negative `clippy-ban-silenced` **PROVEN** (a removed ban fails clippy through its canary); `every_ban_has_a_canary` |
+| L3 | `crates/*/tests/` owning `clippy::disallowed_types` let every crate's tests use `HashMap`, including seed-reproducible simulations | The owner is `crates/uaos-egress/tests/` only | `cargo xtask allow-audit` |
+| L4 | `CONTRIBUTING.md` named raw `cargo clippy` as the lint gate | It names `cargo xtask clippy` | review of the text |
