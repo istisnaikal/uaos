@@ -49,6 +49,7 @@ allow-wildcard-paths = true
 deny = [
   { crate = "openssl", reason = "TLS and crypto are aws-lc-rs only (plan D18)" },
   { crate = "openssl-sys", reason = "TLS and crypto are aws-lc-rs only (plan D18)" },
+  { crate = "ring", reason = "TLS and crypto are aws-lc-rs only (plan D18; review WP3.A5 L8)" },
   { crate = "serde_yaml", reason = "unmaintained; YAML is not a config format here (D17)" },
 ]
 

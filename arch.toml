@@ -81,14 +81,16 @@ ban = ["rusqlite"]
 [crate.uaos]
 ring = 0
 # Composition root: wires the kernel and the default Ring 1 modules. Its list is explicit and
-# leaves out `uaos-egress` (ADR-0010 Decision 2): network use from the CLI, such as
-# `doctor --online`, is a runtime Operation like any other. A new module is added here by name.
+# leaves out `uaos-egress`, so the bin can never name the door: network use from the CLI, such
+# as `doctor --online`, is a runtime Operation like any other. The bin still reaches the egress
+# crate through `uaos-runtime`, by design, so the exclusion is the allow list and not a
+# transitive ban (review WP3.A5 M1). A new module is added here by name.
 allow = [
   "uaos-contracts", "uaos-platform", "uaos-state", "uaos-identity", "uaos-policy",
   "uaos-ledger", "uaos-redact", "uaos-module-api", "uaos-runtime", "uaos-api",
   "mod-anthropic", "mod-openai", "mod-mock",
 ]
-ban = ["uaos-egress"]
+ban = []
 
 [crate.uaos-testkit]
 ring = "dev"

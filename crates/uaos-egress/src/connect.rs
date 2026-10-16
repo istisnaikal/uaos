@@ -2,9 +2,11 @@
 
 //! Opening connections: resolve, classify, pin, dial, then TLS with the upstream's own name.
 //!
-//! This is the only code in UAOS that opens a socket. It never dials an address it has not
-//! classified, it dials the classified address itself (no second lookup a rebinding attacker
-//! could answer differently), and it connects only to declared upstreams.
+//! The door's connections are opened here, and the entry points that open sockets or resolve
+//! names elsewhere are banned in `clippy.toml` with this crate as their owner. The connector
+//! never dials an address it has not classified, it dials the classified address itself (no
+//! second lookup a rebinding attacker could answer differently), and it connects only to
+//! declared upstreams.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -26,9 +28,11 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
 use crate::EgressError;
-use crate::addr::{Reach, classify};
 use crate::resolve::Resolve;
 use crate::upstream::{Scheme, Upstream};
+
+/// Addresses tried per connection attempt, each with its own connect timeout (I-08).
+pub const MAX_ADDRESSES_TRIED: usize = 4;
 
 /// Counters of external contact, for the zero-egress check (I-14) and observability.
 #[derive(Debug, Default)]
@@ -39,9 +43,9 @@ pub(crate) struct Counters {
     pub connects: AtomicU64,
     /// Addresses refused by classification.
     pub blocked: AtomicU64,
-    /// Requests handed to an upstream.
+    /// Requests handed to the client once every check passed (a connection may still fail).
     pub sent: AtomicU64,
-    /// Requests refused by the door's own rules before any contact.
+    /// Requests refused by the door's own rules before any contact (an open circuit included).
     pub refused: AtomicU64,
 }
 
@@ -54,9 +58,9 @@ pub struct CounterSnapshot {
     pub connects: u64,
     /// Addresses refused by classification.
     pub blocked: u64,
-    /// Requests handed to an upstream.
+    /// Requests handed to the client once every check passed (a connection may still fail).
     pub sent: u64,
-    /// Requests refused by the door's own rules before any contact.
+    /// Requests refused by the door's own rules before any contact (an open circuit included).
     pub refused: u64,
 }
 
@@ -81,7 +85,7 @@ pub(crate) fn bump(counter: &AtomicU64) {
 /// A connection, plain or TLS.
 #[derive(Debug)]
 pub enum Stream {
-    /// Plain TCP (declared private upstreams only).
+    /// Plain TCP (pinned local addresses of a declared private upstream only).
     Plain(TcpStream),
     /// TLS over TCP.
     Tls(Box<TlsStream<TcpStream>>),
@@ -165,27 +169,29 @@ impl Connector {
             .ok_or(EgressError::Refused("connection to an undeclared upstream"))?;
         let up = &target.upstream;
 
-        let candidates: Vec<IpAddr> = if up.pinned.is_empty() {
+        // Plain HTTP is never resolved: `Upstream::validate` requires pinned local addresses.
+        let candidates: Vec<IpAddr> = if up.pinned.is_empty() && up.scheme == Scheme::Https {
             bump(&self.counters.resolves);
-            self.resolver
-                .resolve(&up.host, up.port)
-                .await
-                .map_err(|_| EgressError::Unreachable("name resolution failed"))?
+            match tokio::time::timeout(self.connect_timeout, self.resolver.resolve(&up.host, up.port)).await {
+                Ok(Ok(found)) => found,
+                Ok(Err(_)) => return Err(EgressError::Unreachable("name resolution failed")),
+                Err(_) => return Err(EgressError::Timeout),
+            }
         } else {
             up.pinned.clone()
         };
         let mut first_block = None;
         let allowed: Vec<IpAddr> = candidates
             .into_iter()
-            .filter(|ip| match classify(*ip) {
-                Reach::Public => true,
-                Reach::Blocked(_) if up.allow_private => true,
-                Reach::Blocked(why) => {
+            .filter(|ip| match up.admits(*ip) {
+                Ok(()) => true,
+                Err(why) => {
                     bump(&self.counters.blocked);
                     first_block.get_or_insert(why);
                     false
                 }
             })
+            .take(MAX_ADDRESSES_TRIED)
             .collect();
         if allowed.is_empty() {
             return Err(first_block.map_or(

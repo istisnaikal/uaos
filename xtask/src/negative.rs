@@ -353,6 +353,102 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "uaos_egress::Door::new",
         },
         Case {
+            id: "egress-private-reaches-link-local",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 H2: a private upstream admitted to every special-purpose range, metadata included.
+            seed: replace(
+                "crates/uaos-egress/src/upstream.rs",
+                "Reach::Blocked(why) if self.allow_private && why.is_local_network() => Ok(()),",
+                "Reach::Blocked(_) if self.allow_private => Ok(()),",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_private_upstream_never_reaches_link_local_or_special_ranges"],
+            },
+            expect: "dialled the metadata range",
+        },
+        Case {
+            id: "egress-plaintext-resolved",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 H2: plain HTTP that depends on name resolution.
+            seed: replace(
+                "crates/uaos-egress/src/upstream.rs",
+                "            if self.pinned.is_empty() {\n                return Err(UpstreamError::PlaintextNeedsPinned);\n            }\n",
+                "",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "plain_http_is_declared_only_toward_pinned_local_addresses"],
+            },
+            expect: "would be resolved",
+        },
+        Case {
+            id: "egress-breaker-admits-after-cooldown",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 M4: a breaker with no half-open state.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "Breaker::Probing => Err(self.limits.breaker_cooldown),",
+                "Breaker::Probing => Ok(false),",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "after_the_cooldown_exactly_one_probe_goes_through"],
+            },
+            expect: "more than one probe",
+        },
+        Case {
+            id: "net-dns-outside-egress",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 M2: DNS through std, which needs no dependency at all.
+            seed: append(
+                "crates/uaos-state/src/lib.rs",
+                "\n/// Seeded.\n#[must_use]\npub fn seeded_violation() -> bool {\n    use std::net::ToSocketAddrs as _;\n    (\"exfil.example\", 80).to_socket_addrs().is_ok()\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "std::net::ToSocketAddrs::to_socket_addrs",
+        },
+        Case {
+            id: "net-connect-outside-egress",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 M2: an outbound TCP connection outside the connector.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\npub async fn seeded_violation(addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpStream> {\n    tokio::net::TcpSocket::new_v4()?.connect(addr).await\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::net::TcpSocket::connect",
+        },
+        Case {
+            id: "net-udp-outside-egress",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 M2: a UDP socket.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\npub async fn seeded_violation() -> std::io::Result<tokio::net::UdpSocket> {\n    tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).await\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::net::UdpSocket::bind",
+        },
+        Case {
+            id: "spawn-outside-supervisor",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 M2: a task spawned on a runtime handle, outside the supervisor.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\npub fn seeded_violation() {\n    drop(tokio::runtime::Handle::current().spawn(async {}));\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::runtime::Handle::spawn",
+        },
+        Case {
             id: "arch-ring1-depends-on-hyper",
             gate: "arch-check",
             tool: None,
