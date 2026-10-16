@@ -263,7 +263,7 @@ registry! {
         "error-egress-unreachable", "The provider could not be reached: name resolution, connection or TLS failed, and nothing was sent.",
         "Check the network, then run `uaos doctor --online` and retry.";
     EGRESS_TIMEOUT = Egress 3, Provider, S3, retryable: true, leak: false,
-        "error-egress-timeout", "Reaching the provider timed out (name resolution, connection or the TLS handshake), and nothing was sent.",
+        "error-egress-timeout", "Reaching the provider timed out (name resolution or the TLS handshake), and nothing was sent.",
         "Retry; if it persists check the network and the provider's status page.";
     EGRESS_CIRCUIT_OPEN = Egress 4, Provider, S3, retryable: true, leak: false,
         "error-egress-circuit-open", "Recent attempts to this provider failed, so UAOS paused new attempts for a short time.",

@@ -10,7 +10,7 @@ Low findings fixed or accepted with a reason. Two fixes change accepted decision
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
 fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
 1 Medium and 5 Low, a fifth 2 Medium and 4 Low, a sixth 2 Medium and 2 Low, a seventh
-1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, an eleventh 3 Low, a twelfth 2 Low, a thirteenth 1 Medium and 2 Low, a fourteenth 2 Low, a fifteenth 2 Low, and a sixteenth 1 Medium, all resolved below. The PR stays a draft until a review comes back clean.
+1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, an eleventh 3 Low, a twelfth 2 Low, a thirteenth 1 Medium and 2 Low, a fourteenth 2 Low, a fifteenth 2 Low, a sixteenth 1 Medium, and a seventeenth 5 Low, all resolved below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -374,3 +374,24 @@ server sends. `OsFs` held against nineteen more spellings over loopback SMB.
 tests; 43 contracts tests (the registry's own checks); 24 platform tests; 29 xtask tests;
 `cargo xtask clippy`, `allow-audit`; all 53 egress negatives, of which 49 PROVEN here and the four
 Unix ones left to Linux CI.
+
+## Seventeenth review (2026-10-16)
+
+**Reviewed:** `42f6cd8` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export. **Result:** 0 High · 0 Medium · 5 Low. No path reports "nothing was sent" for a
+request that may have been delivered: in hyper 1.12's HTTP/1 client every "canceled" hands the
+request back unsent, and once the dispatcher took it every error is final. The sixteenth round's
+split erred the other way in places. `OsFs` held against eighteen more spellings (NT roots, `..`
+inside verbatim paths, look-alike separators) over loopback SMB.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | A connection that failed while hyper set it up, before it took the request (the upstream speaks first, or accepts and closes at once), came back as `Interrupted`, "after the request was sent", though the upstream received nothing (23 of 40 runs with the stock executor) | hyper-util attaches connection info only to errors from sending on a connection it holds, so an error without it is "nothing sent": `Unreachable`, retryable | `a_connection_lost_before_the_request_left_is_unreachable` (a server that speaks first counts 0 bytes; one that closes at once), 20 of 20 repeats; negative `egress-unsent-reported-delivered` **PROVEN** |
+| L2 | The response timeout also runs through the connect phase; set shorter than it, a request that never left read as `Interrupted` | `Door::new` refuses (`Limits`, `CONFIG_INVALID`) a response timeout that does not exceed resolution, `MAX_ADDRESSES_TRIED` connects and the handshake; `DoorLimits` says the timeout runs from handing the request to the client | `a_response_timeout_inside_the_connect_phase_is_refused` |
+| L3 | Two verdicts had no test: no answer within the response timeout (the dangerous direction: changed to `Timeout`, it reads "nothing sent, retryable") and the canceled-unsent branch | Tests for both | `no_answer_within_the_response_timeout_is_interrupted` and the L1 test; negative `egress-timeout-reported-unsent` **PROVEN** |
+| L4 | An answer hyper could not parse (`content-length: abc`, a four-digit status, not HTTP) came back as `Interrupted`, "the connection failed", and counted against the breaker, while an answer the door refuses after the headers counts as answered | hyper's parse errors are `Unusable`, "could not be parsed", and the breaker counts every `Unusable` as answered | `an_unparsable_answer_is_unusable` (three answers); the breaker's unit test |
+| L5 | The delivery contract stopped at `send`'s result; `Timeout`'s text said a connect timeout gives `Timeout` (it gives `Unreachable` after the last address); the breaker docs still said "unreachable or timed out" | `EgressResponse` and ADR-0013 say a body that fails mid-stream is an answer cut short and a `send` dropped after the hand-over may have been delivered; the `Timeout` doc and `EGRESS_TIMEOUT` text name resolution and the handshake; the breaker docs name interrupted requests | review of the text |
+
+**Verified locally (Windows, dedicated target directory):** 24 egress unit and 32 integration
+tests; 43 contracts tests; 24 platform tests; 29 xtask tests; `cargo xtask clippy`, `allow-audit`;
+all 55 egress negatives, of which 51 PROVEN here and the four Unix ones left to Linux CI.
