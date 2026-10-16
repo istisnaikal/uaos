@@ -858,10 +858,8 @@ fn l5_chunk_records_name_their_chunk_and_a_shred_is_not_a_loss() {
     let mut wrong = shredded_record(chunk, 2);
     wrong.payload_ref = Some(chunk);
     assert!(matches!(j.append(wrong), Err(JournalError::InvalidRecord(_))));
-    // Write-ahead, as the kernel shreds: the record is durable before the content goes.
-    j.append(shredded_record(chunk, 3)).unwrap();
-    j.sync().unwrap();
-    store.shred(pocket(), chunk).unwrap();
+    // Through the journal: the record is durable before the content goes.
+    j.shred(shredded_record(chunk, 3)).unwrap();
     drop(j);
     drop(store);
     let (store, j) = w.restart(true);
@@ -1386,12 +1384,10 @@ fn a_shred_interrupted_after_its_record_is_completed_at_open() {
     let (_, x) = write(&store, &mut j, 1);
     let (_, y) = write(&store, &mut j, 2);
     j.sync().unwrap();
-    j.append(shredded_record(x, 3)).unwrap();
-    j.sync().unwrap(); // write-ahead: the shred's record is durable first
     w.fs.fail_key_remove.store(true, Ordering::SeqCst);
     assert!(
-        store.shred(pocket(), x).is_err(),
-        "the KEK rotated, then the removal failed"
+        matches!(j.shred(shredded_record(x, 3)), Err(JournalError::Payload(_))),
+        "the record is durable and the KEK rotated, then the removal failed"
     );
     drop(j);
     drop(store);
@@ -1429,6 +1425,245 @@ fn r2_a_shred_is_completed_only_once_its_record_is_durable() {
         store.get(pocket(), x).ok(),
         Some(content(1)),
         "a shred ran on a record a power loss took away"
+    );
+}
+
+// ── Third review (WP3.A1, third round) ─────────────────────────────────────────────────────
+
+/// Fails every MANIFEST write while armed; everything else passes through.
+#[derive(Debug, Clone)]
+struct NoManifestFs {
+    inner: FaultFs,
+    armed: Arc<AtomicBool>,
+}
+
+impl Fs for NoManifestFs {
+    fn create_dir_all(&self, p: &Path) -> Result<(), FsError> {
+        self.inner.create_dir_all(p)
+    }
+    fn open_append(&self, p: &Path) -> Result<Box<dyn AppendFile>, FsError> {
+        self.inner.open_append(p)
+    }
+    fn read(&self, p: &Path) -> Result<Vec<u8>, FsError> {
+        self.inner.read(p)
+    }
+    fn list_dir(&self, p: &Path) -> Result<Vec<PathBuf>, FsError> {
+        self.inner.list_dir(p)
+    }
+    fn rename(&self, a: &Path, b: &Path) -> Result<(), FsError> {
+        self.inner.rename(a, b)
+    }
+    fn remove_file(&self, p: &Path) -> Result<(), FsError> {
+        self.inner.remove_file(p)
+    }
+    fn sync_dir(&self, p: &Path) -> Result<(), FsError> {
+        self.inner.sync_dir(p)
+    }
+    fn write_atomic(&self, p: &Path, b: &[u8]) -> Result<(), FsError> {
+        if self.armed.load(Ordering::SeqCst) && p.file_name().and_then(|n| n.to_str()) == Some("MANIFEST") {
+            return Err(injected("manifest"));
+        }
+        self.inner.write_atomic(p, b)
+    }
+    fn write_unsynced(&self, p: &Path, b: &[u8]) -> Result<(), FsError> {
+        self.inner.write_unsynced(p, b)
+    }
+    fn sync_file(&self, p: &Path) -> Result<(), FsError> {
+        self.inner.sync_file(p)
+    }
+    fn try_lock_exclusive(&self, p: &Path) -> Result<Box<dyn LockGuard>, FsError> {
+        self.inner.try_lock_exclusive(p)
+    }
+}
+
+/// Third-round H1: a record appended after a shred that references the shredded content is
+/// refused until the content is stored again; a coordinated store refuses a direct shred.
+#[test]
+fn r3_h1_after_a_shred_a_record_needs_its_content_stored_again() {
+    let w = World::new(950);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    j.sync().unwrap();
+    assert_eq!(
+        store.shred(pocket(), x).err(),
+        Some(ChunkError::ShredThroughJournal),
+        "a coordinated store shredded without its journal"
+    );
+    j.shred(shredded_record(x, 2)).unwrap();
+    assert_eq!(
+        j.append(draft(Some(pocket()), Some(x), 3)).err(),
+        Some(JournalError::PayloadNotStored),
+        "a record referenced content shredded before it"
+    );
+    assert_eq!(store.put(pocket(), &content(1)).unwrap(), x);
+    let again = j.append(draft(Some(pocket()), Some(x), 4)).unwrap().seq.0;
+    w.clock.advance(1_100_000_000);
+    j.sync().unwrap(); // the marker passes the new record
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    w.assert_never_silent(&store, "r3 h1");
+    assert!(w.survey().0.iter().any(|(s, _, _)| *s == again));
+    assert_eq!(store.get(pocket(), x).ok(), Some(content(1)));
+}
+
+/// Third-round M1: reopening a journal with no new records does not copy its segment again and
+/// again; disk use stays flat.
+#[test]
+fn r3_m1_restarts_do_not_grow_the_journal() {
+    let w = World::new(951);
+    let plain = || {
+        let clock: Arc<dyn Clock> = w.clock.clone();
+        let rng: Arc<dyn Rng> = w.rng.clone();
+        Journal::open(Arc::new(w.fs.clone()), clock, rng, &w.data, NEVER)
+    };
+    let mut j = plain().unwrap();
+    for n in 0..2000 {
+        j.append(draft(None, None, n)).unwrap();
+    }
+    j.sync().unwrap();
+    drop(j);
+    let dir = w.data.join(JOURNAL_DIR);
+    let bytes = || -> usize {
+        w.sim
+            .list_dir(&dir)
+            .unwrap()
+            .iter()
+            .filter(|p| p.to_string_lossy().contains("seg-"))
+            .filter_map(|p| w.sim.os_view(p))
+            .map(|v| v.len())
+            .sum()
+    };
+    let before = bytes();
+    for _ in 0..5 {
+        w.sim.crash();
+        drop(plain().unwrap());
+    }
+    let after = bytes();
+    assert!(
+        after <= before + before / 10,
+        "segment bytes grew from {before} to {after} over five restarts with no new record"
+    );
+}
+
+/// Third-round L1: files moved into quarantine survive a power loss.
+#[test]
+fn r3_l1_quarantined_files_survive_a_power_loss() {
+    let w = World::new(952);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    write(&store, &mut j, 1);
+    w.sim.fail_next_sync();
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    j.recover().unwrap();
+    let quarantined = w.quarantined();
+    assert!(quarantined > 0);
+    write(&store, &mut j, 2);
+    j.sync().unwrap(); // flushes the pocket's data and key directories
+    drop(j);
+    drop(store);
+    w.sim.power_loss();
+    assert_eq!(
+        w.quarantined(),
+        quarantined,
+        "quarantined files were lost to a power loss"
+    );
+}
+
+/// Third-round M2: at open, shreds run only after the manifest naming the copied records is
+/// durable. Here that manifest write fails, then the power goes.
+#[test]
+fn r3_m2_shreds_at_open_wait_for_the_manifest() {
+    let w = World::new(953);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    w.clock.advance(1_100_000_000);
+    j.sync().unwrap(); // the marker now names the record
+    j.append(shredded_record(x, 2)).unwrap(); // with the OS only; the shred never ran
+    drop(j);
+    drop(store);
+    w.sim.crash();
+    let store = w.store();
+    let failing = NoManifestFs {
+        inner: w.fs.clone(),
+        armed: Arc::new(AtomicBool::new(true)),
+    };
+    let clock: Arc<dyn Clock> = w.clock.clone();
+    let rng: Arc<dyn Rng> = w.rng.clone();
+    let opened = Journal::open_with_payloads(Arc::new(failing), clock, rng, &w.data, NEVER, Arc::clone(&store));
+    assert!(opened.is_err());
+    drop(opened);
+    drop(store);
+    w.sim.power_loss();
+    let (store, _j) = w.restart(false);
+    w.assert_never_silent(&store, "r3 m2");
+    assert_eq!(
+        store.get(pocket(), x).ok(),
+        Some(content(1)),
+        "a shred ran before the manifest naming its record was durable"
+    );
+}
+
+/// Third-round L2: after a keychain reset a put in the pocket fails closed instead of creating a
+/// fresh KEK under which every existing key file would look tampered with.
+#[test]
+fn r3_l2_a_put_after_a_keychain_reset_fails_closed() {
+    let w = World::new(954);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    write(&store, &mut j, 1);
+    drop(j);
+    drop(store);
+    w.sim.crash();
+    w.keys.retire_keks_before(pocket(), KekVersion(1_000)).unwrap();
+    let store = w.store();
+    assert!(w.open(&store).is_err(), "open fails closed");
+    assert!(
+        matches!(store.put(pocket(), &content(2)), Err(ChunkError::Keyring(_))),
+        "a put created a fresh KEK over existing key files"
+    );
+    assert!(w.open(&store).is_err());
+    assert_eq!(w.quarantined(), 0, "missing keys were treated as a loss");
+}
+
+/// Third-round L3: a shred completed at open that fails midway is finished by the next open,
+/// even after its key file is already gone.
+#[test]
+fn r3_l3_a_shred_failing_midway_at_open_is_finished_by_the_next() {
+    let mut hits = Vec::new();
+    for k in 0..40u32 {
+        let w = World::new(955);
+        let store = w.store();
+        let mut j = w.open(&store).unwrap();
+        let (_, x) = write(&store, &mut j, 1);
+        write(&store, &mut j, 2);
+        j.sync().unwrap();
+        j.append(shredded_record(x, 3)).unwrap();
+        j.sync().unwrap(); // write-ahead; then the process dies before the shred
+        drop(j);
+        drop(store);
+        w.sim.crash();
+        let store = w.store();
+        w.sim.fail_sync_after(k);
+        let first = w.open(&store);
+        w.sim.fail_sync_after(u32::MAX);
+        if first.is_ok() {
+            continue;
+        }
+        drop(first);
+        let Ok(_j) = w.open(&store) else { continue };
+        let versions = w.keys.kek_versions(pocket()).unwrap();
+        let readable = store.get(pocket(), x).is_ok();
+        if versions.len() > 1 || readable {
+            hits.push(format!("fault after {k}: versions {versions:?}, readable {readable}"));
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "a retried open left a shred unfinished:\n{}",
+        hits.join("\n")
     );
 }
 
@@ -1533,14 +1768,9 @@ proptest! {
                 Op::Shred(i) if !contents.is_empty() => {
                     let n = contents[i % contents.len()];
                     let Ok(chunk) = store.reference(pocket(), &content(n)) else { continue };
-                    // Write-ahead: the shred runs only once its record is durable, so a power
-                    // loss can never leave references to removed content unexplained. A failed
-                    // shred is retried once; the record already covers whatever it removed.
-                    if journal.append(shredded_record(chunk, n)).is_ok() && journal.sync().is_ok()
-                        && store.shred(pocket(), chunk).is_err()
-                    {
-                        let _outcome = store.shred(pocket(), chunk);
-                    }
+                    // Through the journal: the shred runs only once its record is durable. A shred
+                    // that fails after its record is completed when the journal next opens.
+                    let _outcome = journal.shred(shredded_record(chunk, n));
                 }
                 Op::Shred(_) => {}
                 // Failures are part of the schedule; the checks after each crash judge the outcome.
@@ -1560,24 +1790,27 @@ proptest! {
                     // Faults armed before the crash may still hit this open; then open again.
                     // A failed open must not cost anything the OS held (it copies the previous
                     // run's records instead of flushing their file again).
-                    store = w.store();
+                    // The store's own open can fail too (it finishes an interrupted rotation).
                     // After a failed open, the machine either crashes or loses power (alternating
                     // by schedule); after a power loss only flushed records are owed.
+                    let reopen = |w: &World| -> Option<(Arc<ChunkStore>, Journal)> {
+                        let s = w.try_store(ChunkDurability::Balanced).ok()?;
+                        let j = w.open(&s).ok()?;
+                        Some((s, j))
+                    };
                     let mut lost_power = power;
-                    journal = if let Ok(j) = w.open(&store) {
-                        j
+                    (store, journal) = if let Some(pair) = reopen(&w) {
+                        pair
                     } else {
                         w.sim.fail_sync_after(u32::MAX);
                         w.fs.clear_append_fault();
-                        drop(store);
                         if acked.len().is_multiple_of(2) {
                             w.sim.power_loss();
                             lost_power = true;
                         } else {
                             w.sim.crash();
                         }
-                        store = w.store();
-                        w.open(&store).unwrap()
+                        reopen(&w).unwrap()
                     };
                     check(&w, &store, &acked, flushed, lost_power, os_holds_unflushed, &reported_before);
                     let (records, _, _) = w.survey();

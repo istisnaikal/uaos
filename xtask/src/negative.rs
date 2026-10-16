@@ -1230,14 +1230,14 @@ pub(crate) fn cases() -> Vec<Case> {
             seed: both(
                 replace(
                     "crates/uaos-state/src/journal/writer.rs",
-                    "        journal.report_lost()?;\n        journal.sync()?;\n        journal.store_manifest_if_unstored()?;\n",
-                    "        journal.sync()?;\n        journal.store_manifest_if_unstored()?;\n        journal.update_marker(true).map_err(storage)?;\n        journal.report_lost()?;\n",
+                    "        self.report_lost()?;\n        self.sync()?;\n        self.store_manifest_if_unstored()?;\n",
+                    "        self.sync()?;\n        self.store_manifest_if_unstored()?;\n        self.update_marker(true).map_err(storage)?;\n        self.report_lost()?;\n",
                 ),
                 both(
                     replace(
                         "crates/uaos-state/src/journal/writer.rs",
-                        "        if !self.unreported.is_empty() || store.has_untaken_losses() || store.is_poisoned() || self.manifest_unstored {",
-                        "        let _ = store;\n        if self.manifest_unstored {",
+                        "        if !self.unreported.is_empty() || store_holds_back || self.manifest_unstored {",
+                        "        let _ = store_holds_back;\n        if self.manifest_unstored {",
                     ),
                     replace(
                         "crates/uaos-state/src/journal/writer.rs",
@@ -1361,8 +1361,8 @@ pub(crate) fn cases() -> Vec<Case> {
             // WP3.A1 second round: a journaled shred a crash interrupted, left readable.
             seed: replace(
                 "crates/uaos-state/src/journal/writer.rs",
-                "                if store.has_pair(pocket, chunk).map_err(JournalError::Payload)? {",
-                "                if false && store.has_pair(pocket, chunk).map_err(JournalError::Payload)? {",
+                "                if store.shred_incomplete(pocket, chunk).map_err(JournalError::Payload)? {",
+                "                if false && store.shred_incomplete(pocket, chunk).map_err(JournalError::Payload)? {",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -1378,14 +1378,77 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "is still readable",
         },
         Case {
+            id: "shred-bypasses-journal",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 third round H1: a coordinated store that shreds without its journal's record.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "        if self.attached.load(Ordering::SeqCst) {",
+                "        if false && self.attached.load(Ordering::SeqCst) {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r3_h1_after_a_shred_a_record_needs_its_content_stored_again"],
+            },
+            expect: "a coordinated store shredded without its journal",
+        },
+        Case {
+            id: "shreds-before-manifest-at-open",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 third round M2: an open that completes shreds before the manifest naming
+            // their records is durable.
+            seed: both(
+                replace(
+                    "crates/uaos-state/src/journal/writer.rs",
+                    "        self.sync()?;\n        self.store_manifest_if_unstored()?;\n",
+                    "        self.sync()?;\n",
+                ),
+                replace(
+                    "crates/uaos-state/src/journal/writer.rs",
+                    "        self.update_marker(true).map_err(storage)?;\n        Ok(())\n    }",
+                    "        self.store_manifest_if_unstored()?;\n        self.update_marker(true).map_err(storage)?;\n        Ok(())\n    }",
+                ),
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r3_m2_shreds_at_open_wait_for_the_manifest"],
+            },
+            expect: "r3 m2: record",
+        },
+        Case {
+            id: "shred-incomplete-key-only",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 third round L3: an open that judges a shred finished once its key file is gone.
+            seed: both(
+                replace(
+                    "crates/uaos-state/src/chunks/mod.rs",
+                    "        for path in [self.key_path(pocket, chunk), self.chunk_path(pocket, chunk)] {\n            match self.fs.read(&path) {",
+                    "        for path in [self.key_path(pocket, chunk)] {\n            match self.fs.read(&path) {",
+                ),
+                replace(
+                    "crates/uaos-state/src/chunks/mod.rs",
+                    "        Ok(self.keys.kek_versions(pocket).map_err(ChunkError::Keyring)?.len() > 1)",
+                    "        Ok(false)",
+                ),
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r3_l3_a_shred_failing_midway_at_open_is_finished_by_the_next"],
+            },
+            expect: "a retried open left a shred unfinished",
+        },
+        Case {
             id: "store-flush-failure-forgotten",
             gate: "journal-durability",
             tool: None,
             // WP3.A1 H3: a chunk store that forgets a failed flush and vouches for its chunks again.
             seed: replace(
                 "crates/uaos-state/src/chunks/mod.rs",
-                "        if self.poisoned.load(Ordering::SeqCst) {\n            Err(ChunkError::FlushFailed)",
-                "        if false && self.poisoned.load(Ordering::SeqCst) {\n            Err(ChunkError::FlushFailed)",
+                "        if self.is_poisoned() {\n            Err(ChunkError::FlushFailed)",
+                "        if false && self.is_poisoned() {\n            Err(ChunkError::FlushFailed)",
             ),
             runner: Runner::Program {
                 program: "cargo",
