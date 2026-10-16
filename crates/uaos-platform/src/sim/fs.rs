@@ -28,6 +28,9 @@ type FileId = u64;
 struct Node {
     data: Vec<u8>,
     durable_len: usize,
+    /// A flush of this file failed in cache-keeping mode: its unflushed bytes stay readable but
+    /// can never become durable through this file again (Linux after a writeback error).
+    doomed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -42,6 +45,8 @@ struct State {
     capacity: Option<u64>,
     /// Number of flushes to let through before failing one (`Some(0)` = fail the next).
     sync_fault_after: Option<u32>,
+    /// A failed file flush keeps the unflushed bytes readable instead of dropping them.
+    failed_sync_keeps_cache: bool,
 }
 
 impl State {
@@ -90,12 +95,26 @@ impl State {
 
     fn take_sync_fault(&mut self, id: FileId, op: &'static str) -> Result<(), FsError> {
         if self.sync_should_fail() {
+            let keep = self.failed_sync_keeps_cache;
             if let Some(node) = self.nodes.get_mut(&id) {
-                node.data.truncate(node.durable_len);
+                if keep {
+                    node.doomed = true;
+                } else {
+                    node.data.truncate(node.durable_len);
+                }
             }
             return Err(FsError::SyncFailed { op });
         }
         Ok(())
+    }
+
+    /// A successful flush: everything written becomes durable, unless the file is doomed.
+    fn flushed(&mut self, id: FileId) {
+        if let Some(node) = self.nodes.get_mut(&id)
+            && !node.doomed
+        {
+            node.durable_len = node.data.len();
+        }
     }
 }
 
@@ -121,6 +140,14 @@ impl SimFs {
     /// Limits total stored bytes. `None` removes the limit.
     pub fn set_capacity(&self, bytes: Option<u64>) {
         lock(&self.state).capacity = bytes;
+    }
+
+    /// Chooses what a failed file flush does to the unflushed bytes. Off (the default): they
+    /// are dropped, so a read-back sees the loss. On: they stay readable from the cache, later
+    /// flushes of the same file report success, and the bytes never become durable — Linux
+    /// after a writeback error. Only rewriting the content to a new file makes it durable.
+    pub fn set_failed_sync_keeps_cache(&self, on: bool) {
+        lock(&self.state).failed_sync_keeps_cache = on;
     }
 
     /// Makes the next flush (`sync_data`, `sync_dir`, `write_atomic`) fail. For file flushes,
@@ -220,9 +247,7 @@ impl AppendFile for SimAppendFile {
         let mut s = lock(&self.state);
         self.check(&s, "sync_data")?;
         s.take_sync_fault(self.id, "sync_data")?;
-        if let Some(node) = s.nodes.get_mut(&self.id) {
-            node.durable_len = node.data.len();
-        }
+        s.flushed(self.id);
         Ok(())
     }
 
@@ -377,9 +402,7 @@ impl Fs for SimFs {
         let mut s = lock(&self.state);
         let id = *s.live.get(path).ok_or(FsError::NotFound { op: "sync_file" })?;
         s.take_sync_fault(id, "sync_file")?;
-        if let Some(node) = s.nodes.get_mut(&id) {
-            node.durable_len = node.data.len();
-        }
+        s.flushed(id);
         Ok(())
     }
 
@@ -517,6 +540,27 @@ mod tests {
         fs.write_unsynced(&chunk, b"payload").unwrap();
         fs.sync_file(&chunk).unwrap();
         fs.sync_dir(&dir).unwrap();
+        fs.power_loss();
+        assert_eq!(fs.read(&chunk).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn in_cache_keeping_mode_a_failed_flush_dooms_the_file_but_not_a_rewrite() {
+        let (fs, dir) = setup();
+        fs.set_failed_sync_keeps_cache(true);
+        fs.sync_dir(&dir).unwrap();
+        let chunk = dir.join("c.chunk");
+        fs.write_unsynced(&chunk, b"payload").unwrap();
+        fs.sync_dir(&dir).unwrap();
+        fs.fail_next_sync();
+        assert!(fs.sync_file(&chunk).is_err());
+        assert_eq!(fs.read(&chunk).unwrap(), b"payload", "the cache still serves the bytes");
+        fs.sync_file(&chunk).unwrap(); // reports success, as Linux does after the error
+        fs.power_loss();
+        assert_eq!(fs.read(&chunk).unwrap(), b"", "a doomed file never became durable");
+
+        // Rewriting to a new file is the only way back.
+        fs.write_atomic(&chunk, b"payload").unwrap();
         fs.power_loss();
         assert_eq!(fs.read(&chunk).unwrap(), b"payload");
     }

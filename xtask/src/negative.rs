@@ -1220,6 +1220,194 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "never share a temporary",
         },
         Case {
+            id: "marker-before-loss-report",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 H1: an open that makes the previous run's records durable and moves the
+            // durable point before it journals the losses it found. Three defences stop it
+            // (report first; no flush while a loss is unreported; the marker refuses to pass
+            // one), so all three go.
+            seed: both(
+                replace(
+                    "crates/uaos-state/src/journal/writer.rs",
+                    "        journal.report_lost()?;
+        journal.sync()?;
+        journal.update_marker(true).map_err(storage)?;",
+                    "        journal.sync()?;
+        journal.update_marker(true).map_err(storage)?;
+        journal.report_lost()?;",
+                ),
+                both(
+                    replace(
+                        "crates/uaos-state/src/journal/writer.rs",
+                        "        if !self.unreported.is_empty() || store.has_untaken_losses() || store.is_poisoned() {
+            return Ok(());
+        }
+",
+                        "",
+                    ),
+                    replace(
+                        "crates/uaos-state/src/journal/writer.rs",
+                        "        if !self.unreported.is_empty() {
+            return Err(self.unreported_error());
+        }
+        if self.unflushed.is_empty() {",
+                        "        if self.unflushed.is_empty() {",
+                    ),
+                ),
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "h1_open_reports_a_loss_before_its_marker_moves",
+                ],
+            },
+            expect: "has an unreadable payload and no chunk.lost record",
+        },
+        Case {
+            id: "store-flush-failure-forgotten",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 H3: a chunk store that forgets a failed flush and vouches for its chunks again.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "        if self.poisoned.load(Ordering::SeqCst) {\n            Err(ChunkError::FlushFailed)",
+                "        if false && self.poisoned.load(Ordering::SeqCst) {\n            Err(ChunkError::FlushFailed)",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "h3_a_store_flush_failure_stops_the_journal",
+                ],
+            },
+            expect: "saw the store's failure",
+        },
+        Case {
+            id: "recovery-reflushes-same-file",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 H4: recovery that flushes the file whose flush failed instead of rewriting it.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "                Probe::Readable { content, data_key } => {\n                    self.write_pair(key.0, key.1, &content, Some(data_key), Flush::Now)?;\n                    locked(&self.pending).remove(&key);\n                    continue;",
+                "                Probe::Readable { .. } => {\n                    for path in [self.chunk_path(key.0, key.1), self.key_path(key.0, key.1)] {\n                        self.fs.sync_file(&path).map_err(storage)?;\n                    }\n                    locked(&self.pending).remove(&key);\n                    continue;",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "h4_recovery_rewrites_content_instead_of_reflushing_the_failed_file",
+                ],
+            },
+            expect: "re-flushed in place",
+        },
+        Case {
+            id: "chunk-rewrite-unflushed",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 N1: a chunk from an earlier process replaced by a write that is not flushed.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "Probe::Readable { data_key, .. } => self.adopt(key, content, Some(data_key), Flush::Now)?",
+                "Probe::Readable { data_key, .. } => self.adopt(key, content, Some(data_key), self.flush_mode())?",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "n1_a_rewrite_of_a_chunk_from_an_earlier_process_is_flushed",
+                ],
+            },
+            expect: "replaced by an unflushed copy",
+        },
+        Case {
+            id: "chunk-rewrite-new-data-key",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 N2: a rewrite under a fresh data key, so a failure between its two files breaks the pair.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "            Some(k) => k,\n            None => SecretKey::generate",
+                "            Some(_) | None => SecretKey::generate",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "n2_a_rewrite_that_fails_between_its_two_files_leaves_a_readable_pair",
+                ],
+            },
+            expect: "never written",
+        },
+        Case {
+            id: "loss-flushed-before-report",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 N3: a flush while a found loss waits to be journaled.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "        if !self.unreported.is_empty() {\n            return Err(self.unreported_error());\n        }\n",
+                "",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "n3_a_loss_waiting_to_be_journaled_holds_back_every_flush",
+                ],
+            },
+            expect: "while a loss waited to be journaled",
+        },
+        Case {
+            id: "open-trusts-previous-segment",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 N4: an open that seals the previous run's segment in place instead of copying it.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "    if proven_end == end {\n",
+                "    if true {\n",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-state",
+                    "--test",
+                    "durability",
+                    "n4_open_copies_the_previous_runs_records_instead_of_flushing_their_file_again",
+                ],
+            },
+            expect: "cache kept:",
+        },
+        Case {
             id: "ledger-reserve-beyond-available",
             gate: "budget-concurrency",
             tool: None,

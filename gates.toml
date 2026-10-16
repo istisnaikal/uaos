@@ -176,6 +176,13 @@ negative = [
   "intent-before-chunk-write",
   "chunk-put-pair-race",
   "chunk-put-shared-temp",
+  "marker-before-loss-report",
+  "store-flush-failure-forgotten",
+  "recovery-reflushes-same-file",
+  "chunk-rewrite-unflushed",
+  "chunk-rewrite-new-data-key",
+  "loss-flushed-before-report",
+  "open-trusts-previous-segment",
 ]
 
 [[gate]]
