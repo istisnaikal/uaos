@@ -1609,6 +1609,23 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "whose shred record is durable",
         },
         Case {
+            id: "kernel-record-appended-directly",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 ninth round L1: `append` takes a caller's chunk.shredded or chunk.lost on a
+            // coordinated journal.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "        if origin == Origin::Caller\n            && self.payloads.is_some()",
+                "        if origin == Origin::Caller\n            && self.payloads.is_none()",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r9_l1_kernel_records_cannot_be_appended_directly"],
+            },
+            expect: "a chunk.shredded record was appended directly",
+        },
+        Case {
             id: "shred-incomplete-key-only",
             gate: "journal-durability",
             tool: None,

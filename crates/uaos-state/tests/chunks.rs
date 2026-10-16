@@ -105,8 +105,10 @@ fn tampering_is_detected() {
     let p = pocket(1);
     let r = s.put(p, b"payload").unwrap();
     let file = w.files(p, "data").remove(0);
-    let len = w.fs.read(&file).unwrap().len();
-    assert!(w.fs.overwrite_byte(&file, len - 1, 0));
+    let bytes = w.fs.read(&file).unwrap();
+    // The tag comes from an OS-random nonce, so its last byte is 0 one run in 256: flip it
+    // rather than write a fixed value, or the "tampering" is sometimes a no-op.
+    assert!(w.fs.overwrite_byte(&file, bytes.len() - 1, !*bytes.last().unwrap()));
     assert_eq!(s.get(p, r), Err(ChunkError::Corrupt));
 }
 
