@@ -196,7 +196,7 @@ fn frame_for_caller(headers: &mut HeaderMap, status: StatusCode) -> Result<(), E
             _ => false,
         };
         if !chunked_only {
-            return Err(EgressError::Unreachable(
+            return Err(EgressError::Unusable(
                 "the upstream used a transfer coding the door does not decode",
             ));
         }
@@ -287,7 +287,7 @@ enum Outcome {
 impl Outcome {
     fn of(error: &EgressError) -> Self {
         match error {
-            EgressError::Unreachable(_) | EgressError::Timeout => Self::TransportFailure,
+            EgressError::Unreachable(_) | EgressError::Timeout | EgressError::Interrupted(_) => Self::TransportFailure,
             _ => Self::NotAttempted,
         }
     }
@@ -510,8 +510,11 @@ impl Door {
         let result = tokio::time::timeout(self.limits.response_timeout, self.client.request(outbound)).await;
         let response = match result {
             Err(_) => {
+                // The connector's own timeouts (resolution, connect, handshake) are shorter and
+                // come back as `Timeout`; this one ran out while waiting for an answer to a
+                // request that may have been sent (round 16, M1).
                 admitted.settle(Outcome::TransportFailure);
-                return Err(EgressError::Timeout);
+                return Err(EgressError::Interrupted("no answer within the response timeout"));
             }
             Ok(Err(e)) => {
                 let error = EgressError::from_client(&e);
@@ -526,7 +529,7 @@ impl Door {
         // sends asks for (it strips `upgrade`); passed on, it would let a relay switch its
         // client's connection (review WP3.A5, round 13, L1).
         if parts.status.is_informational() {
-            return Err(EgressError::Unreachable("the upstream switched protocols unasked"));
+            return Err(EgressError::Unusable("the upstream switched protocols unasked"));
         }
         let mut headers = parts.headers;
         frame_for_caller(&mut headers, parts.status)?;
@@ -714,6 +717,7 @@ mod tests {
     fn only_transport_failures_count_against_an_upstream() {
         assert_eq!(Outcome::of(&EgressError::Unreachable("x")), Outcome::TransportFailure);
         assert_eq!(Outcome::of(&EgressError::Timeout), Outcome::TransportFailure);
+        assert_eq!(Outcome::of(&EgressError::Interrupted("x")), Outcome::TransportFailure);
         for e in [
             EgressError::Refused("x"),
             EgressError::Blocked(Blocked::Loopback),
@@ -721,6 +725,7 @@ mod tests {
                 retry_after: Duration::ZERO,
             },
             EgressError::Tls("x"),
+            EgressError::Unusable("x"),
         ] {
             assert_eq!(Outcome::of(&e), Outcome::NotAttempted, "{e:?}");
         }

@@ -593,6 +593,23 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "a 204 kept its content-length",
         },
         Case {
+            id: "egress-delivered-reported-unsent",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 16, M1: a request cut off after it was sent reported as never
+            // sent, and retryable.
+            seed: replace(
+                "crates/uaos-egress/src/lib.rs",
+                "            Self::Interrupted(\"the connection failed after the request was sent\")",
+                "            Self::Unreachable(\"the connection failed before a response arrived\")",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "errors_say_whether_the_request_may_have_reached_the_provider"],
+            },
+            expect: "a request the provider received was reported as never sent",
+        },
+        Case {
             id: "osfs-bare-volume",
             gate: "test",
             tool: Some(WINDOWS_ONLY),

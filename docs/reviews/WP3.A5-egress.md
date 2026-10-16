@@ -10,7 +10,7 @@ Low findings fixed or accepted with a reason. Two fixes change accepted decision
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
 fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
 1 Medium and 5 Low, a fifth 2 Medium and 4 Low, a sixth 2 Medium and 2 Low, a seventh
-1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, an eleventh 3 Low, a twelfth 2 Low, a thirteenth 1 Medium and 2 Low, a fourteenth 2 Low, and a fifteenth 2 Low, all resolved below. The PR stays a draft until a review comes back clean.
+1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, an eleventh 3 Low, a twelfth 2 Low, a thirteenth 1 Medium and 2 Low, a fourteenth 2 Low, a fifteenth 2 Low, and a sixteenth 1 Medium, all resolved below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -357,3 +357,20 @@ own site again.
 **Verified locally (Windows, dedicated target directory):** 24 egress unit and 27 integration
 tests; 24 platform tests; 29 xtask tests; `cargo xtask clippy`, `allow-audit`; all 52 egress
 negatives, of which 48 PROVEN here and the four Unix ones left to Linux CI.
+
+## Sixteenth review (2026-10-16)
+
+**Reviewed:** `e97b29a` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export. **Result:** 0 High · 1 Medium · 0 Low. The fifteenth round's framing held against
+hyper 1.12's client decoder on eleven raw responses (whenever the door accepts, hyper removed
+exactly one `chunked` layer or read no body), and what it now refuses no real provider or local
+server sends. `OsFs` held against nineteen more spellings over loopback SMB.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| M1 | Requests the upstream received, or even answered, came back as `EGRESS_UNREACHABLE`: "could not be reached", retryable. An answer the door does not pass on (a `101`, a transfer coding) and a connection cut after the request was written were indistinguishable from a connection that never opened, so the runtime (PR-6) could not tell "nothing left" from "maybe delivered" from "delivered and answered" when settling a reservation (ADR-0002, T6), and a retry would be a new billed call that gets the same answer | Errors split by delivery: `Unreachable` and `Timeout` mean nothing was sent (hyper's canceled-unsent request included) and stay retryable; `Interrupted` (`EGRESS_INTERRUPTED`) covers a connection cut, or no answer within the response timeout, after the request was sent; `Unusable` (`EGRESS_UNUSABLE_RESPONSE`) covers an answer the door does not pass on. Both new codes are not retryable and say the provider may have billed the request; the texts of `EGRESS_UNREACHABLE` and `EGRESS_TIMEOUT` say nothing was sent | `errors_say_whether_the_request_may_have_reached_the_provider` (an unusable answer, a connection cut after the request, a closed port); negative `egress-delivered-reported-unsent` **PROVEN** |
+
+**Verified locally (Windows, dedicated target directory):** 24 egress unit and 28 integration
+tests; 43 contracts tests (the registry's own checks); 24 platform tests; 29 xtask tests;
+`cargo xtask clippy`, `allow-audit`; all 53 egress negatives, of which 49 PROVEN here and the four
+Unix ones left to Linux CI.
