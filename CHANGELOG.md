@@ -42,9 +42,13 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **A shred the journal recorded but a crash interrupted is completed when the journal
     opens**; before, the store's startup re-wrapped the leftover key and the content stayed
     readable (pre-existing).
+  - **`Journal::shred`** records a shred, flushes the record and shreds while no other record can
+    be appended; a store a journal coordinates refuses a direct shred.
+  - **Every journal keeps a durable-point marker**, so restarts copy only the records after it;
+    a `PAYLOADS` flag file now records that a journal coordinates a store.
   - **Review:** `docs/reviews/WP3.A1-chunk-durability.md` (4 High, 7 Medium, 7 Low, four defects
-    found by the extended property test after the fixes, and a second round: 1 High, 1 Medium,
-    6 Low). New codes
+    found by the extended property test after the fixes, a second round: 1 High, 1 Medium,
+    6 Low, and a third: 1 High, 3 Medium, 5 Low). New codes
     `STORE_PAYLOAD_LOST` and `STORE_PAYLOAD_FLUSH_FAILED`.
 
 - `uaos-policy` hardening after the retroactive review (`docs/reviews/WP2.1-policy.md`; ADR-0008
@@ -211,8 +215,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   balanced-put target is **not met** on Windows (1.55 ms after the review fixes), where file
   creation dominates. Until the state actor (WP3.3), the request whose append finds the flush
   window due pays for the flush.
-- Gate `journal-durability` gains twelve seeded violations, one per silent-loss class found by
-  the two WP3.A1 review rounds and the extended property test (sixteen in all).
+- Gate `journal-durability` gains fifteen seeded violations, one per silent-loss class found by
+  the three WP3.A1 review rounds and the extended property test (nineteen for ADR-0018, twenty
+  in the gate).
 - Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
   unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a
   forbid.

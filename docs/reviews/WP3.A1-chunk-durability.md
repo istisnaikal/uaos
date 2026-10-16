@@ -9,8 +9,9 @@ process. The High findings blocked merge.
 **Resolution:** every High and Medium finding fixed with a regression test; Low findings fixed or
 accepted with a reason. The property test, extended as M6 asked, then found four more defects
 (N1–N4), all fixed and pinned. One item needs a maintainer decision (L7). A second V1 review of
-the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up;
-all are fixed below. The PR stays a draft until a third review is clean.
+the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up,
+and a third found 1 High, 3 Medium and 5 Low; all are fixed below. The PR stays a draft until a
+review comes back clean.
 
 ## Findings as reported
 
@@ -132,9 +133,30 @@ in a scratch export. **Result:** 1 High · 1 Medium · 6 Low, plus two pre-exist
 | M1 | Several fixes were pinned by no test: (1) disk-full recovery with an unreported loss flushing; (2) the same after a failed relocation; (3) the marker guard alone; (4) `is_stored` trusting an earlier process's pair; (5) a vanished pending file treated as flushed; (6) a loss set aside only after its quarantine | One deterministic test for each of (1), (2), (4), (5), (6), each checked to fail with its fix reverted. **Accepted for (3):** the marker guard is now defence in depth; the states it blocks are refused earlier (`sync` refuses with an unreported loss, a poisoned store fails the payload flush, and open recovers a poisoned store) | `r2_m1_*` (five tests); negatives `is-stored-trusts-earlier-pair`, `flush-skips-missing-pending-file`, `loss-set-aside-after-quarantine` **PROVEN** for the three that can lose content silently |
 | L1 | Open ignored a store poisoned, or holding set-aside losses, before the journal attached, wrote no marker, and so allowed a later plain open | Open recovers a poisoned store first. Losses the store set aside are reported for every record in the journal that references them; with no journal yet, none can be referenced | `r2_l1_a_store_poisoned_before_the_journal_attached_is_recovered_at_open` |
 | L2 | Only `sync_pending` poisoned the store; failed directory flushes elsewhere did not | In balanced mode, any failed flushed write or chunk-directory flush poisons the store. The docs say so | `r2_l2_a_failed_directory_flush_poisons_a_balanced_store` |
-| L3 | `verify_and_sync` dropped the losses it had found when it failed midway | It sets each loss aside in the store before quarantining it; open takes them | Covered by the L1 path (losses taken at open) |
+| L3 | `verify_and_sync` dropped the losses it had found when it failed midway | It sets each loss aside in the store before quarantining it; open takes them | By construction; no test fails `verify_and_sync` midway (corrected in the third round) |
 | L4 | A loss could be reported twice when a chunk was lost again after its first report was appended but not flushed | Records an unflushed `chunk.lost` already names are skipped | Fixed by construction; no deterministic test (it needs a concurrent put between two recovery steps) |
 | L5 | `PendingFull` had no test and its contract was unstated | `put` documents that the caller flushes the journal and retries | `r2_l5_pending_full_is_refused_and_cleared_by_a_flush` (16,384 puts; the simulated filesystem no longer collects garbage on every rename, which made this quadratic) |
 | L6 | The appendix said "within run-to-run noise" although `2cf78f8` measured slower and was run once | The text states the measured difference and that it is one comparison | review of the text |
 | Pre-existing | A shred that rotated the KEK and then crashed before removing the files: the store's startup re-wrapped the leftover key, and the content stayed readable | The journal completes, at open, every shred it recorded whose pair is still on disk, **after** the open's flush. Completing it earlier was found by the crash schedules to act on a shred record a power loss could still take away | `a_shred_interrupted_after_its_record_is_completed_at_open`, `r2_a_shred_is_completed_only_once_its_record_is_durable`; negative `shred-not-completed-at-open` **PROVEN** |
 | Pre-existing | `get` racing a shred of another chunk could report existing content as unavailable | `get` holds the rotation lock shared | By construction (lock order unchanged: rotation only) |
+
+## Third review (2026-10-16)
+
+**Reviewed:** `135f327..08ba4fb` (rebased onto `e5b0ec8`) by a fresh-context agent, in a scratch
+export. **Result:** 1 High · 3 Medium · 5 Low.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| H1 | A request that stored the same content between the write-ahead shred record and the shred got `Ok` from memory and appended a record; the shred then removed the content, and once the marker passed that record, nothing explained it | `Journal::shred` appends the record, flushes it and shreds while holding the writer, so nothing can be appended in between; the store forgets the chunk first, so a later record is refused until the content is stored again. A coordinated store refuses a direct `ChunkStore::shred` (`ShredThroughJournal`) | `r3_h1_after_a_shred_a_record_needs_its_content_stored_again`; negative `shred-bypasses-journal` **PROVEN** |
+| M1 | Every open of a journal without a marker copied its whole active segment and kept the old file, so restarts grew the journal | Every journal keeps a marker; the store-coordination flag moved to its own file (`PAYLOADS`). A copy that replaces the old segment whole removes it once the manifest is durable | `r3_m1_restarts_do_not_grow_the_journal` |
+| M2 | "Complete shreds only after the manifest is stored" was pinned by no test | A test whose manifest write fails at open, then the power goes | `r3_m2_shreds_at_open_wait_for_the_manifest`; negative `shreds-before-manifest-at-open` **PROVEN** |
+| M3 | One store-wide rotation lock: a shred stalled every read, put and flush | 64 lock stripes by pocket; only the same stripe waits. The stall that remains is stated | By construction (lock order unchanged) |
+| L1 | Quarantined files were never made durable | The quarantine folder is flushed right after the renames | `r3_l1_quarantined_files_survive_a_power_loss` |
+| L2 | After a keychain reset, one put created a fresh KEK version 1 and the next open quarantined the old chunks as lost | A pocket that had key files and has no KEK refuses puts (fail closed) | `r3_l2_a_put_after_a_keychain_reset_fails_closed` |
+| L3 | A shred completed at open that failed after its key file was removed was never finished by a same-process retry | A shred counts as unfinished while a file of the pair or an older KEK version remains | `r3_l3_a_shred_failing_midway_at_open_is_finished_by_the_next`; negative `shred-incomplete-key-only` **PROVEN** |
+| L4 | The poison flag was cleared by recovery even for failures during it; `prepare`'s directory flushes did not poison | A generation counter: recovery clears only what it saw when it began; a put that joins the pending set while poisoned is refused; `prepare` poisons. **Accepted:** `SimFs` cannot model dropped directory entries; stated in the ADR | By construction |
+| L5 | Open scans every shred record; doc counts were inconsistent | The cost is stated (until compaction, P4); the counts are corrected | review of the text |
+
+The crash schedules also found, after these fixes, that a store open can fail while it finishes an
+interrupted rotation under an armed fault; the harness now retries a failed store open the way it
+retries a failed journal open.
