@@ -10,7 +10,7 @@ Low findings fixed or accepted with a reason. Two fixes change accepted decision
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
 fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
 1 Medium and 5 Low, a fifth 2 Medium and 4 Low, a sixth 2 Medium and 2 Low, a seventh
-1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, and a tenth 2 Low, all resolved below. The PR stays a draft until a review comes back clean.
+1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, and an eleventh 3 Low, all resolved below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -249,3 +249,25 @@ violation); `cargo metadata` lists every build script the workspace has; the cou
 **Verified locally (Windows, dedicated target directory):** 25 xtask tests; `cargo xtask clippy`,
 `allow-audit`; the Linux cross-check of the Unix canaries; all 41 egress negatives, of which 37
 PROVEN here and the four Unix ones left to Linux CI. The door's code did not change this round.
+
+## Eleventh review (2026-10-16)
+
+**Reviewed:** `7756686` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export. **Result:** 0 High · 0 Medium · 3 Low, two of them gate gaps with a plausible
+accidental path (a setup line; a build script split into modules) and one test gap; nothing new
+in the door. Every real canary passed the tenth round's rule, including UFCS and turbofish forms,
+CRLF, char literals and lifetimes; the round-10 negatives pin their fixes.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | The shape check proved that the item's path and name appear, not that the canary's only banned call is its own. A setup line calling another ban of the same lint (`UnixDatagram::unbound()` to get a socket for the `connect` canary, `Path::canonicalize` before `is_file`), or a second call past the third line, kept the shared `#[expect]` fulfilled while the canary's own ban was dead (shown on Windows, and on Linux for a wrong-kind `allow-invalid` entry). The docs also said "never through an import", while the `to_socket_addrs` canary imports its trait inside the function | The whole canary function, up to its closing brace, may spell no other ban of the same lint by the test its own item passes (a ban of the other lint, such as a banned type in a method canary's signature, is allowed: it fulfils a different expectation). The docs say a module-level import does not count | `a_canary_uses_no_other_ban_of_its_lint` (a setup call, a call past the third line, a comment, a type of the other lint); negative `canary-setup-calls-another-ban` **PROVEN**; every real canary passes |
+| L2 | The build-script check read only the build script's own file: the tenth round's helper moved into `mod build_env;` passed `allow-audit` and switched the bans off for its crate. A path build-dependency's code runs in the build script unread too | A build script that declares a module in another file is refused (`#[path]` and `include!` already were), and so is any path build-dependency | `a_build_script_module_in_another_file_is_found`; negatives `build-script-module` and `build-dependency-path` **PROVEN** |
+| L3 | `path_occurs`'s boundary rule was pinned by no test: a plain substring match passed every test | Tests for a longer identifier (`FileType`, `PathBuf`, `spawn_blocking`) and a longer path | `a_path_occurs_only_whole` |
+
+Also from verifying: `cargo xtask negative` now refuses a seed anchor that occurs more than once in
+its file (found on PR-1, where a new function made an older anchor match two sites; every anchor
+here was already unique).
+
+**Verified locally (Windows, dedicated target directory):** 28 xtask tests; `cargo xtask clippy`,
+`allow-audit`; all 44 egress negatives, of which 40 PROVEN here and the four Unix ones left to
+Linux CI. The door's code did not change this round.

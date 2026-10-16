@@ -7,10 +7,10 @@
 //! under `-D warnings` on every system that compiles the canary. Bans that exist only on some
 //! systems are compiled only there, so each CI system proves its own. `cargo xtask allow-audit`
 //! keeps this file complete: it fails on a ban in `clippy.toml` with no `// canary:` marker here
-//! (round 6, L2), and on a canary that does not spell its item's own path in code: a method's
-//! full type path, an item in a module its whole path, never through an import (rounds 9 and
-//! 10). `getrandom::fill` is not a dependency here; its canary lives in `uaos-platform`'s
-//! tests.
+//! (round 6, L2), on a canary that does not spell its item's own path in code (a method's full
+//! type path, an item in a module its whole path; a module-level import does not count), and on
+//! one that also uses another ban of the same lint anywhere in its function (rounds 9 to 11).
+//! `getrandom::fill` is not a dependency here; its canary lives in `uaos-platform`'s tests.
 
 #![allow(clippy::unwrap_used, reason = "test harness")]
 

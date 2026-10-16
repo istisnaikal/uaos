@@ -256,11 +256,13 @@ on the PR-5 branch.
   matches `clippy.toml` and `.cargo/config` names in any case, allows only `[alias]` in Cargo
   configuration, refuses build scripts that name one of clippy's variables in code or strings,
   which they could set for the compiler, also through a helper (every
-  build script `cargo metadata` lists, wherever `build = "..."` puts it), takes the member list from
+  build script `cargo metadata` lists, wherever `build = "..."` puts it), keeps each build
+  script to one file (a `mod` in another file is refused) and refuses path build-dependencies,
+  whose code runs in the build script unread, takes the member list from
   `cargo metadata`, refuses a workspace lint table that allows a group holding a guarded lint,
   and checks that each canary calls its own banned item, spelled by its own path in code (a
-  method's full type path, an item in a module its whole path; never through an import), under a
-  single
+  method's full type path, an item in a module its whole path; a module-level import does not
+  count), with no other ban of the same lint anywhere in its function, under a single
   `#[expect]`, compiled under `cfg(unix)` or `cfg(windows)` only. `cargo xtask clippy` runs
   clippy with its environment neutralised: an empty `CARGO_ENCODED_RUSTFLAGS` overrides every
   other source of compiler flags, an empty `RUSTC_WRAPPER` any wrapper, `CLIPPY_ARGS` is
@@ -311,7 +313,8 @@ on the PR-5 branch.
     `allow-audit-macro-attribute`, `allow-audit-path-module`, `allow-audit-nested-target`,
     `workspace-lints-group-allowed`, `clippy-config-case`, `cargo-config-not-alias`,
     `build-script-clippy-env`, `build-script-declared-path`, `canary-malformed`,
-    `canary-calls-another-item`, `canary-copied-from-sibling`;
+    `canary-calls-another-item`, `canary-copied-from-sibling`,
+    `canary-setup-calls-another-ban`, `build-script-module`, `build-dependency-path`;
   - besides the canaries, which cover every `allow-invalid` ban on its own system, these run
     there too: `net-unix-connect-outside-egress`, `net-unix-connect-addr-outside-egress`,
     `net-tokio-unix-connect-outside-egress` and `net-unix-socket-connect-outside-egress` (Unix),
