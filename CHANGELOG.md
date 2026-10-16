@@ -173,20 +173,22 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - Redirects are returned, never followed, and nothing is retried.
     - The URI comes from the upstream's declaration; the path must start with `/`.
     - Hop-by-hop headers, `host` and `content-length` are stripped and no UAOS header is added.
-    - A request carrying a credential-bearing header (`authorization`, `cookie`, provider key
-      headers) is refused.
+    - A request carrying one of the listed credential-bearing headers (`authorization`,
+      `cookie`, provider key headers and others) is refused, before anything is stripped.
     - The provider credential is inserted last; its value is never printed.
     - One send per Operation; a request bound to another Operation is refused.
     - A circuit breaker per upstream counts transport failures and lets one probe through
-      after its cooldown.
+      after its cooldown; a probe whose caller gives up lets the next attempt probe.
+    - IPv6 forms that embed a local IPv4 address are never treated as local, and the IPv6
+      cloud metadata endpoints are refused.
   - **Connection tasks** run on an executor the runtime provides.
   - **Error codes** `UAOS-EGRESS-0001` to `0005`: blocked, unreachable, timeout, circuit open,
     refused.
 - Reachability rules for the door (ADR-0010).
   - **`clippy.toml`.** Outbound connects (std and tokio, `TcpSocket` included), name
     resolution (`lookup_host`, `to_socket_addrs`), UDP and building another HTTP client are
-    banned outside the door; task and thread spawning outside the runtime; `Door::new` outside
-    its one owner.
+    banned outside the door; listening (`TcpListener::bind`) outside the API crate; task and
+    thread spawning outside the runtime; `Door::new` outside its one owner.
   - **`arch.toml`.** The bin's allow list is now explicit and leaves out the door; the bin
     reaches it only through the runtime. `uaos-module-api` and every Ring 1 crate are banned,
     transitively, from network and async-I/O crates (new `[ring1] ban`, enforced by
