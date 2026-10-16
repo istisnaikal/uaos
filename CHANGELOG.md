@@ -58,7 +58,7 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **Review:** `docs/reviews/WP3.A1-chunk-durability.md` (4 High, 7 Medium, 7 Low, four defects
     found by the extended property test after the fixes, a second round: 1 High, 1 Medium,
     6 Low, a third: 1 High, 3 Medium, 5 Low, a fourth: 2 Medium, 4 Low, a fifth: 2 Medium,
-    3 Low, a sixth: 4 Low, and a seventh: 1 Medium, 2 Low). New codes
+    3 Low, a sixth: 4 Low, a seventh: 1 Medium, 2 Low, and an eighth: 1 Low). New codes
     `STORE_PAYLOAD_LOST` and `STORE_PAYLOAD_FLUSH_FAILED`.
 
 - `uaos-policy` hardening after the retroactive review (`docs/reviews/WP2.1-policy.md`; ADR-0008
@@ -226,7 +226,7 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   creation dominates. Until the state actor (WP3.3), the request whose append finds the flush
   window due pays for the flush.
 - Gate `journal-durability` gains twenty-five seeded violations, one per silent-loss class found
-  by the seven WP3.A1 review rounds and the extended property test (twenty-nine for ADR-0018,
+  by the eight WP3.A1 review rounds and the extended property test (twenty-nine for ADR-0018,
   thirty in the gate).
 - Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
   unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a

@@ -2596,6 +2596,192 @@ proptest! {
     }
 }
 
+// ── Shred schedules: refusal and completion oracles (review WP3.A1, round 8, L1) ──────────
+
+#[derive(Debug, Clone)]
+/// The shred schedule's operations: those of [`Op`], plus a record that references an earlier
+/// payload without storing it again.
+enum ShredOp {
+    Write,
+    Repeat(usize),
+    /// Append a record that references an earlier payload without storing it again.
+    RepeatNoPut(usize),
+    Shred(usize),
+    Sync,
+    FailSyncAfter(u32),
+    FailAppend,
+    Tick,
+    FinishRewraps,
+    Crash,
+    PowerLoss,
+    Recover,
+}
+
+fn shred_op() -> impl Strategy<Value = ShredOp> {
+    prop_oneof![
+        6 => Just(ShredOp::Write),
+        2 => (0usize..64).prop_map(ShredOp::Repeat),
+        3 => (0usize..64).prop_map(ShredOp::RepeatNoPut),
+        2 => (0usize..64).prop_map(ShredOp::Shred),
+        3 => Just(ShredOp::Sync),
+        2 => (0u32..4).prop_map(ShredOp::FailSyncAfter),
+        1 => Just(ShredOp::FailAppend),
+        1 => Just(ShredOp::Tick),
+        1 => Just(ShredOp::FinishRewraps),
+        1 => Just(ShredOp::Crash),
+        1 => Just(ShredOp::PowerLoss),
+        2 => Just(ShredOp::Recover),
+    ]
+}
+
+/// After a successful open: every `chunk.shredded` record not followed by a record that
+/// references the chunk again leaves the content unreadable, and the pocket has one KEK version.
+fn check_shreds_complete(w: &World, store: &ChunkStore, what: &str) {
+    let (records, _, shreds) = w.survey();
+    for (pocket, chunk, sseq) in &shreds {
+        let later_use = records
+            .iter()
+            .any(|(seq, p, c)| p == pocket && c.to_string() == *chunk && seq > sseq);
+        if later_use {
+            continue;
+        }
+        let r: ChunkRef = chunk.parse().unwrap();
+        assert!(
+            store.get(*pocket, r).is_err(),
+            "{what}: shred record {sseq} is durable, no record uses the chunk again, yet it is readable"
+        );
+    }
+    let versions = w.keys.kek_versions(pocket()).unwrap();
+    assert!(
+        versions.len() <= 1,
+        "{what}: {} KEK versions alive after open",
+        versions.len()
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn shred_refusal_and_completion_under_random_crash_schedules(
+        seed in any::<u64>(),
+        keep_cache in any::<bool>(),
+        policy in 0u8..3,
+        ops in prop::collection::vec(shred_op(), 1..100),
+    ) {
+        let w = World::new(seed);
+        w.sim.set_failed_sync_keeps_cache(keep_cache);
+        let flush = match policy {
+            0 => NEVER,
+            1 => FlushPolicy::Strict,
+            _ => FlushPolicy::Balanced { window: Millis(1_000) },
+        };
+        let mut store = w.store();
+        let mut journal = w.open_with(&store, flush).unwrap();
+        let mut contents: Vec<u64> = Vec::new();
+        let mut acked: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut next = 0u64;
+        let mut rewraps = Vec::new();
+        // In this process: the op index of the latest shred of content n whose record was
+        // written, and of the latest successful put of content n. A record referencing n written
+        // after such a shred needs a put in between (the M1 class of round seven).
+        let mut shred_written: BTreeMap<u64, usize> = BTreeMap::new();
+        let mut last_put: BTreeMap<u64, usize> = BTreeMap::new();
+        for (idx, op) in ops.into_iter().enumerate() {
+            match op {
+                ShredOp::Write | ShredOp::Repeat(_) => {
+                    let n = match op {
+                        ShredOp::Repeat(i) if !contents.is_empty() => contents[i % contents.len()],
+                        _ => { next += 1; contents.push(next); next }
+                    };
+                    let Ok(chunk) = store.put(pocket(), &content(n)) else { continue };
+                    last_put.insert(n, idx);
+                    if let Ok(a) = journal.append(draft(Some(pocket()), Some(chunk), n)) {
+                        acked.insert(a.seq.0, n);
+                    }
+                }
+                ShredOp::RepeatNoPut(i) if !contents.is_empty() => {
+                    let n = contents[i % contents.len()];
+                    let Ok(chunk) = store.reference(pocket(), &content(n)) else { continue };
+                    let before = journal.next_seq().0;
+                    let res = journal.append(draft(Some(pocket()), Some(chunk), n));
+                    let written = journal.next_seq().0 > before;
+                    if let Ok(a) = &res {
+                        acked.insert(a.seq.0, n);
+                    }
+                    if written && let Some(s) = shred_written.get(&n) {
+                        let reput = last_put.get(&n).is_some_and(|p| p > s);
+                        prop_assert!(
+                            reput,
+                            "op {}: a record referencing content {} was written after a written shred record (op {}) with no put since",
+                            idx, n, s
+                        );
+                    }
+                }
+                ShredOp::Shred(i) if !contents.is_empty() => {
+                    let n = contents[i % contents.len()];
+                    let Ok(chunk) = store.reference(pocket(), &content(n)) else { continue };
+                    let before = journal.next_seq().0;
+                    let res = journal.shred(shredded_record(chunk, n));
+                    if journal.next_seq().0 > before {
+                        shred_written.insert(n, idx);
+                    }
+                    if let Ok(rewrap) = res {
+                        rewraps.push(rewrap);
+                    }
+                }
+                ShredOp::RepeatNoPut(_) | ShredOp::Shred(_) => {}
+                ShredOp::Sync => { let _outcome = journal.sync(); }
+                ShredOp::FailSyncAfter(n) => w.sim.fail_sync_after(n),
+                ShredOp::FailAppend => w.fs.fail_segment_append_after(0),
+                ShredOp::Tick => w.clock.advance(1_100_000_000),
+                ShredOp::FinishRewraps => {
+                    for rewrap in rewraps.drain(..) {
+                        let _outcome = rewrap.finish();
+                    }
+                }
+                ShredOp::Recover => { let _outcome = journal.recover(); }
+                ShredOp::Crash | ShredOp::PowerLoss => {
+                    let power = matches!(op, ShredOp::PowerLoss);
+                    let flushed = journal.flushed_through().map(|s| s.0);
+                    let os_holds_unflushed = journal.health() != JournalHealth::FlushFailed;
+                    let (_, reported_before, _) = w.survey();
+                    rewraps.drain(..).for_each(std::mem::forget);
+                    drop(journal);
+                    drop(store);
+                    if power { w.sim.power_loss() } else { w.sim.crash() }
+                    let reopen = |w: &World| -> Option<(Arc<ChunkStore>, Journal)> {
+                        let s = w.try_store(ChunkDurability::Balanced).ok()?;
+                        let j = w.open_with(&s, flush).ok()?;
+                        Some((s, j))
+                    };
+                    let mut lost_power = power;
+                    (store, journal) = if let Some(pair) = reopen(&w) {
+                        pair
+                    } else {
+                        w.sim.fail_sync_after(u32::MAX);
+                        w.fs.clear_append_fault();
+                        if acked.len().is_multiple_of(2) {
+                            w.sim.power_loss();
+                            lost_power = true;
+                        } else {
+                            w.sim.crash();
+                        }
+                        reopen(&w).unwrap()
+                    };
+                    check(&w, &store, &acked, flushed, lost_power, os_holds_unflushed, &reported_before);
+                    check_shreds_complete(&w, &store, "shred schedule");
+                    let (records, _, _) = w.survey();
+                    let present: BTreeSet<u64> = records.iter().map(|(s, _, _)| *s).collect();
+                    acked.retain(|s, _| present.contains(s));
+                    shred_written.clear();
+                    last_put.clear();
+                }
+            }
+        }
+    }
+}
+
 // ── S-6: two writers of one chunk ──────────────────────────────────────────────────────────
 
 #[test]
