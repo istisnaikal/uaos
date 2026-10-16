@@ -840,7 +840,26 @@ pub(crate) fn cases() -> Vec<Case> {
                 ),
             ),
             runner: Runner::Xtask(&["allow-audit"]),
-            expect: "declares a module in another file",
+            expect: "uses another file",
+        },
+        Case {
+            id: "build-script-include-in-owner",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 12, L1: a build script in an owner crate, where `include!` is
+            // otherwise allowed, that includes the helper setting clippy's arguments.
+            seed: both(
+                write(
+                    "crates/uaos-testkit/build.rs",
+                    "include!(\"build_env.rs\");\n\nfn main() {\n    emit_env();\n}\n".to_owned(),
+                ),
+                write(
+                    "crates/uaos-testkit/build_env.rs",
+                    "fn emit_env() {\n    println!(\"cargo:rustc-env={}=-Aclippy::disallowed_types\", \"clippy_args\".to_ascii_uppercase());\n}\n".to_owned(),
+                ),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "crates/uaos-testkit/build.rs: a build script uses another file",
         },
         Case {
             id: "build-dependency-path",
@@ -1380,5 +1399,25 @@ fn history_case(
         Ok(()) => Err("gate PASSED on the seeded violation — it does not bite".to_owned()),
         Err(e) if e.contains(expect) => Ok(()),
         Err(e) => Err(format!("gate failed without mentioning `{expect}`: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace;
+
+    /// A seed anchor names exactly one site: one that also matched elsewhere would seed the first
+    /// match, which may not be the case's site (review WP3.A1, round 10; WP3.A5, round 12).
+    #[test]
+    fn a_seed_anchor_must_occur_exactly_once() {
+        let dir = std::env::temp_dir().join(format!("uaos-xtask-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.rs"), "a\nb\na\n").unwrap();
+        assert!(replace("f.rs", "b\n", "c\n")(&dir).is_ok());
+        let twice = replace("f.rs", "a\n", "x\n")(&dir).unwrap_err();
+        assert!(twice.contains("occurs 2 times"), "{twice}");
+        let missing = replace("f.rs", "zzz", "y")(&dir).unwrap_err();
+        assert!(missing.contains("not found"), "{missing}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
