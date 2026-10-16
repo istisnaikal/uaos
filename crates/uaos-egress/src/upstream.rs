@@ -8,6 +8,7 @@ use std::net::IpAddr;
 
 use rustls_pki_types::CertificateDer;
 
+use crate::addr::{Blocked, Reach, classify};
 use crate::host::HostName;
 
 /// The name routes use for an upstream (for example `anthropic`).
@@ -39,16 +40,21 @@ impl fmt::Display for UpstreamId {
 pub enum Scheme {
     /// TLS. The only scheme allowed toward public addresses.
     Https,
-    /// Plain TCP, allowed only for a declared private upstream (a server on this machine or
-    /// network that the user chose to trust).
+    /// Plain TCP, for a server on this machine or the local network that the user chose to
+    /// trust. It is dialled only at pinned loopback, private or unique-local addresses and never
+    /// resolved, so no DNS answer, LLMNR or mDNS reply can send it anywhere else.
     Http,
 }
 
 /// Which certificates the door accepts for an HTTPS upstream.
 #[derive(Debug, Clone)]
 pub enum Trust {
-    /// The operating system's trust store, through its own verifier (revocation included).
-    Platform,
+    /// The roots in the operating system's trust store, read locally when the door is built,
+    /// so corporate interception roots work. Chains are verified by rustls itself: nothing is
+    /// fetched during a handshake (no issuer download, no revocation lookup), so a server's
+    /// certificate can never make UAOS contact an address of its choosing. Revocation is not
+    /// checked (ADR-0013 amendment).
+    System,
     /// Only these roots. For tests and for private upstreams with their own authority.
     Roots(Vec<CertificateDer<'static>>),
 }
@@ -65,9 +71,12 @@ pub struct Upstream {
     /// Transport.
     pub scheme: Scheme,
     /// Addresses to dial instead of resolving `host`. They are classified like resolved ones.
+    /// Required for plain HTTP.
     pub pinned: Vec<IpAddr>,
-    /// Permit private and special-purpose addresses. Off by default; it must be declared, and
-    /// plain HTTP requires it.
+    /// Permit addresses on this machine or the local network: loopback, private (RFC 1918) and
+    /// unique-local (`fc00::/7`), whether pinned or resolved. Link-local (which holds the cloud
+    /// metadata service), unspecified, multicast and every other special-purpose range stay
+    /// refused. Off by default; it must be declared, and plain HTTP requires it.
     pub allow_private: bool,
     /// Accepted certificates.
     pub trust: Trust,
@@ -76,9 +85,13 @@ pub struct Upstream {
 /// Why an upstream declaration was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum UpstreamError {
-    /// Plain HTTP toward an upstream that may resolve to public addresses.
-    #[error("plain HTTP is allowed only for an upstream declared private")]
+    /// Plain HTTP toward an address that is not on this machine or the local network, or
+    /// without `allow_private`.
+    #[error("plain HTTP is allowed only toward pinned loopback, private or unique-local addresses")]
     PlaintextToPublic,
+    /// Plain HTTP without pinned addresses: it would depend on name resolution.
+    #[error("plain HTTP needs pinned addresses; its name is never resolved")]
+    PlaintextNeedsPinned,
     /// Port 0.
     #[error("port 0 is not a destination")]
     Port,
@@ -88,7 +101,7 @@ pub enum UpstreamError {
 }
 
 impl Upstream {
-    /// An HTTPS upstream on port 443, verified against the platform trust store.
+    /// An HTTPS upstream on port 443, verified against the system's roots.
     #[must_use]
     pub fn https(id: impl Into<String>, host: HostName) -> Self {
         Self {
@@ -98,7 +111,22 @@ impl Upstream {
             scheme: Scheme::Https,
             pinned: Vec::new(),
             allow_private: false,
-            trust: Trust::Platform,
+            trust: Trust::System,
+        }
+    }
+
+    /// Whether the door may dial `ip` for this upstream, and if not, why.
+    ///
+    /// # Errors
+    /// The reason the address is refused.
+    pub(crate) fn admits(&self, ip: IpAddr) -> Result<(), Blocked> {
+        match classify(ip) {
+            Reach::Public if self.scheme == Scheme::Https => Ok(()),
+            // Unreachable after `validate`, which pins plain HTTP to local addresses; kept so the
+            // dial path never depends on that check alone.
+            Reach::Public => Err(Blocked::PublicOverPlaintext),
+            Reach::Blocked(why) if self.allow_private && why.is_local_network() => Ok(()),
+            Reach::Blocked(why) => Err(why),
         }
     }
 
@@ -110,8 +138,17 @@ impl Upstream {
         if self.port == 0 {
             return Err(UpstreamError::Port);
         }
-        if self.scheme == Scheme::Http && !self.allow_private {
-            return Err(UpstreamError::PlaintextToPublic);
+        if self.scheme == Scheme::Http {
+            if !self.allow_private {
+                return Err(UpstreamError::PlaintextToPublic);
+            }
+            if self.pinned.is_empty() {
+                return Err(UpstreamError::PlaintextNeedsPinned);
+            }
+            let local = |ip: &IpAddr| matches!(classify(*ip), Reach::Blocked(why) if why.is_local_network());
+            if !self.pinned.iter().all(local) {
+                return Err(UpstreamError::PlaintextToPublic);
+            }
         }
         Ok(())
     }

@@ -50,17 +50,17 @@ criteria = "safe-to-deploy"
 [[exemptions.asn1-rs]]
 version = "0.7.2"
 criteria = "safe-to-run"
-notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+notes = "In the lockfile only: reached through rcgen's optional x509-parser feature, which UAOS leaves off, so it is compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.asn1-rs-derive]]
 version = "0.6.0"
 criteria = "safe-to-run"
-notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+notes = "In the lockfile only: reached through rcgen's optional x509-parser feature, which UAOS leaves off, so it is compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.asn1-rs-impl]]
 version = "0.2.0"
 criteria = "safe-to-run"
-notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+notes = "In the lockfile only: reached through rcgen's optional x509-parser feature, which UAOS leaves off, so it is compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.async-broadcast]]
 version = "0.7.2"
@@ -206,11 +206,6 @@ criteria = "safe-to-deploy"
 version = "0.5.4"
 criteria = "safe-to-deploy"
 
-[[exemptions.combine]]
-version = "4.6.9"
-criteria = "safe-to-deploy"
-notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
-
 [[exemptions.concurrent-queue]]
 version = "2.5.0"
 criteria = "safe-to-deploy"
@@ -266,7 +261,7 @@ criteria = "safe-to-deploy"
 [[exemptions.data-encoding]]
 version = "2.11.1"
 criteria = "safe-to-run"
-notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+notes = "In the lockfile only: reached through rcgen's optional x509-parser feature, which UAOS leaves off, so it is compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.defmt]]
 version = "1.1.1"
@@ -283,7 +278,7 @@ criteria = "safe-to-deploy"
 [[exemptions.der-parser]]
 version = "10.0.0"
 criteria = "safe-to-run"
-notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+notes = "In the lockfile only: reached through rcgen's optional x509-parser feature, which UAOS leaves off, so it is compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.deranged]]
 version = "0.5.9"
@@ -300,7 +295,7 @@ criteria = "safe-to-deploy"
 [[exemptions.displaydoc]]
 version = "0.2.7"
 criteria = "safe-to-run"
-notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+notes = "In the lockfile only: reached through rcgen's optional x509-parser feature, which UAOS leaves off, so it is compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.dyn-clone]]
 version = "1.0.20"
@@ -494,26 +489,6 @@ criteria = "safe-to-deploy"
 version = "0.1.3"
 criteria = "safe-to-deploy"
 
-[[exemptions.jni]]
-version = "0.22.4"
-criteria = "safe-to-deploy"
-notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
-
-[[exemptions.jni-macros]]
-version = "0.22.4"
-criteria = "safe-to-deploy"
-notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
-
-[[exemptions.jni-sys]]
-version = "0.4.1"
-criteria = "safe-to-deploy"
-notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
-
-[[exemptions.jni-sys-macros]]
-version = "0.4.1"
-criteria = "safe-to-deploy"
-notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
-
 [[exemptions.jobserver]]
 version = "0.1.35"
 criteria = "safe-to-deploy"
@@ -537,7 +512,7 @@ criteria = "safe-to-deploy"
 [[exemptions.lazy_static]]
 version = "1.5.1"
 criteria = "safe-to-run"
-notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+notes = "In the lockfile only: reached through rcgen's optional x509-parser feature, which UAOS leaves off, so it is compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.libc]]
 version = "0.2.190"
@@ -594,7 +569,7 @@ criteria = "safe-to-deploy"
 [[exemptions.minimal-lexical]]
 version = "0.2.1"
 criteria = "safe-to-run"
-notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+notes = "In the lockfile only: reached through rcgen's optional x509-parser feature, which UAOS leaves off, so it is compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.mio]]
 version = "1.2.4"
@@ -636,7 +611,7 @@ criteria = "safe-to-deploy"
 [[exemptions.oid-registry]]
 version = "0.8.1"
 criteria = "safe-to-run"
-notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+notes = "In the lockfile only: reached through rcgen's optional x509-parser feature, which UAOS leaves off, so it is compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.once_cell]]
 version = "1.21.4"
@@ -781,7 +756,7 @@ criteria = "safe-to-deploy"
 [[exemptions.rusticata-macros]]
 version = "4.1.0"
 criteria = "safe-to-run"
-notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+notes = "In the lockfile only: reached through rcgen's optional x509-parser feature, which UAOS leaves off, so it is compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.rustix]]
 version = "1.1.5"
@@ -801,16 +776,6 @@ notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier 
 version = "1.15.1"
 criteria = "safe-to-deploy"
 notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
-
-[[exemptions.rustls-platform-verifier]]
-version = "0.7.1"
-criteria = "safe-to-deploy"
-notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
-
-[[exemptions.rustls-platform-verifier-android]]
-version = "0.2.0"
-criteria = "safe-to-deploy"
-notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
 
 [[exemptions.rustls-webpki]]
 version = "0.103.10"
@@ -909,11 +874,6 @@ criteria = "safe-to-deploy"
 [[exemptions.signal-hook-registry]]
 version = "1.4.8"
 criteria = "safe-to-deploy"
-
-[[exemptions.simd_cesu8]]
-version = "1.2.0"
-criteria = "safe-to-deploy"
-notes = "Android-only path of rustls-platform-verifier. Never compiled for UAOS's targets (Windows, macOS, Linux)."
 
 [[exemptions.siphasher]]
 version = "1.0.4"
@@ -1095,11 +1055,6 @@ criteria = "safe-to-deploy"
 version = "0.2.129"
 criteria = "safe-to-deploy"
 
-[[exemptions.webpki-root-certs]]
-version = "1.0.9"
-criteria = "safe-to-deploy"
-notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
-
 [[exemptions.winapi-util]]
 version = "0.1.9"
 criteria = "safe-to-deploy"
@@ -1131,7 +1086,7 @@ criteria = "safe-to-deploy"
 [[exemptions.windows-sys]]
 version = "0.52.0"
 criteria = "safe-to-deploy"
-notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+notes = "Windows API bindings, 0.52 line: in the lockfile only, through an optional dependency UAOS does not enable, so compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.windows-sys]]
 version = "0.61.2"
@@ -1140,47 +1095,47 @@ criteria = "safe-to-deploy"
 [[exemptions.windows-targets]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+notes = "Windows API bindings, 0.52 line: in the lockfile only, through an optional dependency UAOS does not enable, so compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.windows_aarch64_gnullvm]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+notes = "Windows API bindings, 0.52 line: in the lockfile only, through an optional dependency UAOS does not enable, so compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.windows_aarch64_msvc]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+notes = "Windows API bindings, 0.52 line: in the lockfile only, through an optional dependency UAOS does not enable, so compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.windows_i686_gnu]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+notes = "Windows API bindings, 0.52 line: in the lockfile only, through an optional dependency UAOS does not enable, so compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.windows_i686_gnullvm]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+notes = "Windows API bindings, 0.52 line: in the lockfile only, through an optional dependency UAOS does not enable, so compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.windows_i686_msvc]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+notes = "Windows API bindings, 0.52 line: in the lockfile only, through an optional dependency UAOS does not enable, so compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.windows_x86_64_gnu]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+notes = "Windows API bindings, 0.52 line: in the lockfile only, through an optional dependency UAOS does not enable, so compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.windows_x86_64_gnullvm]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+notes = "Windows API bindings, 0.52 line: in the lockfile only, through an optional dependency UAOS does not enable, so compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.windows_x86_64_msvc]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "Windows API bindings (0.52 line) pulled by the HTTP and TLS stack; generated, target-specific code. Audit with the windows-sys family before GA (PD-06)."
+notes = "Windows API bindings, 0.52 line: in the lockfile only, through an optional dependency UAOS does not enable, so compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.winnow]]
 version = "1.0.4"
@@ -1189,7 +1144,7 @@ criteria = "safe-to-deploy"
 [[exemptions.x509-parser]]
 version = "0.18.1"
 criteria = "safe-to-run"
-notes = "Dev-only: the throwaway test certificate authority (rcgen) behind the egress loopback TLS tests (ADR-0013). Never part of a release build."
+notes = "In the lockfile only: reached through rcgen's optional x509-parser feature, which UAOS leaves off, so it is compiled for no target. Listed because cargo vet covers the whole lockfile."
 
 [[exemptions.yasna]]
 version = "0.6.0"

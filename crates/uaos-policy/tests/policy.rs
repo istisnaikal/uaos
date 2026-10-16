@@ -7,6 +7,10 @@
     clippy::unwrap_used,
     reason = "test harness helpers outside #[test] fns: a failed fixture must abort the test"
 )]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "the parser-depth tests run on a thread with a small, explicit stack (std::thread::Builder)"
+)]
 
 use std::collections::BTreeSet;
 
