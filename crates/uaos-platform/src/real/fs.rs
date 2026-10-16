@@ -19,9 +19,17 @@ pub struct OsFs;
 /// Refuses a path that is not on a local disk.
 fn local(path: &Path, op: &'static str) -> Result<(), FsError> {
     #[cfg(windows)]
-    if let Some(std::path::Component::Prefix(prefix)) = path.components().next() {
-        use std::path::Prefix;
-        if !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) {
+    {
+        use std::path::{Component, Prefix};
+        let mut parts = path.components();
+        let refused = match parts.next() {
+            Some(Component::Prefix(prefix)) => !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)),
+            // `\??\...` names the NT object namespace (`\??\UNC\host`, devices): std does not
+            // parse it as a prefix but hands it to the system unchanged (review WP3.A5, round 8, M1).
+            Some(Component::RootDir) => parts.next() == Some(Component::Normal(std::ffi::OsStr::new("??"))),
+            _ => false,
+        };
+        if refused {
             return Err(FsError::PermissionDenied { op });
         }
     }
@@ -165,25 +173,38 @@ impl Fs for OsFs {
 mod tests {
     use super::*;
 
-    /// Round 7, M2: network and device paths are refused before any call; local ones pass.
+    /// Rounds 7 and 8 (M2, M1): every method refuses network and device paths, in every
+    /// spelling, before any call; local ones pass.
     #[cfg(windows)]
     #[test]
     fn network_and_device_paths_are_refused() {
+        let refused = |r: Result<(), FsError>| matches!(r, Err(FsError::PermissionDenied { .. }));
+        let scratch = Scratch::new("refused");
+        let local_file = scratch.0.join("local");
         for path in [
             r"\\uaos-canary.invalid\share\x",
             r"\\?\UNC\uaos-canary.invalid\share\x",
             r"\\.\pipe\uaos-canary",
             r"\\?\GLOBALROOT\Device\uaos-canary",
+            r"\??\UNC\uaos-canary.invalid\share\x",
+            r"\??\GLOBALROOT\Device\Null",
+            r"/??/pipe/uaos-canary",
         ] {
-            assert_eq!(
-                OsFs.read(Path::new(path)),
-                Err(FsError::PermissionDenied { op: "read" }),
-                "{path}"
-            );
+            let p = Path::new(path);
+            assert!(refused(OsFs.create_dir_all(p)), "create_dir_all {path}");
+            assert!(refused(OsFs.open_append(p).map(drop)), "open_append {path}");
+            assert!(refused(OsFs.read(p).map(drop)), "read {path}");
+            assert!(refused(OsFs.list_dir(p).map(drop)), "list_dir {path}");
+            assert!(refused(OsFs.rename(p, &local_file)), "rename from {path}");
+            assert!(refused(OsFs.rename(&local_file, p)), "rename to {path}");
+            assert!(refused(OsFs.remove_file(p)), "remove_file {path}");
+            assert!(refused(OsFs.sync_dir(p)), "sync_dir {path}");
+            assert!(refused(OsFs.write_atomic(p, b"x")), "write_atomic {path}");
+            assert!(refused(OsFs.try_lock_exclusive(p).map(drop)), "lock {path}");
         }
-        assert!(local(Path::new(r"C:\data"), "read").is_ok());
-        assert!(local(Path::new(r"\\?\C:\data"), "read").is_ok());
-        assert!(local(Path::new("relative"), "read").is_ok());
+        for path in [r"C:\data", r"\\?\C:\data", "relative", r"\data", r"\x\??"] {
+            assert!(local(Path::new(path), "read").is_ok(), "{path}");
+        }
     }
 
     /// A unique scratch directory under the OS temp dir, removed on drop.

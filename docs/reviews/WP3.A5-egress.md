@@ -9,8 +9,8 @@ own documentation said were closed. They blocked merge.
 Low findings fixed or accepted with a reason. Two fixes change accepted decisions and are written
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
 fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
-1 Medium and 5 Low, a fifth 2 Medium and 4 Low, a sixth 2 Medium and 2 Low, and a seventh
-1 High, 2 Medium and 3 Low, all resolved below. The PR stays a draft until a review comes back clean.
+1 Medium and 5 Low, a fifth 2 Medium and 4 Low, a sixth 2 Medium and 2 Low, a seventh
+1 High, 2 Medium and 3 Low, and an eighth 1 Medium and 7 Low, all resolved below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -191,3 +191,22 @@ everything reported came from gate runs that had finished or from reading code.
 **Stated plainly, in ADR-0013:** these gates catch drift, mistakes and careless overrides and make
 exceptions visible in review. A contributor with write access could edit the gates themselves;
 the boundary there is review, CODEOWNERS and the `main` ruleset, which is not applied yet (PD-17).
+
+## Eighth review (2026-10-17)
+
+**Reviewed:** `0cbbafd` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export, judged against ADR-0013's statement that these gates stop drift and careless
+overrides, not a contributor who edits the gates. **Result:** 0 High · 1 Medium · 7 Low. Round
+seven's scanner, configuration checks and canaries held; only `clippy::style` and `clippy::all`
+among the lint groups switch the bans off, and both are caught.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| M1 | `OsFs` refused `\\?\GLOBALROOT\...` but not the NT spelling `\??\...`, which std does not parse as a prefix yet hands to the system unchanged: `\??\GLOBALROOT\Device\Null` was read, and `\??\UNC\host\share` would reach SMB | A path starting with `\??\` (or `/??/`) is refused too. The residuals are completed: mapped drive letters, links or junctions to shares in the data directory, a UNC current directory | `network_and_device_paths_are_refused`: every `Fs` method, seven refused spellings (the NT ones included), local paths accepted |
+| L1 | `cargo xtask clippy` refused variables by exact name, so lowercase `rustflags` (honoured on Windows) passed, configuration outside the repository was unchecked, and `sccache` users could not run it | The clippy it runs gets an empty `CARGO_ENCODED_RUSTFLAGS` (above every other flag source), an empty `RUSTC_WRAPPER`, and no `CLIPPY_ARGS` or `CLIPPY_CONF_DIR`, whatever their case. Configuration outside the repository is stated as the machine's | `the_child_environment_is_neutralised`; a seeded `Instant::now` with lowercase `rustflags` and `clippy_args` set to allow the lint still fails the gate (run by hand) |
+| L2 | `.RS` sources compiled on Windows and macOS were skipped by `allow-audit` and `headers` | Extensions compare in any case | by reading; `.rs` handling unchanged otherwise |
+| L3 | The canary shape check accepted a canary calling a different ban whose name contains its own (`try_send_to` for `send_to`) | The item must appear as a whole word | `a_canary_must_call_its_own_item` |
+| L4 | The workflow text check failed on any `RUSTFLAGS`, comments included, and would block a sanitizer job | Removed: the clippy job is covered by the neutralised environment, and other jobs do not judge lints; its negative is replaced by `build-script-clippy-env` | as L1 |
+| L5 | Most `OsFs` refusals and the build-script check were unpinned | A table test over every method; a unit test and a negative for build scripts (names in any case) | `network_and_device_paths_are_refused`, `a_build_script_naming_clippy_is_found`; negative `build-script-clippy-env` **PROVEN** |
+| L6 | The walker now scanned nested build output (`fuzz/target`) | Folders holding Cargo's `CACHEDIR.TAG` are skipped | by reading |
+| L7 | ADR-0013's list of negatives missed round seven's, the `allow-invalid` wording was wrong, and round seven's commit said "34 Unix canaries" where the Linux cross-check counts 32 (34 `allow-invalid` entries, two of them Windows symlinks) | Corrected here and in ADR-0013 | review of the text |

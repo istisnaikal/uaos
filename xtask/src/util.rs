@@ -63,9 +63,11 @@ pub(crate) fn walk_files(root: &Path) -> Result<Vec<PathBuf>, String> {
             let name = name.to_string_lossy();
             let file_type = entry.file_type().map_err(|e| format!("stat {}: {e}", path.display()))?;
             if file_type.is_dir() {
-                // Only the root's build, VCS and package folders are skipped: a nested folder with
-                // one of those names is scanned (review WP3.A5, round 7, H1).
-                if !(dir.as_path() == root && SKIP_DIRS.contains(&name.as_ref())) {
+                // The root's build, VCS and package folders are skipped, and any folder Cargo
+                // marks as a build directory (`CACHEDIR.TAG`, as in `fuzz/target`); another
+                // nested folder with one of those names is scanned (review WP3.A5, rounds 7, 8).
+                let build_output = path.join("CACHEDIR.TAG").is_file();
+                if !(build_output || dir.as_path() == root && SKIP_DIRS.contains(&name.as_ref())) {
                     stack.push(path);
                 }
             } else if file_type.is_file() {

@@ -742,13 +742,16 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "`build` is not allowed",
         },
         Case {
-            id: "workflow-overriding-env",
+            id: "build-script-clippy-env",
             gate: "allow-audit",
             tool: None,
-            // Review WP3.A5 round 7, M1: compiler flags in a CI workflow.
-            seed: append(".github/workflows/ci.yml", "\n# seeded\n#   RUSTFLAGS: -Aclippy::disallowed_methods\n"),
+            // Review WP3.A5 round 8, L5: a build script that could set clippy's environment.
+            seed: write(
+                "crates/uaos-state/build.rs",
+                "fn main() {\n    println!(\"cargo:rustc-env=clippy_conf_dir=crates\");\n}\n".to_owned(),
+            ),
             runner: Runner::Xtask(&["allow-audit"]),
-            expect: "`RUSTFLAGS` can change",
+            expect: "names clippy's environment",
         },
         Case {
             id: "canary-malformed",
