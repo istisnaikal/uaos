@@ -13,7 +13,8 @@ use crate::fs::{AppendFile, Fs, FsError, LockGuard, temp_sibling};
 /// path (`\\.\...`, `\\?\GLOBALROOT\...`) reaches past the file system, so both are refused
 /// with [`FsError::PermissionDenied`] before any call (review WP3.A5, round 7, M2), and so is
 /// any path that starts with two separators, which Windows reads as UNC even where std parses no
-/// prefix (round 13, M1). Data stays local (red line 1).
+/// prefix (round 13, M1), and a verbatim disk path naming the bare volume (`\\?\C:`, a
+/// device; round 14, L1). Data stays local (red line 1).
 #[derive(Debug, Default)]
 pub struct OsFs;
 
@@ -41,7 +42,13 @@ fn local(path: &Path, op: &'static str) -> Result<(), FsError> {
             .get(..2)
             .is_some_and(|start| start.iter().all(|b| *b == b'\\' || *b == b'/'));
         let refused = match parts.next() {
-            Some(Component::Prefix(prefix)) => !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)),
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::Disk(_) => false,
+                // `\\?\C:` alone names the raw volume, a device; `\\?\C:\` is its root
+                // directory (round 14, L1).
+                Prefix::VerbatimDisk(_) => parts.next() != Some(Component::RootDir),
+                _ => true,
+            },
             // `\??\...` names the NT object namespace (`\??\UNC\host`, devices): std does not
             // parse it as a prefix but hands it to the system unchanged (review WP3.A5, round 8, M1).
             Some(Component::RootDir) => doubled || parts.next() == Some(Component::Normal(std::ffi::OsStr::new("??"))),
@@ -214,6 +221,7 @@ mod tests {
             r"//uaos-canary.invalid//share/x",
             r"\/uaos-canary.invalid\\share\x",
             r"\\uaos-canary.invalid\",
+            r"\\?\C:",
         ] {
             let p = Path::new(path);
             assert!(refused(OsFs.create_dir_all(p)), "create_dir_all {path}");
