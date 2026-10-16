@@ -89,36 +89,66 @@ loss is detected and reported. Chunk authenticity (AEAD) is unchanged, and shred
 - **Negative case for the gate self-test:** a coordinator that advances `flushed_through` before
   syncing chunks must fail the simulation.
 
-## Implementation and evidence (P3 Move 1, PR-1, 2026-10-15)
+## Implementation and evidence (P3 Move 1, PR-1, 2026-10-15; revised 2026-10-16 after review)
+
+The V1 review of the first implementation ([WP3.A1](../reviews/WP3.A1-chunk-durability.md))
+found four High findings, each a payload loss ending with a durable record and no `chunk.lost`
+record. What follows describes the code after those fixes.
 
 **How each decision is built.**
 - **Decision 1.** `ChunkStore::open_with(…, ChunkDurability::Balanced)` hands both chunk files to
   the OS through a uniquely named temporary and a rename, with no flush. Strict mode is unchanged.
-- **Decision 2.** The coordinator role belongs to `Journal::open_with_payloads`.
+  A pair already on disk from an earlier process is replaced only by a flushed write that keeps
+  its data key. To know which names those are without a file-system call per put, the store
+  indexes the key files present when it opens (one store per data directory, enforced by its own
+  lock).
+- **Decision 2.** There is no separate `DurabilityCoordinator` type: `Journal::open_with_payloads`
+  plays that role.
   - `Journal::sync` first flushes the store's pending chunks (files, then pocket directories),
     then the segment, and only then advances `flushed_through`.
-  - A failed payload flush stops the writer (`JournalHealth::PayloadFlushFailed`). `recover`
-    then reads the pending chunks back, journals each unreadable one as `chunk.lost` and flushes.
-  - The flush still runs inline, as before. Moving it to its own thread is runtime work
-    (WP3.3, the state actor).
+  - **A failed flush is sticky.** Any failed store flush, inside or outside `Journal::sync`,
+    poisons the store: `put`, `is_stored` and `sync_pending` refuse, and the writer stops
+    (`JournalHealth::PayloadFlushFailed`).
+  - **Recovery rewrites; it never re-flushes.** `recover` reads each pending chunk back. A
+    readable one is rewritten to new files and flushed, because after a writeback error a second
+    flush of the same file can report success without writing anything. An unreadable one is
+    quarantined (kept, not deleted) and journaled as `chunk.lost` with its cause (`missing`,
+    `short`, `unauthentic`).
+  - **The flush still runs inline.** When the window is due, the `append` that finds it due pays
+    for the flush. Moving it to its own thread is runtime work (WP3.3, the state actor).
 - **Decision 3.**
-  - **Durable point.** After each flush a one-line marker (`journal/FLUSHED`) records the
-    durable point. It is written without a flush and made durable at most once per second, so a
-    durable marker never names a record beyond the true durable point.
-  - **Recovery on open.** `open_with_payloads` reads back and flushes the payloads of every
-    record after the marker, or after the start of the previously active segment if the marker
-    is missing. It does this **before** the previous run's records are made durable. Each
-    unreadable payload gets a `chunk.lost` record (chunk named in metadata, never as
-    `payload_ref`), and none is silent.
-  - **Shredded chunks.** A chunk shredded after the record that references it is not a loss,
-    when a `chunk.shredded` record for it follows. That record also names the chunk in metadata.
+  - **Losses are journaled before their records are durable.** The `chunk.lost` records are
+    appended before the flush that makes the records they report durable, so one flush covers
+    both. While a found loss is not yet journaled, the writer refuses records and flushes.
+  - **Durable point.** A one-line marker (`journal/FLUSHED`), written atomically at open and
+    then at most once per second, names the last record up to which every payload is durable or
+    its loss journaled. It never moves while a loss is unreported or the store is poisoned. Its
+    presence also means the journal cannot be opened without its store
+    (`JournalError::PayloadsRequired`).
+  - **Recovery on open.** `open_with_payloads` reads back, rewrites and flushes the payloads of
+    every record after the marker. Without a valid marker it checks the **whole journal**, not
+    the last segment, so the work is bounded by the marker's lag (about a second of records) only
+    when the marker is valid. The records after the durable point are then **copied**, unflushed,
+    to a fresh active segment, the `chunk.lost` records for them are appended after them, and one
+    flush makes both durable before open returns. Open never flushes the previous run's segment
+    file again, for the same reason recovery never re-flushes a chunk.
+  - **The event exists; the operation state does not yet.** Each loss is a `chunk.lost` record
+    and is listed by `Journal::lost_payloads`. The operation-state projection that Decision 3
+    names arrives with the runtime (WP3.3).
+  - **Keys that are gone are not a loss.** A keychain that no longer holds a pocket's KEKs (a
+    reset, a moved data directory) makes recovery fail closed and touches no chunk.
+  - **Shredded chunks.** A chunk shredded after the record that references it is not a loss when
+    a `chunk.shredded` record for it follows. The caller must write that record and flush it
+    **before** the shred (write-ahead), so a power loss cannot leave references to removed
+    content unexplained. The runtime that will do so arrives in WP3.3; until then this is a
+    documented contract of `ChunkStore::shred`, exercised by the simulation. Both `chunk.lost` and `chunk.shredded` name the chunk in metadata, never as
+    `payload_ref`, and `append` enforces it.
 - **Added beyond the decision (I-02, S-6).**
   - **Payload before record.** With a store attached, the journal refuses a record whose
     `payload_ref` is not stored (`JournalError::PayloadNotStored`).
-  - **One writer per chunk.** Concurrent puts of one chunk wait for each other, and every
-    atomic write uses its own temporary.
-  - **No trust in leftovers.** A chunk left by an earlier process is read back once before it is
-    trusted. A torn pair is rewritten.
+  - **One writer per chunk.** Every operation on a chunk (put, flush, recovery, verification,
+    shred) holds that chunk's slot, and every atomic write uses its own temporary. A rotation
+    lock keeps a shred from destroying the KEK a concurrent put is wrapping under.
   - **Rotation re-wraps are always flushed.** The old KEK is destroyed right after, so an
     unflushed re-wrap lost to power would leave a key file only the destroyed KEK can open.
 
@@ -127,27 +157,25 @@ loss is detected and reported. Chunk authenticity (AEAD) is unchanged, and shred
   acknowledged record's payload must read back after the kill.
   - Windows, local: 60 kills, 0 lost.
   - CI: 40 kills per OS per merge, 10,000 nightly.
-- **Simulation (`uaos-state/tests/durability.rs`).**
+- **Simulation (`uaos-state/tests/durability.rs`).** It runs under two disk models: a failed
+  flush either drops the unflushed bytes, or keeps serving them without ever making them durable.
   - **Flush-ordering scenario.** A flush fails at every possible step, then the power goes. A
     record at or before `flushed_through` must have a readable payload.
-  - **Random crash schedules.** Writes, repeated payloads, flushes, failed flushes, process
-    crashes, power losses and recoveries (64 cases per merge; 2,048 run locally). Every
-    surviving record's payload is readable or reported.
-- **The property test found a silent-loss path, fixed before merge.** It runs as follows:
-  1. A failed flush drops chunk A.
-  2. Recovery sets A aside as lost.
-  3. Recovery's own re-flush then fails too.
-  4. The next successful recovery makes A's record durable without reporting it.
-
-  Lost chunks now accumulate in the store until the journal has written their `chunk.lost`
-  records.
-- **Gate self-test.** Four new seeded violations prove the `journal-durability` gate bites:
-  `chunk-flushed-before-sync`, `intent-before-chunk-write`, `chunk-put-pair-race` and
-  `chunk-put-shared-temp`.
+  - **Regression tests.** One for each review finding fixed in code, and one for each of the
+    four defects the extended schedules found afterwards.
+  - **Random crash schedules.** Writes, repeated payloads, write-ahead shreds, flushes, failed
+    flushes, failed appends, clock advances, process crashes, power losses and recoveries, with
+    faults still armed during the next open. 64 cases per merge; 12,000 run locally on the final
+    code. Every acknowledged record survives a process crash (except records that existed only
+    in memory after a flush and its rewrite both failed, ADR-0003). Every flushed record's
+    payload survives a power loss unless its loss was journaled first. No surviving record's
+    payload is unreadable without a `chunk.lost` record.
+- **Gate self-test.** Eleven seeded violations prove the `journal-durability` gate bites (listed
+  in `gates.toml`), one for each failure class the review and the schedules found.
 - **Bench: the target is not met on the reference machine.** The details are in
   [the appendix](appendix/0018-chunk-put-2026-10-15.md).
-  - Balanced chunk put, 4 KiB: p99 is 2.1 ms on Windows 10 (solid-state drive) against the
-    0.5 ms target.
+  - Balanced chunk put, 4 KiB, after the fixes: p99 is 1.55 ms on Windows 10 (solid-state drive)
+    against the 0.5 ms target. The fixes cost nothing measurable on this path.
   - Without the flush, the cost is the creation of two files per chunk.
   - Creating chunk files in place, with no temporary or rename, was also measured: it halved
     p50 but tripled p99, so the rename stays.

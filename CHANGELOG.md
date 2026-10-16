@@ -16,18 +16,32 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     would make it the common case.
   - **The fix:**
     - every atomic write now uses its own temporary;
-    - puts of one chunk wait for each other;
-    - a chunk left by an earlier process is read back once before it is trusted.
-  - **Proof:** a deterministic interleaving test and two seeded violations.
+    - every operation on a chunk (put, flush, recovery, shred) holds that chunk's slot;
+    - a shred cannot destroy the key a concurrent put is wrapping under;
+    - a chunk left by an earlier process is read back and rewritten, flushed, before it is
+      trusted, and a rewrite keeps the chunk's data key.
+  - **Proof:** deterministic interleaving tests and seeded violations.
 - Payload before record (I-02). A journal opened with its chunk store refuses a record whose
-  `payload_ref` is not stored (`JournalError::PayloadNotStored`).
-- Payload losses are never silent.
-  - **On open:** the journal reads back the payloads of every record after its durable point,
-    and journals each unreadable one as `chunk.lost`.
-  - **After a failed payload flush:** the writer stops until `recover` has read the pending
-    chunks back.
-  - **Found by the new property test before merge:** a loss could go unreported when recovery's
-    own flush also failed. Lost chunks are now kept until their `chunk.lost` record is written.
+  `payload_ref` is not stored (`JournalError::PayloadNotStored`, new code
+  `JOURNAL_PAYLOAD_NOT_STORED`).
+- Payload losses are journaled before the records they affect become durable, in simulation
+  (`docs/claims.md` gives the exact conditions).
+  - **On open:** the journal reads back the payloads of every record after its durable point
+    (the whole journal if the marker is missing), rewrites the readable ones, and journals each
+    unreadable one as `chunk.lost` before the durable point moves. Unreadable chunks are
+    quarantined, never deleted. A keychain that lost the pocket's keys fails closed instead.
+  - **After a failed payload flush,** anywhere in the store: the store refuses work and the
+    writer stops until `recover` has rewritten what it can read and journaled the rest. Nothing
+    is flushed in place a second time, because after a writeback error a second flush can report
+    success without writing anything.
+  - **A journal that coordinates a store cannot be opened without it.**
+  - **Open no longer flushes the previous run's journal segment again.** It moves the records
+    after the durable point to a fresh segment, and one flush covers them together with any loss
+    records open appends for them. This also closes a latent P1 gap: a failed flush during open
+    could drop records the OS still held.
+  - **Review:** `docs/reviews/WP3.A1-chunk-durability.md` (4 High, 7 Medium, 7 Low, and four
+    defects found by the extended property test after the fixes). New codes
+    `STORE_PAYLOAD_LOST` and `STORE_PAYLOAD_FLUSH_FAILED`.
 
 - `uaos-policy` hardening after the retroactive review (`docs/reviews/WP2.1-policy.md`; ADR-0008
   Amendment 1):
@@ -190,7 +204,11 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `intent-before-chunk-write`, `chunk-put-pair-race`, `chunk-put-shared-temp`.
 - `journal-ack-bench` gains `chunk-put-balanced` and `group-flush-chunks`. The reference-machine
   numbers are in `docs/adr/appendix/0018-chunk-put-2026-10-15.md`: ADR-0018's p99 ≤ 0.5 ms
-  balanced-put target is **not met** on Windows, where file creation dominates.
+  balanced-put target is **not met** on Windows (1.55 ms after the review fixes), where file
+  creation dominates. Until the state actor (WP3.3), the request whose append finds the flush
+  window due pays for the flush.
+- Gate `journal-durability` gains seven seeded violations, one per failure class found by the
+  WP3.A1 review and the extended property test (eleven in all).
 - Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
   unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a
   forbid.
