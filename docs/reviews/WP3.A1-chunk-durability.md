@@ -11,8 +11,8 @@ accepted with a reason. The property test, extended as M6 asked, then found four
 (N1–N4), all fixed and pinned. One item needs a maintainer decision (L7). A second V1 review of
 the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up,
 a third found 1 High, 3 Medium and 5 Low, a fourth 2 Medium and 4 Low, a fifth 2 Medium and
-3 Low, a sixth 4 Low, a seventh 1 Medium and 2 Low, an eighth 1 Low, a ninth 4 Low, and a tenth
-4 Low; all are fixed below.
+3 Low, a sixth 4 Low, a seventh 1 Medium and 2 Low, an eighth 1 Low, a ninth 4 Low, a tenth
+4 Low, and an eleventh 1 High and 3 Low; all are fixed below.
 The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
@@ -306,3 +306,21 @@ both properties find the old behaviour within 4,000 schedules.
 **Verified locally (Windows, dedicated target directory):** 66 durability tests and the rest of
 `uaos-state`, `uaos-testkit` and `uaos-ledger`; workspace clippy with warnings denied; 3 × 4,000
 and 2 × 20,000 schedules of each property, in release; the 33 `journal-durability` negatives.
+
+## Eleventh review (2026-10-16)
+
+**Reviewed:** `8a33981` (on `555494b`) by a fresh-context agent, in a scratch export.
+**Result:** 1 High · 0 Medium · 3 Low. The High finding blocked merge. The tenth round's store-first
+recovery loses no loss and cannot loop; the caller paths to a coordinated store's losses are
+closed; the power-loss excuse and the pruned exposure set are sound.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| H1 | An append that runs out of space leaves part of its line in the segment (`write_all` on ENOSPC) and the writer `DiskFull`. A payload flush failure then set `PayloadFlushFailed` over it (from a caller's `sync`, or from the payload flush inside `recover`'s own rotation), and `recover` turned that into `Healthy` without leaving the torn segment. Later records, the loss record among them, were appended after the torn bytes and flushed; the next open failed with `ChainBroken`, so acknowledged, flushed records became unreadable after a recovery that returned `Ok`. Present since the first round's fixes. The schedules could not reach it: their failed append wrote nothing | Only a healthy writer becomes `PayloadFlushFailed`; `DiskFull` and `WriteFailed` stay until `recover`'s rotation or rewrite leaves the segment, and `recover` handles the poisoned store first. The harness's failed append now writes half its line first, and the clean-recovery oracle appends a record, flushes it and reads the journal back | `r11_h1_a_payload_failure_never_hides_a_torn_segment` (both ways in); negative `payload-failure-hides-torn-segment` **PROVEN**; with the fix reverted and the persisted seeds removed, both properties fail within 4,000 schedules ("the journal no longer reads back after a clean recovery: ChainBroken") |
+| L1 | The tenth round's store-first recovery could queue one loss twice: a loss waiting in `unreported` (its report's append failed) whose content was stored and lost again was queued a second time, and the record got two `chunk.lost` records (the first round's L5 class) | A record whose loss is already queued is not queued again | `r11_l1_a_loss_is_queued_once`, checked to fail with the check removed |
+| L2 | The crash oracle exposed every acknowledged record when a fault was armed, records already flushed included, and also in the disk model where a failed flush keeps the bytes; a store that discarded readable content after any failed flush and reported it passed 20,000 schedules of each property | Only records not yet flushed are exposed, and none when a failed flush keeps the bytes | with that mutation, both properties now fail within 4,000 schedules |
+| L3 | The tenth round cited `r10_l1` and its negative for the flush refusal on untaken losses, but no public path reaches that state with a live journal, and removing the clause broke nothing | Stated in ADR-0018 as defence in depth | review of the text |
+
+**Verified locally (Windows, dedicated target directory):** 68 durability tests and the rest of
+`uaos-state`, `uaos-testkit` and `uaos-ledger`; workspace clippy with warnings denied; 3 × 4,000
+and 2 × 20,000 schedules of each property, in release; the 34 `journal-durability` negatives.

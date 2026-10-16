@@ -1660,6 +1660,23 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "the store stayed poisoned after an Ok recovery",
         },
         Case {
+            id: "payload-failure-hides-torn-segment",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 eleventh round H1: a payload flush failure replaces `DiskFull`, so recovery
+            // appends after a torn line and the journal no longer opens.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "            if self.health == JournalHealth::Healthy {\n                self.health = JournalHealth::PayloadFlushFailed;\n            }",
+                "            self.health = JournalHealth::PayloadFlushFailed;",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r11_h1_a_payload_failure_never_hides_a_torn_segment"],
+            },
+            expect: "a payload failure hid the torn segment",
+        },
+        Case {
             id: "shred-incomplete-key-only",
             gate: "journal-durability",
             tool: None,
