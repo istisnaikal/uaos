@@ -50,7 +50,7 @@ pub(crate) fn capture(dir: &Path, program: &str, args: &[&str]) -> Result<String
 /// Directories never scanned by file-walking checks.
 pub(crate) const SKIP_DIRS: &[&str] = &["target", ".git", "node_modules"];
 
-/// Recursively lists files under `root`, skipping [`SKIP_DIRS`] and hidden tool caches.
+/// Recursively lists files under `root`, skipping [`SKIP_DIRS`] directly under it.
 pub(crate) fn walk_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -63,7 +63,9 @@ pub(crate) fn walk_files(root: &Path) -> Result<Vec<PathBuf>, String> {
             let name = name.to_string_lossy();
             let file_type = entry.file_type().map_err(|e| format!("stat {}: {e}", path.display()))?;
             if file_type.is_dir() {
-                if !SKIP_DIRS.contains(&name.as_ref()) {
+                // Only the root's build, VCS and package folders are skipped: a nested folder with
+                // one of those names is scanned (review WP3.A5, round 7, H1).
+                if !(dir.as_path() == root && SKIP_DIRS.contains(&name.as_ref())) {
                     stack.push(path);
                 }
             } else if file_type.is_file() {

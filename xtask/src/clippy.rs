@@ -27,6 +27,13 @@ const ARGS: &[&str] = &[
 ];
 
 pub(crate) fn check(root: &Path) -> Result<(), String> {
+    let set = overriding_env(std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()));
+    if !set.is_empty() {
+        return Err(format!(
+            "[clippy] refusing to run: {} can change lint levels, compiler flags or clippy's configuration outside the workspace lint table; unset them (review WP3.A5, round 7, M1)",
+            set.join(", ")
+        ));
+    }
     println!("xtask: [clippy] cargo {}", ARGS.join(" "));
     let out = Command::new("cargo")
         .args(ARGS)
@@ -50,6 +57,18 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     } else {
         Err(format!("[clippy] failed ({})", out.status))
     }
+}
+
+/// The variables among `names` that change lint levels, compiler flags or clippy's
+/// configuration: compiler flags in any form, compiler wrappers, clippy's arguments and
+/// configuration directory.
+fn overriding_env(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut set: Vec<String> = names
+        .into_iter()
+        .filter(|k| crate::allow_audit::OVERRIDING_ENV_WORDS.iter().any(|w| k.contains(w)))
+        .collect();
+    set.sort();
+    set
 }
 
 /// The warnings clippy printed for `clippy.toml` paths it could not resolve: for each note, the
@@ -118,6 +137,23 @@ mod tests {
             unresolved_bans(stderr),
             vec!["warning: `a::b` does not refer to a reachable function".to_owned()]
         );
+    }
+
+    /// Round 7, M1: flags, wrappers and clippy's own arguments in the environment are refused.
+    #[test]
+    fn an_overriding_environment_is_refused() {
+        let names = [
+            "PATH",
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS",
+            "RUSTC_WRAPPER",
+            "CLIPPY_ARGS",
+            "CLIPPY_CONF_DIR",
+            "CARGO_TERM_COLOR",
+        ]
+        .map(str::to_owned);
+        assert_eq!(overriding_env(names).len(), 6);
     }
 
     /// A note with no warning above it still fails the gate.

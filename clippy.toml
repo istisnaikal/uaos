@@ -23,6 +23,9 @@ disallowed-methods = [
   # Time and randomness come from uaos_platform::{Clock, Rng} so DST is seed-reproducible (D15).
   { path = "std::time::SystemTime::now", reason = "use uaos_platform::Clock (owner: uaos-platform)" },
   { path = "std::time::Instant::now", reason = "use uaos_platform::Clock (owner: uaos-platform)" },
+  { path = "getrandom::fill_uninit", reason = "randomness comes from uaos_platform::Rng (owner: uaos-platform)" },
+  { path = "getrandom::u32", reason = "randomness comes from uaos_platform::Rng (owner: uaos-platform)" },
+  { path = "getrandom::u64", reason = "randomness comes from uaos_platform::Rng (owner: uaos-platform)" },
   { path = "getrandom::fill", reason = "use uaos_platform::Rng (owner: uaos-platform)" },
   # Concurrency: the supervisor is the sole spawner (D2).
   { path = "std::thread::spawn", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
@@ -66,6 +69,15 @@ disallowed-methods = [
   { path = "std::path::Path::is_dir", reason = "use uaos_platform::Fs (owner: uaos-platform)" },
   { path = "std::path::Path::is_symlink", reason = "use uaos_platform::Fs (owner: uaos-platform)" },
   { path = "std::env::set_current_dir", reason = "use uaos_platform::Fs (owner: uaos-platform)" },
+  # Round 7, M2: links and ownership changes (a Windows symbolic link to a UNC target reaches the
+  # network; the others exist only on Unix).
+  { path = "std::fs::soft_link", reason = "use uaos_platform::Fs (owner: uaos-platform)" },
+  { path = "std::os::windows::fs::symlink_file", reason = "use uaos_platform::Fs (owner: uaos-platform)", allow-invalid = true },
+  { path = "std::os::windows::fs::symlink_dir", reason = "use uaos_platform::Fs (owner: uaos-platform)", allow-invalid = true },
+  { path = "std::os::unix::fs::symlink", reason = "use uaos_platform::Fs (owner: uaos-platform)", allow-invalid = true },
+  { path = "std::os::unix::fs::chown", reason = "use uaos_platform::Fs (owner: uaos-platform)", allow-invalid = true },
+  { path = "std::os::unix::fs::lchown", reason = "use uaos_platform::Fs (owner: uaos-platform)", allow-invalid = true },
+  { path = "std::os::unix::fs::chroot", reason = "use uaos_platform::Fs (owner: uaos-platform)", allow-invalid = true },
   # Network: only the egress door opens connections or resolves names (I-07, ADR-0013).
   { path = "std::net::TcpStream::connect", reason = "outbound connections go through the egress door (owner: uaos-egress)" },
   { path = "std::net::TcpStream::connect_timeout", reason = "outbound connections go through the egress door (owner: uaos-egress)" },
@@ -154,5 +166,6 @@ disallowed-types = [
   { path = "tokio::task::JoinSet", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
   { path = "tokio::task::LocalSet", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
   # hyper-util's executor spawns every task it is given with `tokio::spawn` (round 4, L1).
+  { path = "getrandom::SysRng", reason = "randomness comes from uaos_platform::Rng (owner: uaos-platform)" },
   { path = "hyper_util::rt::TokioExecutor", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
 ]

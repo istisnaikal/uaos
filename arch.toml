@@ -121,4 +121,5 @@ ban = []
 "clippy::disallowed_types" = [
     "crates/uaos-policy/src/engine.rs", # Cedar's entity API takes a HashSet of parents
     "crates/uaos-egress/tests/", # the door's harness runs mock servers on hyper-util's executor; its canaries name every banned type
+    "crates/uaos-platform/tests/bans.rs", # the canary for the entropy type
 ]

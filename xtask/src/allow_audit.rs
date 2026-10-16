@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use cargo_metadata::MetadataCommand;
 use serde::Deserialize;
 
 use crate::util::{rel, walk_files};
@@ -59,6 +60,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(root.join("arch.toml")).map_err(|e| format!("arch.toml: {e}"))?;
     let arch: ArchFile = toml::from_str(&text).map_err(|e| format!("arch.toml [allow_audit]: {e}"))?;
     let owners = arch.allow_audit;
+    let io_owners = owners.get("clippy::disallowed_methods").cloned().unwrap_or_default();
 
     let files = walk_files(root)?;
     let mut violations = config_overrides(root, &files)?;
@@ -70,19 +72,42 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         }
         let relative = rel(root, &path);
         let source = std::fs::read_to_string(&path).map_err(|e| format!("{relative}: {e}"))?;
-        for (line, body) in attributes(&source) {
-            if !(contains_word(&body, "allow") || contains_word(&body, "expect")) {
-                continue;
-            }
-            for (lint, patterns) in &owners {
-                if !contains_word(&body, short_name(lint)) {
-                    continue;
+        let code = masked(&source);
+        // Any mention in code, not only in an attribute: a macro can build the attribute from
+        // its arguments, and a lint group or an old name switches the lint off too (review
+        // WP3.A5, round 7, H1).
+        for (lint, patterns) in &owners {
+            let owned = patterns.iter().any(|p| path_matches(p, &relative));
+            for word in switches(lint) {
+                for (line, at) in word_positions(&code, &word) {
+                    // `deny(...)` and `forbid(...)` only make a lint stricter.
+                    if matches!(enclosing_call(&code, at), "deny" | "forbid") {
+                        continue;
+                    }
+                    found += 1;
+                    if !owned {
+                        violations.push(format!(
+                            "{relative}:{line}: names `{word}`, which can switch `{lint}` off, outside its owners ({})",
+                            patterns.join(", ")
+                        ));
+                    }
                 }
-                found += 1;
-                if !patterns.iter().any(|p| path_matches(p, &relative)) {
+            }
+        }
+        // Code compiled from a file elsewhere would be judged by the wrong file's path.
+        if !io_owners.iter().any(|p| path_matches(p, &relative)) {
+            for line in path_attribute_lines(&code) {
+                violations.push(format!(
+                    "{relative}:{line}: a `#[path]` module outside the owners of `clippy::disallowed_methods`"
+                ));
+            }
+            for line in word_lines(&code, "include")
+                .into_iter()
+                .filter(|_| code.contains("include!"))
+            {
+                if include_at(&code, line) {
                     violations.push(format!(
-                        "{relative}:{line}: allows `{lint}` outside its owners ({})",
-                        patterns.join(", ")
+                        "{relative}:{line}: `include!` outside the owners of `clippy::disallowed_methods`"
                     ));
                 }
             }
@@ -90,7 +115,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     }
     if violations.is_empty() {
         println!(
-            "xtask allow-audit: {found} guarded-lint allow(s), all inside their owners; no lint override in configuration; every ban has a canary"
+            "xtask allow-audit: {found} guarded-lint mention(s), all inside their owners; no lint override in configuration; every ban has a well-formed canary"
         );
         Ok(())
     } else {
@@ -102,75 +127,228 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     }
 }
 
-/// Lint switches outside attributes: a `clippy.toml` below the root, a workspace member whose
-/// `[lints]` is not exactly `workspace = true`, the workspace lint table not denying a guarded
-/// lint, and Cargo configuration that can change lint levels or clippy's configuration.
+/// The words that switch `lint` off: its name, its old name and the groups that contain it.
+fn switches(lint: &str) -> Vec<String> {
+    let mut words = vec![short_name(lint).to_owned()];
+    if let Some(old) = short_name(lint).strip_suffix('s')
+        && lint.starts_with("clippy::disallowed_")
+    {
+        words.push(old.to_owned());
+    }
+    if lint.starts_with("clippy::disallowed_") {
+        words.extend(["clippy::all".to_owned(), "clippy::style".to_owned()]);
+    }
+    words
+}
+
+/// `source` with every string, char literal and comment replaced by spaces, newlines kept.
+fn masked(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0usize;
+    while let Some(&c) = chars.get(i) {
+        let skipped = skip_literal_or_comment(&chars, i);
+        if skipped > i {
+            for k in i..skipped {
+                out.push(if chars.get(k) == Some(&'\n') { '\n' } else { ' ' });
+            }
+            i = skipped;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The 1-based lines on which `word` occurs in `code` as a whole word.
+fn word_lines(code: &str, word: &str) -> Vec<usize> {
+    word_positions(code, word).into_iter().map(|(line, _)| line).collect()
+}
+
+/// `(1-based line, byte offset)` of every whole-word occurrence of `word` in `code`.
+fn word_positions(code: &str, word: &str) -> Vec<(usize, usize)> {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    code.match_indices(word)
+        .filter(|(at, _)| {
+            let before = code.get(..*at).and_then(|s| s.chars().next_back());
+            let after = code.get(at + word.len()..).and_then(|s| s.chars().next());
+            !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+        })
+        .map(|(at, _)| (code.get(..at).map_or(0, |s| s.matches('\n').count()) + 1, at))
+        .collect()
+}
+
+/// The name before the innermost unclosed `(` that contains byte `at` of `code` (`allow` in
+/// `allow(clippy::x)`), or `""` when none does.
+fn enclosing_call(code: &str, at: usize) -> &str {
+    let before = code.get(..at).unwrap_or_default();
+    let mut depth = 0usize;
+    for (i, c) in before.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' if depth == 0 => {
+                let head = before.get(..i).unwrap_or_default().trim_end();
+                let start = head
+                    .char_indices()
+                    .rev()
+                    .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')
+                    .last()
+                    .map_or(head.len(), |(k, _)| k);
+                return head.get(start..).unwrap_or_default();
+            }
+            '(' => depth -= 1,
+            _ => {}
+        }
+    }
+    ""
+}
+
+/// Whether the line holds `include!` (the macro, not an identifier named `include`).
+fn include_at(code: &str, line: usize) -> bool {
+    code.lines().nth(line - 1).is_some_and(|l| {
+        l.match_indices("include").any(|(at, _)| {
+            let rest = l.get(at + "include".len()..).unwrap_or_default().trim_start();
+            let before = l.get(..at).and_then(|s| s.chars().next_back());
+            rest.starts_with('!') && !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    })
+}
+
+/// The 1-based lines with a `#[path = ...]` or `#![path = ...]` attribute.
+fn path_attribute_lines(code: &str) -> Vec<usize> {
+    code.lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            l.match_indices('#').any(|(at, _)| {
+                let rest = l.get(at + 1..).unwrap_or_default().trim_start();
+                let rest = rest.strip_prefix('!').unwrap_or(rest).trim_start();
+                rest.strip_prefix('[')
+                    .map(str::trim_start)
+                    .and_then(|r| r.strip_prefix("path"))
+                    .is_some_and(|r| r.trim_start().starts_with('='))
+            })
+        })
+        .map(|(n, _)| n + 1)
+        .collect()
+}
+
+/// Lint switches outside attributes (review WP3.A5, rounds 6 and 7):
+/// * a `clippy.toml` below the root, or one named in another case (Windows and macOS match
+///   names regardless of case);
+/// * Cargo configuration holding anything but `[alias]`, in any `.cargo` folder, in any case;
+/// * a build script naming clippy's environment;
+/// * CI workflows setting compiler flags, a compiler wrapper or clippy's configuration;
+/// * a workspace member (as Cargo sees them, path dependencies included) whose `[lints]` is not
+///   exactly `workspace = true`;
+/// * the workspace lint table not denying a guarded lint, or allowing a group that contains one.
 fn config_overrides(root: &Path, files: &[PathBuf]) -> Result<Vec<String>, String> {
     let mut problems = Vec::new();
     for path in files {
         let relative = rel(root, path);
-        match path.file_name().and_then(|n| n.to_str()) {
-            Some("clippy.toml" | ".clippy.toml") if relative != "clippy.toml" => problems.push(format!(
-                "{relative}: a clippy.toml below the root replaces the root's bans for its crate"
-            )),
-            Some("Cargo.toml") if is_member_manifest(&relative) => {
-                let doc = read_toml(root, path)?;
-                let inherits = doc
-                    .get("lints")
-                    .and_then(toml::Value::as_table)
-                    .is_some_and(|t| t.len() == 1 && t.get("workspace").and_then(toml::Value::as_bool) == Some(true));
-                if !inherits {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let parent = path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if (name == "clippy.toml" || name == ".clippy.toml") && relative != "clippy.toml" {
+            problems.push(format!(
+                "{relative}: a clippy.toml below the root, or named in another case, replaces the root's bans"
+            ));
+        }
+        if parent == ".cargo" && (name == "config" || name == "config.toml") {
+            let doc = read_toml(root, path)?;
+            for key in doc.as_table().into_iter().flat_map(|t| t.keys()) {
+                if key != "alias" {
                     problems.push(format!(
-                        "{relative}: [lints] must be exactly `workspace = true`, or the workspace's guarded lints do not apply"
+                        "{relative}: `{key}` is not allowed; Cargo configuration holds only [alias], since other keys can change lint levels, compiler flags or clippy's configuration"
                     ));
                 }
             }
-            _ => {}
+        }
+        if name == "build.rs" {
+            let text = std::fs::read_to_string(path).map_err(|e| format!("{relative}: {e}"))?;
+            if text.contains("CLIPPY") {
+                problems.push(format!("{relative}: a build script names clippy's environment"));
+            }
+        }
+        let yaml = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("yml") || e.eq_ignore_ascii_case("yaml"));
+        if relative.starts_with(".github/") && yaml {
+            let text = std::fs::read_to_string(path).map_err(|e| format!("{relative}: {e}"))?;
+            for word in OVERRIDING_ENV_WORDS {
+                if text.contains(word) {
+                    problems.push(format!(
+                        "{relative}: `{word}` can change lint levels, compiler flags or clippy's configuration in CI"
+                    ));
+                }
+            }
+        }
+    }
+    let metadata = MetadataCommand::new()
+        .manifest_path(root.join("Cargo.toml"))
+        .no_deps()
+        .exec()
+        .map_err(|e| format!("cargo metadata: {e}"))?;
+    for package in &metadata.packages {
+        let manifest = package.manifest_path.as_std_path();
+        let doc = read_toml(root, manifest)?;
+        let inherits = doc
+            .get("lints")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|t| t.len() == 1 && t.get("workspace").and_then(toml::Value::as_bool) == Some(true));
+        if !inherits {
+            problems.push(format!(
+                "{}: [lints] must be exactly `workspace = true`, or the workspace's guarded lints do not apply",
+                rel(root, manifest)
+            ));
         }
     }
     let workspace = read_toml(root, &root.join("Cargo.toml"))?;
+    let lints = workspace.get("workspace").and_then(|w| w.get("lints"));
+    let level_of = |table: &str, key: &str| -> Option<String> {
+        match lints.and_then(|l| l.get(table)).and_then(|t| t.get(key)) {
+            Some(toml::Value::String(s)) => Some(s.clone()),
+            Some(toml::Value::Table(t)) => t.get("level").and_then(toml::Value::as_str).map(str::to_owned),
+            _ => None,
+        }
+    };
     for (table, lint) in [
         ("clippy", "disallowed_methods"),
         ("clippy", "disallowed_types"),
         ("rust", "unsafe_code"),
     ] {
-        let level = workspace
-            .get("workspace")
-            .and_then(|w| w.get("lints"))
-            .and_then(|l| l.get(table))
-            .and_then(|t| t.get(lint));
-        let level = match level {
-            Some(toml::Value::String(s)) => Some(s.as_str()),
-            Some(toml::Value::Table(t)) => t.get("level").and_then(toml::Value::as_str),
-            _ => None,
-        };
-        if !matches!(level, Some("deny" | "forbid")) {
+        if !matches!(level_of(table, lint).as_deref(), Some("deny" | "forbid")) {
             problems.push(format!("Cargo.toml: [workspace.lints.{table}] must deny `{lint}`"));
         }
     }
-    for config in [".cargo/config.toml", ".cargo/config"] {
-        let Ok(text) = std::fs::read_to_string(root.join(config)) else {
-            continue;
-        };
-        for word in ["CLIPPY_CONF_DIR", "rustflags", "RUSTFLAGS", "cap-lints"] {
-            if text.contains(word) {
-                problems.push(format!(
-                    "{config}: `{word}` can change lint levels or clippy's configuration outside the workspace lint table"
-                ));
-            }
+    for key in ["all", "style", "disallowed_method", "disallowed_type"] {
+        if let Some(level @ ("allow" | "expect")) = level_of("clippy", key).as_deref() {
+            problems.push(format!(
+                "Cargo.toml: [workspace.lints.clippy] `{key}` set to `{level}` switches a guarded lint off"
+            ));
         }
     }
     Ok(problems)
 }
 
-/// `crates/<name>/Cargo.toml`, `modules/<name>/Cargo.toml` or `xtask/Cargo.toml`.
-fn is_member_manifest(relative: &str) -> bool {
-    let parts: Vec<&str> = relative.split('/').collect();
-    matches!(
-        parts.as_slice(),
-        ["crates" | "modules", _, "Cargo.toml"] | ["xtask", "Cargo.toml"]
-    )
-}
+/// Environment and workflow words that change lint levels, compiler flags or clippy's
+/// configuration outside the workspace's lint table.
+pub(crate) const OVERRIDING_ENV_WORDS: &[&str] = &[
+    "RUSTFLAGS",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CLIPPY_ARGS",
+    "CLIPPY_CONF_DIR",
+];
 
 fn read_toml(root: &Path, path: &Path) -> Result<toml::Value, String> {
     let relative = rel(root, path);
@@ -178,92 +356,96 @@ fn read_toml(root: &Path, path: &Path) -> Result<toml::Value, String> {
     toml::from_str(&text).map_err(|e| format!("{relative}: {e}"))
 }
 
-/// The bans in `clippy.toml` with no `// canary:` marker naming them in [`CANARY_FILES`].
+/// Problems with the canaries of the bans in `clippy.toml` (see [`canary_problems`]).
 fn canary_gaps(root: &Path) -> Result<Vec<String>, String> {
     let text = std::fs::read_to_string(root.join("clippy.toml")).map_err(|e| format!("clippy.toml: {e}"))?;
-    let canaries = CANARY_FILES
+    let files = CANARY_FILES
         .iter()
-        .map(|f| std::fs::read_to_string(root.join(f)).map_err(|e| format!("{f}: {e}")))
-        .collect::<Result<Vec<_>, _>>()?
-        .concat();
-    Ok(bans_without_canary(&text, &canaries)?
-        .into_iter()
-        .map(|p| format!("clippy.toml: `{p}` has no canary in {}", CANARY_FILES.join(" or ")))
-        .collect())
+        .map(|f| {
+            std::fs::read_to_string(root.join(f))
+                .map(|t| (*f, t))
+                .map_err(|e| format!("{f}: {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    canary_problems(&text, &files)
 }
 
-fn bans_without_canary(clippy_toml: &str, canaries: &str) -> Result<Vec<String>, String> {
+/// Every ban needs a canary: a `// canary:` marker naming it, at the top of a function whose
+/// only `#[expect]` names a disallowed lint, followed by the banned item within three lines.
+/// Canary files compile only under `cfg(unix)` or `cfg(windows)`, which CI's systems cover
+/// (review WP3.A5, rounds 6 and 7).
+fn canary_problems(clippy_toml: &str, files: &[(&str, String)]) -> Result<Vec<String>, String> {
     let config: ClippyFile = toml::from_str(clippy_toml).map_err(|e| format!("clippy.toml: {e}"))?;
-    Ok(config
-        .methods
+    let mut problems = Vec::new();
+    for (file, text) in files {
+        for (n, line) in text.lines().enumerate() {
+            let t = line.trim_start();
+            let cfg = t.starts_with("#[cfg") || t.starts_with("#![cfg");
+            if cfg && t != "#[cfg(unix)]" && t != "#[cfg(windows)]" {
+                problems.push(format!(
+                    "{file}:{}: canaries compile only under `cfg(unix)` or `cfg(windows)`",
+                    n + 1
+                ));
+            }
+        }
+    }
+    for ban in config.methods.iter().chain(&config.types) {
+        let path = ban.path();
+        let marker = format!("// canary: `{path}`");
+        let found = files.iter().find_map(|(file, text)| {
+            let lines: Vec<&str> = text.lines().collect();
+            lines
+                .iter()
+                .position(|l| l.trim() == marker)
+                .map(|at| (*file, lines, at))
+        });
+        match found {
+            None => problems.push(format!(
+                "clippy.toml: `{path}` has no canary in {}",
+                CANARY_FILES.join(" or ")
+            )),
+            Some((file, lines, at)) => {
+                let segment = path.rsplit("::").next().unwrap_or(path);
+                if !well_formed(&lines, at, segment) {
+                    problems.push(format!(
+                        "{file}:{}: the canary for `{path}` is not one banned call in a function whose only `#[expect]` names a disallowed lint",
+                        at + 1
+                    ));
+                }
+            }
+        }
+    }
+    Ok(problems)
+}
+
+fn well_formed(lines: &[&str], marker: usize, segment: &str) -> bool {
+    let Some(function) = (marker.saturating_sub(2)..marker)
+        .rev()
+        .find(|&k| lines.get(k).is_some_and(|l| l.trim_start().starts_with("fn ")))
+    else {
+        return false;
+    };
+    let attributes: Vec<&str> = lines
+        .get(..function)
+        .unwrap_or_default()
         .iter()
-        .chain(&config.types)
-        .map(Ban::path)
-        .filter(|p| !canaries.contains(&format!("// canary: `{p}`")))
-        .map(str::to_owned)
-        .collect())
+        .rev()
+        .take_while(|l| l.trim_start().starts_with("#["))
+        .copied()
+        .collect();
+    let expects: Vec<&&str> = attributes.iter().filter(|l| l.contains("#[expect(")).collect();
+    let names_disallowed = expects.iter().all(|l| l.contains("clippy::disallowed_"));
+    let calls = lines
+        .get(marker + 1..(marker + 4).min(lines.len()))
+        .unwrap_or_default()
+        .iter()
+        .any(|l| l.contains(segment));
+    expects.len() == 1 && names_disallowed && calls
 }
 
 /// `clippy::disallowed_methods` → `disallowed_methods`; `unsafe_code` stays as is.
 fn short_name(lint: &str) -> &str {
     lint.rsplit("::").next().unwrap_or(lint)
-}
-
-/// Every attribute (`#[...]` or `#![...]`) in code as `(1-based line, text between the
-/// brackets)`. String, raw-string and char literals and comments are skipped, so attribute-like
-/// text in fixtures, seed strings and documentation is not mistaken for code.
-fn attributes(source: &str) -> Vec<(usize, String)> {
-    let chars: Vec<char> = source.chars().collect();
-    let at = |i: usize| chars.get(i).copied();
-    let mut out = Vec::new();
-    let mut line = 1usize;
-    let mut i = 0usize;
-    // Inside an attribute: (start line, bracket depth, collected body).
-    let mut attr: Option<(usize, usize, String)> = None;
-    while let Some(c) = at(i) {
-        let skipped = skip_literal_or_comment(&chars, i);
-        if skipped > i {
-            let text: String = chars.get(i..skipped).map(|s| s.iter().collect()).unwrap_or_default();
-            line += text.matches('\n').count();
-            if let Some((_, _, body)) = attr.as_mut() {
-                body.push_str(&text);
-            }
-            i = skipped;
-            continue;
-        }
-        if c == '\n' {
-            line += 1;
-        }
-        match attr.as_mut() {
-            None => {
-                let bang = at(i + 1) == Some('!');
-                let open = if bang { i + 2 } else { i + 1 };
-                if c == '#' && at(open) == Some('[') {
-                    attr = Some((line, 1, String::new()));
-                    i = open + 1;
-                    continue;
-                }
-            }
-            Some((start, depth, body)) => match c {
-                '[' => {
-                    *depth += 1;
-                    body.push(c);
-                }
-                ']' => {
-                    *depth -= 1;
-                    if *depth == 0 {
-                        out.push((*start, std::mem::take(body)));
-                        attr = None;
-                    } else {
-                        body.push(c);
-                    }
-                }
-                _ => body.push(c),
-            },
-        }
-        i += 1;
-    }
-    out
 }
 
 /// If a string, raw string, char literal or comment starts at `i`, returns the index just past
@@ -341,16 +523,6 @@ fn is_ident_char(c: Option<char>) -> bool {
     c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// `word` occurs in `text` delimited by non-identifier characters.
-fn contains_word(text: &str, word: &str) -> bool {
-    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    text.match_indices(word).any(|(at, _)| {
-        let before = text.get(..at).and_then(|s| s.chars().next_back());
-        let after = text.get(at + word.len()..).and_then(|s| s.chars().next());
-        !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
-    })
-}
-
 /// Owner patterns are path prefixes; a `*` segment matches exactly one path segment.
 fn path_matches(pattern: &str, path: &str) -> bool {
     let mut pattern_parts = pattern.split('/').peekable();
@@ -388,14 +560,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_single_and_multi_line_attributes() {
-        let src = "#![allow(\n    clippy::print_stdout,\n    clippy::disallowed_methods,\n)]\nfn f() {}\n#[cfg_attr(test, allow(unsafe_code))]\nfn g() {}\n";
-        let attrs = attributes(src);
-        assert_eq!(attrs.len(), 2);
-        assert_eq!(attrs[0].0, 1);
-        assert!(contains_word(&attrs[0].1, "disallowed_methods"));
-        assert_eq!(attrs[1].0, 6);
-        assert!(contains_word(&attrs[1].1, "unsafe_code"));
+    fn finds_single_and_multi_line_mentions() {
+        let code = masked(
+            "#![allow(\n    clippy::print_stdout,\n    clippy::disallowed_methods,\n)]\nfn f() {}\n#[cfg_attr(test, allow(unsafe_code))]\nfn g() {}\n",
+        );
+        assert_eq!(word_lines(&code, "disallowed_methods"), vec![3]);
+        assert_eq!(word_lines(&code, "unsafe_code"), vec![6]);
+    }
+
+    #[test]
+    fn the_enclosing_call_tells_stricter_from_weaker() {
+        let code = "#![forbid(unsafe_code)]\n#[allow(\n    clippy::style,\n)]\nm!(allow(x(y), clippy::all));\n";
+        let at = |w: &str| code.find(w).unwrap();
+        assert_eq!(enclosing_call(code, at("unsafe_code")), "forbid");
+        assert_eq!(enclosing_call(code, at("clippy::style")), "allow");
+        assert_eq!(enclosing_call(code, at("clippy::all")), "allow");
+        assert_eq!(enclosing_call("disallowed_methods", 0), "");
     }
 
     #[test]
@@ -408,17 +588,16 @@ mod tests {
             "let c = '#'; fn f<'a>(x: &'a u8) {}\n",
             "#[allow(clippy::disallowed_methods)]\n",
         );
-        let attrs = attributes(src);
-        assert_eq!(attrs.len(), 1, "{attrs:?}");
-        assert_eq!(attrs[0].0, 6);
-        assert!(contains_word(&attrs[0].1, "disallowed_methods"));
+        let code = masked(src);
+        assert!(word_lines(&code, "unsafe_code").is_empty());
+        assert_eq!(word_lines(&code, "disallowed_methods"), vec![6]);
     }
 
     #[test]
     fn word_boundaries() {
-        assert!(contains_word("allow(unsafe_code)", "unsafe_code"));
-        assert!(!contains_word("forbid(unsafe_code_x)", "unsafe_code"));
-        assert!(!contains_word("disallowed_methods_extra", "disallowed_methods"));
+        assert_eq!(word_lines("allow(unsafe_code)", "unsafe_code"), vec![1]);
+        assert!(word_lines("forbid(unsafe_code_x)", "unsafe_code").is_empty());
+        assert!(word_lines("disallowed_methods_extra", "disallowed_methods").is_empty());
     }
 
     #[test]
@@ -444,23 +623,67 @@ mod tests {
         ));
     }
 
+    const CANARY: &str = "    #[expect(clippy::disallowed_methods, reason = \"canary\")]\n    fn c_d() {\n        // canary: `c::d`\n        let _canary = c::d();\n    }\n";
+
     /// Round 6, L2: every layout TOML allows is read, not only `path = "...` with spaces.
     #[test]
     fn every_ban_layout_needs_a_canary() {
         let config = "disallowed-methods = [\n  { path=\"a::b\", reason = \"x\" }, { path = \"c::d\" },\n  \"e::f\",\n]\ndisallowed-types = [{ path = \"g::H\" }]\nallow-unwrap-in-tests = true\n";
-        let canaries = "// canary: `c::d`\n";
+        let problems = canary_problems(config, &[("bans.rs", CANARY.to_owned())]).unwrap();
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        for missing in ["`a::b`", "`e::f`", "`g::H`"] {
+            assert!(problems.iter().any(|p| p.contains(missing)), "{missing}: {problems:?}");
+        }
+    }
+
+    /// Round 7, L1: a marker outside a single-`#[expect]` canary, or a canary under another
+    /// `cfg`, does not count.
+    #[test]
+    fn a_canary_must_be_well_formed() {
+        let config = "disallowed-methods = [\"c::d\"]\n";
+        assert!(
+            canary_problems(config, &[("bans.rs", CANARY.to_owned())])
+                .unwrap()
+                .is_empty()
+        );
+        let stray = "// canary: `c::d`\nfn other() {}\n".to_owned();
+        assert_eq!(canary_problems(config, &[("bans.rs", stray)]).unwrap().len(), 1);
+        let gated = format!("#[cfg(target_os = \"none\")]\n{CANARY}");
+        assert_eq!(canary_problems(config, &[("bans.rs", gated)]).unwrap().len(), 1);
+        let other_call = CANARY.replace("c::d()", "x::y()");
+        assert_eq!(canary_problems(config, &[("bans.rs", other_call)]).unwrap().len(), 1);
+    }
+
+    /// Round 7, H1: any mention in code counts, also inside a macro call; comments and strings
+    /// do not.
+    #[test]
+    fn mentions_in_code_are_found_anywhere() {
+        let code = masked(
+            "// clippy::all in a comment\nlet s = \"disallowed_methods\";\nseeded!(allow(clippy::disallowed_methods));\n#[allow(clippy::style)]\nfn f() {}\n",
+        );
+        assert_eq!(word_lines(&code, "disallowed_methods"), vec![3]);
+        assert_eq!(word_lines(&code, "clippy::style"), vec![4]);
+        assert!(word_lines(&code, "clippy::all").is_empty());
+        assert!(word_lines(&masked("let disallowed_methods_count = 1;"), "disallowed_methods").is_empty());
         assert_eq!(
-            bans_without_canary(config, canaries).unwrap(),
-            vec!["a::b".to_owned(), "e::f".to_owned(), "g::H".to_owned()]
+            switches("clippy::disallowed_methods"),
+            vec![
+                "disallowed_methods",
+                "disallowed_method",
+                "clippy::all",
+                "clippy::style"
+            ]
         );
     }
 
+    /// Round 7, H1: `#[path]` modules and `include!` are found.
     #[test]
-    fn member_manifests_are_recognised() {
-        assert!(is_member_manifest("crates/uaos-state/Cargo.toml"));
-        assert!(is_member_manifest("xtask/Cargo.toml"));
-        assert!(is_member_manifest("modules/mod-mock/Cargo.toml"));
-        assert!(!is_member_manifest("Cargo.toml"));
-        assert!(!is_member_manifest("crates/uaos-state/tests/fixtures/Cargo.toml"));
+    fn path_modules_and_includes_are_found() {
+        let code = masked(
+            "#[path = \"../tests/x.rs\"]\nmod x;\n# [ path=\"y.rs\" ] mod y;\ninclude!(\"z.inc\");\nlet include = 1;\n",
+        );
+        assert_eq!(path_attribute_lines(&code), vec![1, 3]);
+        assert!(include_at(&code, 4));
+        assert!(!include_at(&code, 5));
     }
 }
