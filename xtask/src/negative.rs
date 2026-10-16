@@ -54,9 +54,12 @@ const CLIPPY: Runner = Runner::Program {
     ],
 };
 const LIB: &str = "crates/uaos-contracts/src/limits.rs";
-/// A case's `tool` when its seed only compiles on Unix: it is skipped elsewhere, and the CI
-/// negative job, which runs on Linux with `--require-all-tools`, runs it.
+/// A case's `tool` when its seed only compiles on Unix. Elsewhere it does not run and does not
+/// count as skipped; the CI negative job, which runs on Linux with `--require-all-tools`, runs it.
 const UNIX_ONLY: &str = "unix";
+/// Likewise for Windows. The CI negative job never runs these: they are proven by running the
+/// negatives on Windows (review WP3.A5, round 4, M1).
+const WINDOWS_ONLY: &str = "windows";
 
 fn append(path: &'static str, text: &'static str) -> Seed {
     Box::new(move |ws| {
@@ -395,7 +398,7 @@ pub(crate) fn cases() -> Vec<Case> {
             seed: replace(
                 "crates/uaos-egress/src/door.rs",
                 "Breaker::Probing { .. } => Err(PROBE_RECHECK.min(cooldown)),",
-                "Breaker::Probing { .. } => Ok(None),",
+                "Breaker::Probing { generation } => Ok(Ticket::Probe { generation }),",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -459,8 +462,8 @@ pub(crate) fn cases() -> Vec<Case> {
             seed: replace(
                 "crates/uaos-egress/src/door.rs",
                 "            self.door
-                .breaker_record(self.upstream, self.probe, Outcome::NotAttempted);",
-                "            let _ = (self.door, self.upstream, self.probe);",
+                .breaker_record(self.upstream, self.ticket, Outcome::NotAttempted);",
+                "            let _ = (self.door, self.upstream, self.ticket);",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -519,6 +522,80 @@ pub(crate) fn cases() -> Vec<Case> {
             ),
             runner: CLIPPY,
             expect: "tokio::net::TcpSocket::listen",
+        },
+        Case {
+            id: "net-unix-connect-addr-outside-egress",
+            gate: "clippy",
+            tool: Some(UNIX_ONLY),
+            // Review WP3.A5 round 4, M1: each `allow-invalid` ban is proven where it exists.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\n#[cfg(unix)]\npub fn seeded_violation() -> std::io::Result<std::os::unix::net::UnixStream> {\n    std::os::unix::net::UnixStream::connect_addr(&std::os::unix::net::SocketAddr::from_pathname(\"/run/seeded.sock\")?)\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "std::os::unix::net::UnixStream::connect_addr",
+        },
+        Case {
+            id: "net-tokio-unix-connect-outside-egress",
+            gate: "clippy",
+            tool: Some(UNIX_ONLY),
+            // Review WP3.A5 round 4, M1.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\n#[cfg(unix)]\npub async fn seeded_violation() -> std::io::Result<tokio::net::UnixStream> {\n    tokio::net::UnixStream::connect(\"/run/seeded.sock\").await\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::net::UnixStream::connect",
+        },
+        Case {
+            id: "net-unix-socket-connect-outside-egress",
+            gate: "clippy",
+            tool: Some(UNIX_ONLY),
+            // Review WP3.A5 round 4, M1.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\n#[cfg(unix)]\npub async fn seeded_violation() -> std::io::Result<tokio::net::UnixStream> {\n    tokio::net::UnixSocket::new_stream()?.connect(\"/run/seeded.sock\").await\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::net::UnixSocket::connect",
+        },
+        Case {
+            id: "net-named-pipe-outside-egress",
+            gate: "clippy",
+            tool: Some(WINDOWS_ONLY),
+            // Review WP3.A5 round 4, M1: the Windows counterpart of the Unix-socket bans.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\n#[cfg(windows)]\npub fn seeded_violation() -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {\n    tokio::net::windows::named_pipe::ClientOptions::new().open(\"seeded\")\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "named_pipe::ClientOptions::open",
+        },
+        Case {
+            id: "spawn-through-tokio-executor",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 round 4, L1: hyper-util's executor spawns with `tokio::spawn`.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n#[must_use]\npub fn seeded_violation() -> hyper_util::rt::TokioExecutor {\n    hyper_util::rt::TokioExecutor::new()\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "hyper_util::rt::TokioExecutor",
+        },
+        Case {
+            id: "clippy-ban-path-unresolved",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 round 4, M1: a ban whose path resolves to nothing is off, and clippy
+            // only warns about it.
+            seed: replace(
+                "clippy.toml",
+                "\"tokio::task::JoinSet::spawn_local_on\"",
+                "\"tokio::task::JoinSet::spawn_local_onx\"",
+            ),
+            runner: Runner::Xtask(&["clippy"]),
+            expect: "resolve to nothing",
         },
         Case {
             id: "net-unix-connect-outside-egress",
@@ -759,6 +836,8 @@ The journal is tamper-proof.
 enum Outcome {
     Proven,
     Skipped(String),
+    /// The case is for another operating system.
+    Elsewhere(&'static str),
     Broken(String),
 }
 
@@ -771,6 +850,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
 
     let mut failures = Vec::new();
     let mut skipped = Vec::new();
+    let mut elsewhere = 0usize;
     for case in cases() {
         if !selected.is_empty() && !selected.iter().any(|s| s.as_str() == case.id) {
             continue;
@@ -785,6 +865,10 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                 println!("  SKIPPED  {:<30} {why}", case.id);
                 skipped.push(case.id);
             }
+            Outcome::Elsewhere(os) => {
+                println!("  NOT HERE {:<30} runs on {os} only", case.id);
+                elsewhere += 1;
+            }
             Outcome::Broken(why) => {
                 println!("  BROKEN   {:<30} {why}", case.id);
                 failures.push(format!("{}: {why}", case.id));
@@ -796,7 +880,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     }
     if failures.is_empty() {
         println!(
-            "xtask negative: every exercised gate bites ({} skipped for missing tools)",
+            "xtask negative: every exercised gate bites ({} skipped for missing tools, {elsewhere} for another system)",
             skipped.len()
         );
         Ok(())
@@ -806,14 +890,13 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
 }
 
 fn run_case(case: &Case, root: &Path, base: &Path, shared_target: &Path) -> Outcome {
-    if let Some(tool) = case.tool
-        && !tool_available(tool)
-    {
-        return Outcome::Skipped(if tool == UNIX_ONLY {
-            "runs on Unix only".to_owned()
-        } else {
-            format!("`{tool}` not installed")
-        });
+    match case.tool {
+        Some(UNIX_ONLY) if !cfg!(unix) => return Outcome::Elsewhere("Unix"),
+        Some(WINDOWS_ONLY) if !cfg!(windows) => return Outcome::Elsewhere("Windows"),
+        Some(tool) if tool != UNIX_ONLY && tool != WINDOWS_ONLY && !tool_available(tool) => {
+            return Outcome::Skipped(format!("`{tool}` not installed"));
+        }
+        _ => {}
     }
     if let Runner::History(gate, make_history) = &case.runner {
         let repo = base.join(case.id);
@@ -882,9 +965,6 @@ fn tail(s: &str) -> String {
 }
 
 fn tool_available(tool: &str) -> bool {
-    if tool == UNIX_ONLY {
-        return cfg!(unix);
-    }
     let (program, args): (&str, &[&str]) = match tool {
         "cargo-deny" => ("cargo", &["deny", "--version"]),
         "cargo-vet" => ("cargo", &["vet", "--version"]),

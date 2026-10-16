@@ -331,12 +331,14 @@ mod tests {
             prop_assert_eq!(classify(IpAddr::V6(v4.to_ipv6_mapped())), classify(IpAddr::V4(v4)));
         }
 
-        /// Outside global unicast (2000::/3), nothing is public.
+        /// Outside global unicast (2000::/3), nothing is public, except IPv4-mapped and
+        /// well-known NAT64 addresses, which take their IPv4 address's verdict (round 4, L4).
         #[test]
         fn nothing_outside_global_unicast_is_public(bits in any::<u128>()) {
             let v6 = Ipv6Addr::from(bits);
             let mapped = v6.to_ipv4_mapped().is_some();
-            if !mapped && (bits >> 125) != 0b001 {
+            let nat64 = bits >> 32 == (0x64_u128 << 80) | (0xff9b_u128 << 64);
+            if !mapped && !nat64 && (bits >> 125) != 0b001 {
                 prop_assert!(matches!(classify(IpAddr::V6(v6)), Reach::Blocked(_)));
             }
         }

@@ -181,7 +181,10 @@ on the PR-5 branch.
     cooldown, lets exactly one probe through. Every admitted attempt is settled exactly once,
     also when its caller drops the request: a cancelled probe lets the next attempt probe. Each
     probe carries a generation, so a probe that settles after the circuit has moved on (another
-    attempt answered, or a newer probe is in flight) changes nothing unless it answered. While
+    attempt answered, or a newer probe is in flight) changes nothing unless it answered. Each
+    closing after an outage begins a new epoch, and a transport failure counts only if its
+    attempt was admitted in the current epoch, so attempts sent during an outage that time out
+    after a probe closed the circuit do not reopen it. While
     the circuit is open, `retry_after` is the time left in the cooldown; while a probe is in
     flight, it is a hint (`PROBE_RECHECK`, 1 s), because the probe may settle sooner or take up
     to the response timeout.
@@ -208,9 +211,15 @@ on the PR-5 branch.
 
   Spawning (`tokio::task::{spawn, spawn_blocking, spawn_local}`, every `JoinSet` and `LocalSet`
   spawn method, the `JoinSet` and `LocalSet` types themselves, because `collect` and `extend`
-  spawn too, `Handle`/`Runtime` spawns, `std::thread::{spawn, Builder::spawn, scope}`) is banned
-  outside the runtime, and `Door::new` everywhere but its one owner. These bans cover the
-  listed entry points. A dependency that opens sockets itself is kept out by `arch.toml` and
+  spawn too, hyper-util's `TokioExecutor`, which spawns with `tokio::spawn`, `Handle`/`Runtime`
+  spawns, `std::thread::{spawn, Builder::spawn, scope}`) is banned outside the runtime, and
+  `Door::new` everywhere but its one owner. These bans cover the listed entry points.
+
+  Clippy only warns about a ban whose path resolves to nothing, and `-D warnings` does not make
+  that fatal, so the gate runs as `cargo xtask clippy`, which fails on it. Entries marked
+  `allow-invalid` exist only on some systems and are reported nowhere; each has a seeded
+  violation on its system. The Unix ones run in the CI negative job, which runs on Linux; the
+  named-pipe one runs only when the negatives run on Windows, not in CI. A dependency that opens sockets itself is kept out by `arch.toml` and
   supply-chain review. `cargo xtask allow-audit` checks owners per lint, not per method, so a
   file that owns one disallowed method could allow another; review of each `allow` covers that.
   **Known exception:** the system resolver (`tokio::net::lookup_host`) runs `getaddrinfo` on
@@ -228,16 +237,20 @@ on the PR-5 branch.
     `egress-embedded-local`;
   - for the clippy bans: `egress-ctor-outside-root`, `net-dns-outside-egress`,
     `net-resolver-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
-    `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor` and
-    `net-unix-connect-outside-egress`, which runs only on Unix (the CI negative job runs on
-    Linux) and proves the Unix-only paths resolve;
+    `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor`,
+    `spawn-through-tokio-executor`, and `clippy-ban-path-unresolved` for the gate itself;
+  - for each `allow-invalid` ban, on its own system: `net-unix-connect-outside-egress`,
+    `net-unix-connect-addr-outside-egress`, `net-tokio-unix-connect-outside-egress` and
+    `net-unix-socket-connect-outside-egress` (Unix), `net-named-pipe-outside-egress`
+    (Windows);
   - for the arch rules: `arch-ring1-depends-on-hyper`.
 
 **Verified.**
-- **20 unit tests**, including seven property tests, the breaker's state machine (with a
-  stale probe settling late, both ways) and the dial path's own refusals:
+- **22 unit tests**, including seven property tests, the breaker's state machine (a stale
+  probe giving up or failing, a late probe settlement, failures sent during an outage) and the
+  dial path's own refusals:
   - IPv4-mapped and NAT64 well-known addresses follow their IPv4 verdict;
-  - nothing outside 2000::/3 is public;
+  - apart from those two forms, nothing outside 2000::/3 is public;
   - every other embedding form is refused whatever its inner address;
   - the local network is exactly loopback, private and unique-local, and no embedding form
     is ever local;

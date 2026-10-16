@@ -120,4 +120,5 @@ ban = []
 ]
 "clippy::disallowed_types" = [
     "crates/uaos-policy/src/engine.rs", # Cedar's entity API takes a HashSet of parents
+    "crates/*/tests/", # harnesses run mock servers on hyper-util's executor
 ]
