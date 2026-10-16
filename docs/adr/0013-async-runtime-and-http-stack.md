@@ -79,68 +79,154 @@ overhead bench must include a concurrent scenario.
   classified.
 - Slow-client test: 1 KB/s for 1 h with bounded RSS.
 
-## Implementation: the egress door (P3 Move 1, PR-5, 2026-10-15)
+## Amendment 1 (proposed 2026-10-16; the maintainer decides)
+
+The V1 review of the first implementation ([WP3.A5](../reviews/WP3.A5-egress.md)) showed that
+Decision 3's verifier breaks Decision 4 and red line 1. This amendment is implemented on the
+PR-5 branch, which stays a draft until it is accepted.
+
+**A. TLS trust: system roots, verified by rustls, nothing fetched (amends Decisions 3 and 5).**
+- **Finding (H1).** `rustls-platform-verifier` hands the server's chain to the operating system.
+  On Windows, `CertGetCertificateChain` then fetches the issuer, OCSP and CRL URLs named in the
+  server's certificate while it is still *building* the chain, before anything is trusted.
+  Any TLS peer of a declared upstream can therefore make the machine send HTTP requests to
+  addresses of its choosing (the metadata service, the LAN), outside the door, unclassified and
+  uncounted. Reproduced on Windows 10; macOS behaves the same way by default, not reproduced.
+- **Decision.** The default trust is the operating system's root store, read locally when the
+  door is built (`rustls-native-certs`), and chains are verified by rustls's own verifier. A
+  handshake fetches nothing. `rustls-platform-verifier` is removed, with 11 crates from the
+  lockfile.
+- **Revocation is not checked at RC-1.** That is the cost: a provider certificate revoked
+  before it expires would still be accepted. Public TLS certificates issued since March 2026
+  last at most 200 days, falling to 47 days by March 2029 (CA/Browser Forum ballot SC-081), which
+  bounds that window. A revocation source that needs no
+  fetch at handshake time (a CRL bundle shipped with releases) can be added later without
+  reopening this channel.
+- **Second residual.** Windows downloads some roots on demand. A root that has never been
+  downloaded on this machine is absent from the local store, so a provider whose chain ends in
+  it fails to verify until it is present. `uaos doctor` must diagnose this (M3).
+- **Alternative rejected.** Keeping the platform verifier as an explicit opt-in, documented as
+  a residual. It keeps a channel any peer can drive, for a check that only matters when a
+  certificate is revoked early.
+- **Decision 5** therefore no longer applies to the default configuration: there are no
+  revocation fetches to disclose.
+
+**B. Where the door is built (amends ADR-0010 Decision 2).**
+- **Finding (M1).** ADR-0010 had the composition root call `Door::new` while also leaving
+  `uaos-egress` out of the bin's dependencies, and `arch.toml` banned the egress crate from the
+  bin *transitively*, so the intended wiring (bin → runtime → egress) failed the gate.
+- **Decision.** The bin never names the egress crate: its allow list is explicit and leaves it
+  out, and the transitive ban is gone, since the bin reaches egress through the runtime by
+  design. The runtime builds the door, in one private module, from the upstream declarations the
+  composition root passes in the runtime's own configuration types, and never exposes egress
+  types (ADR-0010 Decision 3). That module becomes the `allow_audit` owner of the `Door::new`
+  ban when the runtime crate exists (PR-6).
+
+## Implementation: the egress door (P3 Move 1, PR-5, 2026-10-15; revised 2026-10-16)
 
 **What is built.** `crates/uaos-egress`, the one outbound path:
-- `addr::classify` refuses every special-purpose range in the IANA registries. That includes
-  IPv4 addresses embedded in IPv4-mapped, IPv4-compatible, NAT64 and 6to4 forms, and Teredo.
+- `addr::classify` refuses every special-purpose range in the IANA registries, `3fff::/20`
+  included. It looks through IPv4-mapped, IPv4-compatible, NAT64 well-known and 6to4 forms, and
+  refuses Teredo and the local-use NAT64 prefix whole. Network-specific NAT64 prefixes and cloud
+  host endpoints on public unicast (such as `168.63.129.16`) cannot be told apart by address;
+  they are reachable only over HTTPS with a verified certificate for the declared name.
 - `HostName` refuses address literals in every spelling: decimal, hexadecimal, octal,
   shortened and bracketed.
-- The connector resolves each name itself, classifies every answer, and dials the classified
-  address, so there is no second lookup a rebinding attacker could answer. It then runs TLS with
-  the upstream's own name, on aws-lc-rs, with the platform verifier or declared roots.
-- `Door::send` behaves as follows:
-  - it refuses a request bound to another Operation, a second send for the same Operation (a
-    bounded replay window), an undeclared upstream, an oversized body, and a request that
-    already carries the credential's header;
-  - it strips hop-by-hop headers and `host`, and adds nothing except the credential, inserted
-    last and marked sensitive;
-  - it returns redirects without following them;
-  - it keeps a circuit breaker per upstream.
-- **Private upstreams.** They must be declared (`allow_private`); plain HTTP requires that
-  declaration.
+- **The connector.**
+  - It resolves each name itself, within the connect timeout, and classifies every answer.
+  - It dials the classified address itself, so there is no second lookup a rebinding attacker
+    could answer.
+  - It tries at most four addresses per attempt.
+  - It runs TLS with the upstream's own name, on aws-lc-rs, against the system's roots or the
+    declared ones (Amendment 1A).
+- **Private upstreams.** They must be declared (`allow_private`), and then reach only loopback,
+  private (RFC 1918) and unique-local addresses, never link-local or another special range.
+  Plain HTTP is dialled only at pinned local addresses and is never resolved.
+- **`Door::send`.**
+  - **Refusals before any contact:** a request bound to another Operation, an undeclared
+    upstream, an oversized body, a path that does not start with `/`, a credential-bearing
+    header from the caller (`authorization`, `cookie`, provider key headers), an open circuit,
+    and a second send for the same Operation (a bounded replay window). Only the last consumes
+    the Operation.
+  - **Headers:** it builds the URI from the upstream's name and port, so the path cannot change
+    the destination. It strips hop-by-hop headers, `host` and `content-length` (it frames the
+    body itself), and adds nothing except the credential, inserted last.
+  - **No hidden behaviour:** it returns redirects without following them, and hyper-util's
+    transparent retry is switched off.
+  - **Breaker:** each upstream has a circuit that counts only transport failures and, after its
+    cooldown, lets exactly one probe through.
+- **The credential's value** is marked sensitive when the `Credential` is built and never
+  appears in its `Debug` output.
 - **Connection tasks.** They run on an executor the caller passes in. The runtime passes its
   supervisor's, so the supervisor stays the only spawner.
 - **HTTP version.** HTTP/1.1 only (ALPN `http/1.1`); HTTP/2 is not enabled at RC-1.
 
 **How it is enforced.**
-- `clippy.toml`: outbound `connect` (std and tokio), `lookup_host` and `UdpSocket::bind` are
-  banned outside `uaos-egress/src/{connect,resolve}.rs`. `tokio::task::spawn` and
-  `spawn_blocking` are banned outside the runtime. `Door::new` is banned outside the
-  composition root.
-- `arch.toml`:
-  - the bin's allow list is explicit and leaves out `uaos-egress` (ADR-0010);
+- **`clippy.toml`.** These are banned outside `uaos-egress/src/{connect,resolve}.rs`:
+  - outbound connections: `connect` (std and tokio, `TcpSocket` included);
+  - name resolution: `lookup_host` and `ToSocketAddrs::to_socket_addrs`, which needs no
+    dependency at all;
+  - UDP: `UdpSocket::bind` (std and tokio);
+  - another HTTP client: hyper-util's `HttpConnector::new` and `build_http`.
+
+  Spawning (`tokio::task::{spawn, spawn_blocking, spawn_local}`, `JoinSet::spawn`,
+  `Handle`/`Runtime` spawns, `std::thread::{spawn, Builder::spawn}`) is banned outside the
+  runtime, and `Door::new` everywhere but its one owner. These bans cover the listed entry
+  points. A dependency that opens sockets itself is kept out by `arch.toml` and supply-chain
+  review.
+- **`arch.toml`.**
+  - The bin's allow list is explicit and leaves out `uaos-egress` (Amendment 1B).
   - `uaos-module-api` and every Ring 1 crate are banned, transitively, from tokio, hyper,
     hyper-util, mio, socket2, rustls and the door.
-- **Seeded violations:** `egress-dials-private-range`, `egress-numeric-host`,
-  `egress-ctor-outside-root` and `arch-ring1-depends-on-hyper`.
+- **`deny.toml`.** `ring` is banned, so TLS stays on aws-lc-rs.
+- **Seeded violations:**
+  - for the door's behaviour: `egress-dials-private-range`, `egress-numeric-host`,
+    `egress-private-reaches-link-local`, `egress-plaintext-resolved` and
+    `egress-breaker-admits-after-cooldown`;
+  - for the clippy bans: `egress-ctor-outside-root`, `net-dns-outside-egress`,
+    `net-connect-outside-egress`, `net-udp-outside-egress` and `spawn-outside-supervisor`;
+  - for the arch rules: `arch-ring1-depends-on-hyper`.
 
 **Verified.**
-- 8 unit tests, including two property tests: an IPv4-mapped address always gets its IPv4
-  verdict, and nothing the standard library calls special is ever allowed.
-- 8 integration tests against a loopback TLS mock with a throwaway authority. They cover:
-  - the header policy, read from what the mock received;
+- **11 unit tests**, including five property tests:
+  - IPv4-mapped addresses follow their IPv4 verdict;
+  - nothing outside 2000::/3 is public;
+  - every embedding form is refused whatever its inner address;
+  - the local network is exactly loopback, private and unique-local;
+  - nothing the standard library calls special is ever allowed.
+- **19 integration tests** against loopback mocks. They read what the mock received and the
+  door's own counters, and cover:
+  - the header policy;
   - op binding and replay;
-  - credential collision;
+  - credential-bearing headers refused;
   - a redirect not followed;
-  - private answers never dialled (0 connects);
+  - private answers never dialled;
+  - a private upstream never reaching link-local;
+  - plain HTTP only to pinned local addresses, unresolved;
   - zero contact at construction;
-  - the breaker opening with no further contact;
-  - a stranger's certificate refused before any byte, credential included, is sent.
+  - the breaker opening and its single probe;
+  - a stranger's certificate, and a trusted authority's certificate for another name, both
+    refused with no request received;
+  - an oversized body refused with no connection;
+  - a caller's `content-length` dropped;
+  - a path without a leading `/` refused without consuming the Operation;
+  - the address cap;
+  - the credential never printed;
+  - **a certificate naming issuer, OCSP and CRL URLs on a local listener: the handshake fails
+    and the listener receives nothing**, on every CI operating system.
 
 **Not yet verified or built, stated plainly.**
 - The default-configuration network capture (I-14) is still owed. The door's own counters prove
-  it makes no contact at construction, but the OS-level capture with revocation fetches belongs
-  to the bin (M3).
+  it makes no contact at construction; the OS-level capture belongs to the bin (M3).
 - The 1 KB/s slow-client test belongs to the runtime's relay (WP3.3).
-- The negative `arch-bin-depends-on-egress` waits for the bin crate (M3); the rule is already
-  in `arch.toml`.
+- The negative `arch-bin-depends-on-egress` waits for the bin crate (M3); the rule is the bin's
+  explicit allow list.
 - There is no "redirect followed" negative. No code path follows redirects, so there is nothing
   to seed; the integration test pins the behaviour.
 - The Ring 1 third-party allowlist arrives with the first module (PR-7). This PR adds the Ring 1
   ban list.
 - **Supply chain.**
-  - 57 new cargo-vet exemptions, each with a written reason.
+  - 48 new cargo-vet exemptions, each with a written reason. 21 of them cover crates that are in
+    the lockfile only and compile for no target, and their notes say so.
   - cargo-vet 0.10, the version CI pins, ignores 80 newer Bytecode Alliance audits that cover
     much of this stack; upgrading the tool is its own change.
-  - `ring` appears in `Cargo.lock` only as an optional dependency and compiles for no target.

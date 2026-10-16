@@ -154,30 +154,50 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 - `uaos-egress`, the one outbound door (P3 Move 1, PR-5; ADR-0013, threat T5).
   - **Destinations.** Only declared upstreams, named by DNS names. Address literals are refused
     in every spelling.
-  - **DNS.** The door resolves names itself, classifies every answer, and dials the classified
-    address. It refuses every special-purpose range, including IPv4 embedded in IPv4-mapped,
-    NAT64 and 6to4 forms, and Teredo, unless the upstream is declared private.
-  - **TLS.** On aws-lc-rs with the platform verifier; HTTP/1.1.
+  - **DNS.** The door resolves names itself, within a timeout, classifies every answer, and
+    dials the classified address, at most four per attempt. It refuses every special-purpose
+    range, including IPv4 embedded in IPv4-mapped, NAT64 and 6to4 forms, and Teredo. An upstream
+    declared private may also reach loopback, private and unique-local addresses, never
+    link-local (the metadata service). Plain HTTP is dialled only at pinned local addresses and
+    never resolved.
+  - **TLS.** On aws-lc-rs, HTTP/1.1, against the system's root certificates read locally and
+    verified by rustls: a handshake fetches nothing, so a server's certificate cannot make UAOS
+    contact an address of its choosing. Revocation is not checked (ADR-0013 Amendment 1,
+    proposed).
   - **Requests.**
-    - Redirects are returned, never followed.
-    - Hop-by-hop headers are stripped and no UAOS header is added.
-    - The provider credential is inserted last and marked sensitive.
+    - Redirects are returned, never followed, and nothing is retried.
+    - The URI comes from the upstream's declaration; the path must start with `/`.
+    - Hop-by-hop headers, `host` and `content-length` are stripped and no UAOS header is added.
+    - A request carrying a credential-bearing header (`authorization`, `cookie`, provider key
+      headers) is refused.
+    - The provider credential is inserted last; its value is never printed.
     - One send per Operation; a request bound to another Operation is refused.
-    - A circuit breaker runs per upstream.
+    - A circuit breaker per upstream counts transport failures and lets one probe through
+      after its cooldown.
   - **Connection tasks** run on an executor the runtime provides.
   - **Error codes** `UAOS-EGRESS-0001` to `0005`: blocked, unreachable, timeout, circuit open,
     refused.
 - Reachability rules for the door (ADR-0010).
-  - **`clippy.toml`.** Outbound connects, name resolution and UDP are banned outside the door;
-    task spawning outside the runtime; `Door::new` outside the composition root.
-  - **`arch.toml`.** The bin's allow list is now explicit and leaves out the door.
-    `uaos-module-api` and every Ring 1 crate are banned, transitively, from network and
-    async-I/O crates (new `[ring1] ban`, enforced by `cargo xtask arch-check`).
+  - **`clippy.toml`.** Outbound connects (std and tokio, `TcpSocket` included), name
+    resolution (`lookup_host`, `to_socket_addrs`), UDP and building another HTTP client are
+    banned outside the door; task and thread spawning outside the runtime; `Door::new` outside
+    its one owner.
+  - **`arch.toml`.** The bin's allow list is now explicit and leaves out the door; the bin
+    reaches it only through the runtime. `uaos-module-api` and every Ring 1 crate are banned,
+    transitively, from network and async-I/O crates (new `[ring1] ban`, enforced by
+    `cargo xtask arch-check`).
+  - **`deny.toml`** bans `ring`.
   - **Seeded violations:** `egress-dials-private-range`, `egress-numeric-host`,
-    `egress-ctor-outside-root`, `arch-ring1-depends-on-hyper`.
+    `egress-private-reaches-link-local`, `egress-plaintext-resolved`,
+    `egress-breaker-admits-after-cooldown`, `egress-ctor-outside-root`,
+    `net-dns-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
+    `spawn-outside-supervisor`, `arch-ring1-depends-on-hyper`.
+  - **Review:** `docs/reviews/WP3.A5-egress.md` (2 High, 4 Medium, 9 Low, all resolved; two
+    fixes are proposed as ADR-0013 Amendment 1).
 - Dependencies for the ADR-0013 stack: tokio, hyper 1, hyper-util, http, rustls 0.23
-  (aws-lc-rs only), tokio-rustls, rustls-platform-verifier, and rcgen for tests only.
-  - 57 cargo-vet exemptions, each with a written reason (the unnoted baseline is unchanged).
+  (aws-lc-rs only), tokio-rustls, rustls-native-certs, and rcgen for tests only.
+  - 48 cargo-vet exemptions, each with a written reason (the unnoted baseline is unchanged);
+    21 of them are lockfile-only crates that compile for no target.
   - cargo-vet 0.10 ignores the newer Bytecode Alliance audits for this stack, so they are not
     imported yet.
 
