@@ -1430,7 +1430,7 @@ fn r2_a_shred_is_completed_only_once_its_record_is_durable() {
     let mut j = w.open(&store).unwrap();
     let (_, x) = write(&store, &mut j, 1);
     j.sync().unwrap();
-    j.append(shredded_record(x, 2)).unwrap(); // with the OS only; the shred never ran
+    record_shred_unflushed(&w, &store, &mut j, x, 2); // with the OS only; the shred never ran
     drop(j);
     drop(store);
     w.sim.crash();
@@ -1600,7 +1600,7 @@ fn r3_m2_shreds_at_open_wait_for_the_manifest() {
     let (_, x) = write(&store, &mut j, 1);
     w.clock.advance(1_100_000_000);
     j.sync().unwrap(); // the marker now names the record
-    j.append(shredded_record(x, 2)).unwrap(); // with the OS only; the shred never ran
+    record_shred_unflushed(&w, &store, &mut j, x, 2); // with the OS only; the shred never ran
     drop(j);
     drop(store);
     w.sim.crash();
@@ -1659,8 +1659,10 @@ fn r3_l3_a_shred_failing_midway_at_open_is_finished_by_the_next() {
         let (_, x) = write(&store, &mut j, 1);
         write(&store, &mut j, 2);
         j.sync().unwrap();
-        j.append(shredded_record(x, 3)).unwrap();
-        j.sync().unwrap(); // write-ahead; then the process dies before the shred
+        // Write-ahead: the record is durable and the KEK rotated; then the shred stops before
+        // removing anything, and the process dies.
+        w.fs.fail_key_remove.store(true, Ordering::SeqCst);
+        assert!(matches!(j.shred(shredded_record(x, 3)), Err(JournalError::Payload(_))));
         drop(j);
         drop(store);
         w.sim.crash();
@@ -2417,6 +2419,74 @@ fn r5_l3_unfinished_shreds_are_bounded() {
     );
     j.shred(shredded_record(refs[0], 1)).unwrap().finish().unwrap(); // a retry clears its entry
     j.shred(shredded_record(over, 0)).unwrap().finish().unwrap();
+}
+
+/// A `chunk.shredded` record that reaches the OS but not the disk, its shred never run.
+/// `Journal::append` refuses the record on a coordinated journal (ninth round, L1), so tests
+/// reach this state through the shred: an unrelated put is pending, its flush fails first, and
+/// the journal stops before it flushes the segment.
+fn record_shred_unflushed(w: &World, store: &ChunkStore, j: &mut Journal, chunk: ChunkRef, n: u64) {
+    store.put(pocket(), &content(n + 100)).unwrap();
+    w.sim.fail_next_sync();
+    let before = j.next_seq().0;
+    assert_eq!(
+        j.shred(shredded_record(chunk, n)).err(),
+        Some(JournalError::PayloadFlushFailed),
+        "the store's flush did not fail first"
+    );
+    assert!(j.next_seq().0 > before, "the shred record was not written");
+    w.sim.fail_sync_after(u32::MAX);
+}
+
+// ── Ninth review (WP3.A1, ninth round) ─────────────────────────────────────────────────────
+
+/// Ninth-round L1: with a store attached, `chunk.shredded` goes only through `Journal::shred`
+/// and `chunk.lost` comes only from the journal's own loss reporting. A shred record appended
+/// directly recorded a shred that never marked or removed the content (the next open shredded
+/// it, and a record after it needed no put); a forged `chunk.lost` excluded a healthy record
+/// from every later payload check.
+#[test]
+fn r9_l1_kernel_records_cannot_be_appended_directly() {
+    let w = World::new(9001);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, x) = write(&store, &mut j, 1);
+    j.sync().unwrap();
+    let before = j.next_seq().0;
+    assert!(
+        matches!(j.append(shredded_record(x, 2)), Err(JournalError::InvalidRecord(_))),
+        "a chunk.shredded record was appended directly"
+    );
+    let mut lost = draft(Some(pocket()), None, 3);
+    lost.event_type = types::CHUNK_LOST;
+    lost.metadata = Metadata::new(
+        [
+            (CHUNK_METADATA_KEY.to_owned(), x.to_string()),
+            (RECORD_SEQ_METADATA_KEY.to_owned(), seq.to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+    assert!(
+        matches!(j.append(lost), Err(JournalError::InvalidRecord(_))),
+        "a chunk.lost record was appended directly"
+    );
+    assert_eq!(j.next_seq().0, before, "a kernel record was written");
+    // A record referencing the content still needs nothing more: no shred was recorded.
+    j.append(draft(Some(pocket()), Some(x), 4)).unwrap();
+    j.sync().unwrap();
+    drop(j);
+    drop(store);
+    let (store, j) = w.restart(true);
+    assert_eq!(
+        store.get(pocket(), x).ok(),
+        Some(content(1)),
+        "content no shred removed is gone"
+    );
+    assert!(j.lost_payloads().is_empty());
+    let (_, reported, shreds) = w.survey();
+    assert!(reported.is_empty() && shreds.is_empty(), "a kernel record was written");
 }
 
 // ── Random crash schedules ─────────────────────────────────────────────────────────────────

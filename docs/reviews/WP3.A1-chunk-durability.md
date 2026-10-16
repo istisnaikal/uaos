@@ -11,7 +11,8 @@ accepted with a reason. The property test, extended as M6 asked, then found four
 (N1–N4), all fixed and pinned. One item needs a maintainer decision (L7). A second V1 review of
 the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up,
 a third found 1 High, 3 Medium and 5 Low, a fourth 2 Medium and 4 Low, a fifth 2 Medium and
-3 Low, a sixth 4 Low, a seventh 1 Medium and 2 Low, and an eighth 1 Low; all are fixed below.
+3 Low, a sixth 4 Low, a seventh 1 Medium and 2 Low, an eighth 1 Low, and a ninth 4 Low; all are
+fixed below.
 The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
@@ -244,7 +245,7 @@ Two round-six negatives (`shred-mark-not-restored`, `shred-marked-after-record`)
 the sixth-round fix added; the seventh-round fix added a second such line, so both were re-anchored
 to the flush-failure site and re-run (**PROVEN**).
 
-## Eighth review (2026-10-17)
+## Eighth review (2026-10-16)
 
 **Reviewed:** `91cf50f` (on `555494b`) by a fresh-context agent, in a scratch export.
 **Result:** 0 High · 0 Medium · 1 Low. The seventh round's fix is correct: `next_seq` advances only
@@ -255,3 +256,23 @@ at its intended site; 20,000 schedules passed, and stronger oracles 15,000 more.
 | Finding | What it was | What changed | Proof |
 |---|---|---|---|
 | L1 | The crash schedules could not see the seventh round's M1 class: every record was preceded by a put, which lifts a shred's mark, and no check looked at shred refusal or completion; yet the seventh round cited them as proof | A second property test, `shred_refusal_and_completion_under_random_crash_schedules`, adds records that reference earlier content without storing it again, checks in each run that no such record is written after a written shred record without a put since, and checks after every reopen that a durable shred no later record uses leaves the content unreadable and one KEK version alive | With the seventh round's fix reverted it fails within seconds (shrunk schedule kept in `durability.proptest-regressions`); 12,000 schedules pass on the final code |
+
+## Ninth review (2026-10-16)
+
+**Reviewed:** `452360c` (on `555494b`) by a fresh-context agent, in a scratch export.
+**Result:** 0 High · 0 Medium · 4 Low.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | `Journal::append` accepted the kernel's own records from callers on a coordinated journal. A `chunk.shredded` appended directly recorded a shred that never marked or removed the content: it stayed served, a later record referencing it needed no put, and the next open shredded it anyway. A `chunk.lost` from a caller exempted a healthy record from every later payload check | With a store attached, `append` refuses both: `chunk.shredded` goes through `Journal::shred`, and only the journal's own loss reporting writes `chunk.lost`. Three tests that appended a shred record directly to stage a crash before the shred now reach the same state through `Journal::shred` with a fault (a failing store flush, or a failing key removal) | `r9_l1_kernel_records_cannot_be_appended_directly` (each half checked to fail when reverted on its own); the rebuilt `r2_…` test checked to fail with the second round's defect reverted; negative `kernel-record-appended-directly` **PROVEN** |
+| L2 | CI ran 64 cases of each durability property, far fewer than the local runs the docs cited | The nightly lane runs both properties at 20,000 schedules each on all three operating systems; ADR-0018 states what the 64 merge cases can and cannot catch | `nightly.yml`; 20,000 of each take about a minute in release locally |
+| L3 | `claims.md` overstated two things: "one regression test per finding" (ADR-0018 lists findings fixed by construction, with no test), and shredded content being unrecoverable before its `PendingRewrap` has finished (the old KEK lives until then) | Both rows now say so | review of the text |
+| L4 | The CHANGELOG and `claims.md` attributed the negatives to eight review rounds (the eighth added none); ADR-0018 attributed all twenty-nine to reviews and schedules (four come from its own verification plan); the eighth section's heading carried the wrong date; the bench appendix's "as shipped" row measured `fc4b5a8`, the first round's code | Attribution corrected everywhere; the heading carries the commit date; the row and ADR-0018 name `fc4b5a8` and say later rounds were not re-measured | review of the text |
+
+**Found while verifying.** `tampering_is_detected` (P1) failed once in about 400 runs: the AEAD
+nonce is OS-random, so the last tag byte the test overwrote with 0 was already 0 one run in 256,
+and the "tampering" changed nothing. It now flips the byte; 600 runs passed.
+
+**Verified locally (Windows, dedicated target directory):** 63 durability tests and the rest of
+`uaos-state`, `uaos-testkit` and `uaos-ledger`; workspace clippy with warnings denied; 3 × 4,000
+and 2 × 20,000 schedules of each property, in release; the 31 `journal-durability` negatives.
