@@ -213,7 +213,7 @@ record. What follows describes the code after those fixes.
   flush either drops the unflushed bytes, or keeps serving them without ever making them durable.
   - **Flush-ordering scenario.** A flush fails at every possible step, then the power goes. A
     record at or before `flushed_through` must have a readable payload.
-  - **Regression tests.** One for each finding of the seven review rounds fixed in code, and
+  - **Regression tests.** One for each finding of the eight review rounds fixed in code, and
     one for each defect the extended schedules found afterwards. Each round-four test was
     checked to fail with its fix reverted. These are fixed by construction, with no test that
     fails when they are reverted: second round L3 (losses set aside before quarantine) and L4 (a
@@ -232,6 +232,13 @@ record. What follows describes the code after those fixes.
     in memory after a flush and its rewrite both failed, ADR-0003). Every flushed record's
     payload survives a power loss unless its loss was journaled first. No surviving record's
     payload is unreadable without a `chunk.lost` record.
+  - **Shred schedules.** A second property runs the same operations plus records that reference
+    earlier content without storing it again, under the same three policies, and checks two
+    more things: no record referencing content is written after a written shred record of it
+    unless the content was stored again since, and after every reopen a durable shred no later
+    record uses leaves the content unreadable and one KEK version alive. The first schedule
+    could not see the seventh review's M1; this one fails within seconds with it reverted.
+
 - **Gate self-test.** The `journal-durability` gate lists thirty seeded violations in
   `gates.toml`: twenty-nine for this ADR, one per silent-loss class the seven reviews and the
   schedules found (one of them, `chunk-put-shared-temp`, checks temporary naming only), and P1's

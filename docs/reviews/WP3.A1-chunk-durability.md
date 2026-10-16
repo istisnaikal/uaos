@@ -11,7 +11,7 @@ accepted with a reason. The property test, extended as M6 asked, then found four
 (N1–N4), all fixed and pinned. One item needs a maintainer decision (L7). A second V1 review of
 the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up,
 a third found 1 High, 3 Medium and 5 Low, a fourth 2 Medium and 4 Low, a fifth 2 Medium and
-3 Low, a sixth 4 Low, and a seventh 1 Medium and 2 Low; all are fixed below.
+3 Low, a sixth 4 Low, a seventh 1 Medium and 2 Low, and an eighth 1 Low; all are fixed below.
 The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
@@ -243,3 +243,15 @@ injected faults kept progressing.
 Two round-six negatives (`shred-mark-not-restored`, `shred-marked-after-record`) named the line
 the sixth-round fix added; the seventh-round fix added a second such line, so both were re-anchored
 to the flush-failure site and re-run (**PROVEN**).
+
+## Eighth review (2026-10-17)
+
+**Reviewed:** `91cf50f` (on `555494b`) by a fresh-context agent, in a scratch export.
+**Result:** 0 High · 0 Medium · 1 Low. The seventh round's fix is correct: `next_seq` advances only
+after a line is written whole, every error after that leaves a record `recover` or the next open
+can make durable, and a torn line is never read back. Every negative's anchor occurs exactly once
+at its intended site; 20,000 schedules passed, and stronger oracles 15,000 more.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | The crash schedules could not see the seventh round's M1 class: every record was preceded by a put, which lifts a shred's mark, and no check looked at shred refusal or completion; yet the seventh round cited them as proof | A second property test, `shred_refusal_and_completion_under_random_crash_schedules`, adds records that reference earlier content without storing it again, checks in each run that no such record is written after a written shred record without a put since, and checks after every reopen that a durable shred no later record uses leaves the content unreadable and one KEK version alive | With the seventh round's fix reverted it fails within seconds (shrunk schedule kept in `durability.proptest-regressions`); 12,000 schedules pass on the final code |
