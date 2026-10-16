@@ -17,7 +17,7 @@ hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 rustls.workspace = true
 rustls-pki-types.workspace = true
-rustls-platform-verifier.workspace = true
+rustls-native-certs.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "time"] }
 tokio-rustls.workspace = true

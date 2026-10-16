@@ -2,29 +2,41 @@
 
 //! # UAOS egress: the one door
 //!
-//! Every outbound byte UAOS sends on a user's behalf leaves through [`Door::send`], and nothing
-//! else in UAOS opens a socket (I-07; enforced by `clippy.toml` bans with this crate as the
-//! only owner, and by `arch.toml`, under which only the runtime may depend on this crate).
+//! Every outbound byte UAOS sends on a user's behalf leaves through [`Door::send`] (I-07). The
+//! standard and tokio entry points that open sockets, send UDP, resolve names or build another
+//! HTTP client are banned elsewhere in `clippy.toml`, with this crate as their only owner, and
+//! `arch.toml` lets only the runtime depend on it. Those bans cover the listed entry points; a
+//! dependency that opens sockets on its own is kept out by `arch.toml` and supply-chain review,
+//! not by the bans.
 //!
 //! What the door guarantees (ADR-0013, threat T5):
 //! * **Declared destinations only.** It connects to configured upstreams, named by DNS names;
 //!   address literals in any spelling are refused ([`host`]).
 //! * **It owns DNS.** It resolves, classifies every answer, and dials the classified address
 //!   itself. Private, loopback, link-local, metadata and other special-purpose ranges are
-//!   refused, including inside IPv4-mapped, NAT64 and 6to4 forms ([`addr`]), unless the upstream
-//!   is declared private.
+//!   refused, including inside IPv4-mapped, NAT64 and 6to4 forms ([`addr`]). An upstream
+//!   declared private may also reach loopback, private and unique-local addresses, never
+//!   link-local; plain HTTP is dialled only at pinned local addresses and never resolved.
+//! * **No fetches during TLS.** Certificates are verified against the system's roots by rustls
+//!   itself, so a server's certificate cannot make UAOS fetch an issuer or revocation URL of its
+//!   choosing ([`Trust::System`]).
 //! * **No redirects.** A redirect is returned to the caller as a response, never followed.
-//! * **Nothing added.** Hop-by-hop headers are removed and no UAOS header is added; the only
+//! * **Nothing added.** Hop-by-hop headers, `host` and `content-length` are removed, a request
+//!   that carries a credential-bearing header is refused, and no UAOS header is added. The only
 //!   insertion is the provider credential, placed last, after the runtime's final scan, and
 //!   marked sensitive so it is never printed (I-05).
 //! * **One send per Operation.** A request bound to another Operation, or a second request for
 //!   the same Operation, is refused before any contact (ADR-0010's binding check).
 //! * **No contact by default.** Building the door contacts nothing; [`Door::counters`] lets a
 //!   test prove zero resolutions and connections (I-14).
-//! * **Bounded.** Pool size, the replay window, timeouts and body size are limited (I-08).
+//! * **Bounded.** Idle connections per upstream, the replay window, resolution, connect,
+//!   handshake and response-header timeouts, addresses tried and request body size are limited
+//!   (I-08). Concurrent requests and response bodies are bounded by the runtime
+//!   ([`DoorLimits`]).
 //!
-//! What it does not do: retries, routing, pricing and redaction belong to the runtime and its
-//! stages; the door carries out one authorized, scanned request.
+//! What it does not do: retries (hyper-util's transparent retry is switched off), routing,
+//! pricing and redaction belong to the runtime and its stages; the door carries out one
+//! authorized, scanned request.
 
 pub mod addr;
 mod connect;
@@ -33,7 +45,7 @@ pub mod host;
 pub mod resolve;
 pub mod upstream;
 
-pub use connect::{CounterSnapshot, Stream};
+pub use connect::{CounterSnapshot, MAX_ADDRESSES_TRIED, Stream};
 pub use door::{Credential, Door, DoorLimits, EgressRequest, EgressResponse, MAX_IDLE_PER_UPSTREAM, REPLAY_WINDOW};
 pub use host::{HostError, HostName};
 pub use resolve::{Resolve, SystemResolver};

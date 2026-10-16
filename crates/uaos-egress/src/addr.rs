@@ -7,6 +7,12 @@
 //! (IPv4-mapped, NAT64, 6to4, Teredo): an attacker who controls DNS for a public name could
 //! otherwise point it at the loopback interface, the cloud metadata service or the LAN.
 //! The ranges follow the IANA special-purpose registries (RFC 6890 and updates).
+//!
+//! **Residuals, by design.** Some special endpoints sit on ordinary public unicast and cannot be
+//! told apart by address: network-specific NAT64 prefixes (RFC 6052 §2.2) and cloud host
+//! endpoints such as Azure's `WireServer` (`168.63.129.16`). They are reachable only over HTTPS
+//! with a verified certificate for the declared name, because plain HTTP is dialled only at
+//! pinned local addresses ([`crate::Upstream`]).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -26,7 +32,7 @@ pub enum Blocked {
     LinkLocal,
     /// `192.0.0.0/24`, `2001::/23` (IETF protocol assignments, Teredo included).
     ProtocolAssignment,
-    /// `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`.
+    /// `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`, `3fff::/20`.
     Documentation,
     /// `198.18.0.0/15`.
     Benchmarking,
@@ -42,6 +48,19 @@ pub enum Blocked {
     SiteLocal,
     /// `100::/64` (discard-only).
     Discard,
+    /// A public address toward a plain-HTTP upstream, which may only reach this machine or the
+    /// local network.
+    PublicOverPlaintext,
+}
+
+impl Blocked {
+    /// Whether the range is on this machine or the local network: loopback, private
+    /// (RFC 1918) and unique-local. Only these may be admitted by a declared private upstream;
+    /// link-local stays refused because it holds the cloud metadata service.
+    #[must_use]
+    pub fn is_local_network(self) -> bool {
+        matches!(self, Self::Loopback | Self::Private | Self::UniqueLocal)
+    }
 }
 
 /// The verdict for one address.
@@ -114,9 +133,11 @@ fn embedded(v4: Ipv4Addr, otherwise: Blocked) -> Reach {
 }
 
 fn classify_v6(ip: Ipv6Addr) -> Reach {
-    const RULES: [([u16; 8], u32, Blocked); 7] = [
+    const RULES: [([u16; 8], u32, Blocked); 8] = [
         ([0x100, 0, 0, 0, 0, 0, 0, 0], 64, Blocked::Discard),
         ([0x2001, 0xdb8, 0, 0, 0, 0, 0, 0], 32, Blocked::Documentation),
+        // RFC 9637: inside 2000::/3, but not globally reachable.
+        ([0x3fff, 0, 0, 0, 0, 0, 0, 0], 20, Blocked::Documentation),
         // Covers Teredo (2001::/32), whose server and client addresses are attacker-chosen.
         ([0x2001, 0, 0, 0, 0, 0, 0, 0], 23, Blocked::ProtocolAssignment),
         ([0xfc00, 0, 0, 0, 0, 0, 0, 0], 7, Blocked::UniqueLocal),
@@ -138,9 +159,14 @@ fn classify_v6(ip: Ipv6Addr) -> Reach {
     if in_v6(ip, [0; 8], 96) {
         return embedded(low_v4(ip), Blocked::Reserved);
     }
-    // NAT64 (64:ff9b::/96, 64:ff9b:1::/48): a translator may forward to the inner address.
-    if in_v6(ip, [0x64, 0xff9b, 0, 0, 0, 0, 0, 0], 96) || in_v6(ip, [0x64, 0xff9b, 1, 0, 0, 0, 0, 0], 48) {
+    // NAT64 well-known prefix (64:ff9b::/96): a translator may forward to the inner address.
+    if in_v6(ip, [0x64, 0xff9b, 0, 0, 0, 0, 0, 0], 96) {
         return embedded(low_v4(ip), Blocked::ProtocolAssignment);
+    }
+    // Local-use NAT64 prefix (64:ff9b:1::/48, RFC 8215). Its IPv4 bits depend on the operator's
+    // prefix length, so it is refused as a whole rather than decoded.
+    if in_v6(ip, [0x64, 0xff9b, 1, 0, 0, 0, 0, 0], 48) {
+        return Reach::Blocked(Blocked::ProtocolAssignment);
     }
     // 6to4 (2002::/16): the IPv4 address sits in bits 16..48.
     if in_v6(ip, [0x2002, 0, 0, 0, 0, 0, 0, 0], 16) {
@@ -218,7 +244,10 @@ mod tests {
             ("::127.0.0.1", Blocked::Loopback),
             ("64:ff9b::7f00:1", Blocked::Loopback),
             ("64:ff9b::a9fe:a9fe", Blocked::LinkLocal),
-            ("64:ff9b:1::a00:1", Blocked::Private),
+            ("64:ff9b:1::a00:1", Blocked::ProtocolAssignment),
+            ("64:ff9b:1:abcd::1", Blocked::ProtocolAssignment),
+            ("3fff::1", Blocked::Documentation),
+            ("3fff:fff:ffff::1", Blocked::Documentation),
             ("2002:7f00:1::", Blocked::Loopback),
             ("2002:a9fe:a9fe::1", Blocked::LinkLocal),
             ("2001:0:4136:e378:8000:63bf:3fff:fdd2", Blocked::ProtocolAssignment),
@@ -246,6 +275,40 @@ mod tests {
         fn mapped_addresses_follow_their_ipv4_address(bits in any::<u32>()) {
             let v4 = Ipv4Addr::from(bits);
             prop_assert_eq!(classify(IpAddr::V6(v4.to_ipv6_mapped())), classify(IpAddr::V4(v4)));
+        }
+
+        /// Outside global unicast (2000::/3), nothing is public.
+        #[test]
+        fn nothing_outside_global_unicast_is_public(bits in any::<u128>()) {
+            let v6 = Ipv6Addr::from(bits);
+            let mapped = v6.to_ipv4_mapped().is_some();
+            if !mapped && (bits >> 125) != 0b001 {
+                prop_assert!(matches!(classify(IpAddr::V6(v6)), Reach::Blocked(_)));
+            }
+        }
+
+        /// Every form that embeds an IPv4 address, apart from IPv4-mapped, is refused whatever
+        /// the inner address.
+        #[test]
+        fn embedding_forms_are_never_public(inner in any::<u32>(), tail in any::<u64>()) {
+            let v4 = u128::from(inner);
+            for ip in [
+                v4,                                                   // IPv4-compatible
+                (0x64_u128 << 112) | (0xff9b_u128 << 96) | v4,        // NAT64 well-known
+                (0x64_u128 << 112) | (0xff9b_u128 << 96) | (1_u128 << 80) | u128::from(tail), // NAT64 local-use
+                (0x2002_u128 << 112) | (v4 << 80) | u128::from(tail), // 6to4
+                (0x2001_u128 << 112) | u128::from(tail),              // Teredo
+            ] {
+                prop_assert!(matches!(classify(IpAddr::V6(Ipv6Addr::from(ip))), Reach::Blocked(_)), "{}", Ipv6Addr::from(ip));
+            }
+        }
+
+        /// Only loopback, private and unique-local ranges count as the local network.
+        #[test]
+        fn the_local_network_is_exactly_loopback_private_and_unique_local(bits in any::<u32>()) {
+            let v4 = Ipv4Addr::from(bits);
+            let local = matches!(classify(IpAddr::V4(v4)), Reach::Blocked(why) if why.is_local_network());
+            prop_assert_eq!(local, v4.is_loopback() || v4.is_private());
         }
 
         /// The standard library's own classifications are never contradicted.
