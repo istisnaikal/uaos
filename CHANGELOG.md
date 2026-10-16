@@ -191,7 +191,8 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     banned outside the door; listening (`TcpListener::bind`, `TcpSocket::listen`, Unix
     listeners, Windows pipe servers) outside the API crate; every std file-system, `Path`,
     link and ownership call outside `uaos-platform` (a Windows UNC path reaches the network),
-    and every `getrandom` entry point; `OsFs` refuses UNC and device paths; task and thread spawning,
+    and every `getrandom` entry point; `OsFs` refuses UNC and device paths in every spelling
+    (the NT `\??\` one included); task and thread spawning,
     and the `JoinSet`, `LocalSet` and hyper-util `TokioExecutor` types, outside the runtime;
     `Door::new` outside its one owner.
   - **`cargo xtask clippy`** is the clippy gate: clippy with warnings denied, in plain text,
@@ -204,9 +205,10 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     lint table not denying a guarded lint, Cargo configuration naming `CLIPPY_CONF_DIR` or lint
     flags; it reads every mention of a guarded lint in code (macro-built attributes, lint
     groups, old names), refuses `#[path]` and `include!` outside owners, allows only `[alias]`
-    in Cargo configuration (names in any case), refuses flag and clippy variables in CI
-    workflows, and checks each canary's shape. `cargo xtask clippy` refuses an environment that
-    sets compiler flags, wrappers or clippy's arguments.
+    in Cargo configuration (names in any case), refuses build scripts naming clippy's
+    variables, reads `.rs` files in any case, and checks each canary's shape. `cargo xtask
+    clippy` neutralises the environment of the clippy it runs (compiler flags, wrapper, clippy's
+    arguments and configuration).
   - **`arch.toml`.** The bin's allow list is now explicit and leaves out the door; the bin
     reaches it only through the runtime. `uaos-module-api` and every Ring 1 crate are banned,
     transitively, from network, TLS and async-I/O crates (new `[ring1] ban`, enforced by
@@ -222,14 +224,14 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `clippy-config-nested`, `lints-not-inherited`, `cargo-config-clippy-override`,
     `clippy-ban-without-canary`, `allow-audit-lint-group`, `allow-audit-macro-attribute`,
     `allow-audit-path-module`, `allow-audit-nested-target`, `workspace-lints-group-allowed`,
-    `clippy-config-case`, `cargo-config-not-alias`, `workflow-overriding-env`,
+    `clippy-config-case`, `cargo-config-not-alias`, `build-script-clippy-env`,
     `canary-malformed`, `arch-ring1-depends-on-hyper`; on Unix only `net-unix-connect-outside-egress`,
     `net-unix-connect-addr-outside-egress`, `net-tokio-unix-connect-outside-egress`,
     `net-unix-socket-connect-outside-egress`; on Windows only (not run in CI)
     `net-named-pipe-outside-egress`.
-  - **Review:** `docs/reviews/WP3.A5-egress.md`, seven rounds, all resolved: 2 High, 4 Medium,
+  - **Review:** `docs/reviews/WP3.A5-egress.md`, eight rounds, all resolved: 2 High, 4 Medium,
     9 Low; then 1 High, 2 Medium, 7 Low; then 1 Medium, 5 Low; then 1 Medium, 5 Low; then
-    2 Medium, 4 Low; then 2 Medium, 2 Low; then 1 High, 2 Medium, 3 Low. Two fixes rest on ADR-0013 Amendment 1, accepted by the maintainer on
+    2 Medium, 4 Low; then 2 Medium, 2 Low; then 1 High, 2 Medium, 3 Low; then 1 Medium, 7 Low. Two fixes rest on ADR-0013 Amendment 1, accepted by the maintainer on
     2026-10-16.
 - Dependencies for the ADR-0013 stack: tokio, hyper 1, hyper-util, http, rustls 0.23
   (aws-lc-rs only), tokio-rustls, rustls-native-certs, and rcgen for tests only.

@@ -67,7 +67,12 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     violations.extend(canary_gaps(root)?);
     let mut found = 0usize;
     for path in files {
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+        // In any case: Windows and macOS compile `x.RS` for `mod x;` (round 8, L2).
+        if !path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
+        {
             continue;
         }
         let relative = rel(root, &path);
@@ -274,22 +279,8 @@ fn config_overrides(root: &Path, files: &[PathBuf]) -> Result<Vec<String>, Strin
         }
         if name == "build.rs" {
             let text = std::fs::read_to_string(path).map_err(|e| format!("{relative}: {e}"))?;
-            if text.contains("CLIPPY") {
+            if names_clippy(&text) {
                 problems.push(format!("{relative}: a build script names clippy's environment"));
-            }
-        }
-        let yaml = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("yml") || e.eq_ignore_ascii_case("yaml"));
-        if relative.starts_with(".github/") && yaml {
-            let text = std::fs::read_to_string(path).map_err(|e| format!("{relative}: {e}"))?;
-            for word in OVERRIDING_ENV_WORDS {
-                if text.contains(word) {
-                    problems.push(format!(
-                        "{relative}: `{word}` can change lint levels, compiler flags or clippy's configuration in CI"
-                    ));
-                }
             }
         }
     }
@@ -340,15 +331,11 @@ fn config_overrides(root: &Path, files: &[PathBuf]) -> Result<Vec<String>, Strin
     Ok(problems)
 }
 
-/// Environment and workflow words that change lint levels, compiler flags or clippy's
-/// configuration outside the workspace's lint table.
-pub(crate) const OVERRIDING_ENV_WORDS: &[&str] = &[
-    "RUSTFLAGS",
-    "RUSTC_WRAPPER",
-    "RUSTC_WORKSPACE_WRAPPER",
-    "CLIPPY_ARGS",
-    "CLIPPY_CONF_DIR",
-];
+/// Whether a build script names clippy's environment (in any case: Windows matches variable
+/// names regardless of case), which it could set for the compiler (`cargo:rustc-env`).
+fn names_clippy(build_script: &str) -> bool {
+    build_script.to_ascii_uppercase().contains("CLIPPY")
+}
 
 fn read_toml(root: &Path, path: &Path) -> Result<toml::Value, String> {
     let relative = rel(root, path);
@@ -439,7 +426,7 @@ fn well_formed(lines: &[&str], marker: usize, segment: &str) -> bool {
         .get(marker + 1..(marker + 4).min(lines.len()))
         .unwrap_or_default()
         .iter()
-        .any(|l| l.contains(segment));
+        .any(|l| !word_lines(l, segment).is_empty());
     expects.len() == 1 && names_disallowed && calls
 }
 
@@ -634,6 +621,29 @@ mod tests {
         for missing in ["`a::b`", "`e::f`", "`g::H`"] {
             assert!(problems.iter().any(|p| p.contains(missing)), "{missing}: {problems:?}");
         }
+    }
+
+    /// Round 8, L3: a canary that calls another banned item whose name contains its own does
+    /// not count.
+    #[test]
+    fn a_canary_must_call_its_own_item() {
+        let config = "disallowed-methods = [\"a::send_to\"]\n";
+        let other = CANARY
+            .replace("c::d()", "x.try_send_to()")
+            .replace("`c::d`", "`a::send_to`");
+        assert_eq!(canary_problems(config, &[("bans.rs", other)]).unwrap().len(), 1);
+        let own = CANARY
+            .replace("c::d()", "x.send_to()")
+            .replace("`c::d`", "`a::send_to`");
+        assert!(canary_problems(config, &[("bans.rs", own)]).unwrap().is_empty());
+    }
+
+    /// Round 8, L5: a build script naming clippy's environment, in any case.
+    #[test]
+    fn a_build_script_naming_clippy_is_found() {
+        assert!(names_clippy("println!(\"cargo:rustc-env=CLIPPY_CONF_DIR=x\");"));
+        assert!(names_clippy("println!(\"cargo:rustc-env=clippy_args=x\");"));
+        assert!(!names_clippy("println!(\"cargo:rustc-env=GIT_HASH=x\");"));
     }
 
     /// Round 7, L1: a marker outside a single-`#[expect]` canary, or a canary under another

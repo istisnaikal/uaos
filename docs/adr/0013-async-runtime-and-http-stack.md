@@ -215,7 +215,8 @@ on the PR-5 branch.
     `symlink`, `chown`, `lchown`, `chroot`), outside `uaos-platform`, which owns file access.
     On Windows a UNC path (`\\host\share`) resolves its host and opens SMB to it, so these are
     network entry points that need no dependency. The platform's own `OsFs` refuses UNC and
-    device paths (`PermissionDenied`) before any call, whoever builds it;
+    device paths (`PermissionDenied`) before any call, whoever builds it, in every spelling std
+    hands to the system, the NT one (`\??\UNC\...`) included;
   - randomness: `getrandom`'s `fill`, `fill_uninit`, `u32`, `u64` and `SysRng`, outside the
     platform;
   - listening: `TcpListener::bind` (std and tokio), `TcpSocket::listen`, Unix listeners (std's
@@ -246,13 +247,16 @@ on the PR-5 branch.
   its arguments counts, and so do the lint groups that contain one (`clippy::all`,
   `clippy::style`) and the old names; `deny(...)` and `forbid(...)` are left alone. It fails on
   `#[path]` modules and `include!` outside the owners, scans nested folders named like the
-  root's skipped ones, matches `clippy.toml` and `.cargo/config` names in any case, allows only
-  `[alias]` in Cargo configuration, refuses compiler-flag, wrapper and clippy variables in CI
-  workflows and clippy's variables in build scripts, takes the member list from `cargo
-  metadata`, refuses a workspace lint table that allows a group holding a guarded lint, and
-  checks that each canary is one banned call under a single `#[expect]`, compiled under
-  `cfg(unix)` or `cfg(windows)` only. `cargo xtask clippy` refuses to run when the environment
-  sets compiler flags, a compiler wrapper or clippy's arguments or configuration.
+  root's skipped ones (but not folders Cargo marks as build output), reads `.rs` files and
+  matches `clippy.toml` and `.cargo/config` names in any case, allows only `[alias]` in Cargo
+  configuration, refuses build scripts naming clippy's variables, takes the member list from
+  `cargo metadata`, refuses a workspace lint table that allows a group holding a guarded lint,
+  and checks that each canary calls its own banned item (as a whole word) under a single
+  `#[expect]`, compiled under `cfg(unix)` or `cfg(windows)` only. `cargo xtask clippy` runs
+  clippy with its environment neutralised: an empty `CARGO_ENCODED_RUSTFLAGS` overrides every
+  other source of compiler flags, an empty `RUSTC_WRAPPER` any wrapper, and `CLIPPY_ARGS` and
+  `CLIPPY_CONF_DIR` are removed, whatever their case. CI jobs other than clippy may set compiler
+  flags (a sanitizer job needs them); they do not judge lints.
 
   A dependency that opens sockets itself is kept out by `arch.toml` and supply-chain review.
   `cargo xtask allow-audit` checks owners per lint, not per method, so a file that owns one
@@ -264,11 +268,16 @@ on the PR-5 branch.
   review, CODEOWNERS and the protected `main` ruleset (ADR-0019), which is not applied yet
   (PD-17).
 
-  **Known residual: network paths that do not go through `OsFs`.** `uaos-state` opens its
-  SQLite database by path through rusqlite, so a data directory on a network share would still
-  put that file on another machine. The data directory is chosen by the user's configuration,
-  read by the bin (M3); refusing network paths there is owed with it. macOS automount paths
-  (`/net/host`) look local and are not detected.
+  **Known residuals.**
+  - Network paths that look local or do not go through `OsFs`: `uaos-state` opens its SQLite
+    database by path through rusqlite; a drive letter mapped to a share (`Z:`), a symbolic link
+    or junction inside the data directory that points at a share, a relative path under a UNC
+    current directory, and macOS automount paths (`/net/host`) all pass `OsFs`'s check. The
+    data directory is chosen by the user's configuration, read by the bin (M3); resolving it
+    and refusing network locations there is owed with it.
+  - Cargo configuration outside the repository (a parent directory's `.cargo`, `CARGO_HOME`)
+    belongs to the machine, not the repository: its `[env]` with `force` can still reach the
+    compiler. CI runs on clean runners.
   **Known exception:** the system resolver (`tokio::net::lookup_host`) runs `getaddrinfo` on
   tokio's blocking pool, outside the supervisor; the resolution timeout stops the wait, not the
   thread. Moving resolution onto the supervisor's pool is runtime work (PR-6).
@@ -288,11 +297,14 @@ on the PR-5 branch.
     `spawn-through-tokio-executor`, and `clippy-ban-path-unresolved` and
     `clippy-ban-silenced` for the gate itself and its canaries;
   - for the configuration and canary checks: `clippy-config-nested`, `lints-not-inherited`,
-    `cargo-config-clippy-override`, `clippy-ban-without-canary`;
-  - for each `allow-invalid` ban, on its own system: `net-unix-connect-outside-egress`,
-    `net-unix-connect-addr-outside-egress`, `net-tokio-unix-connect-outside-egress` and
-    `net-unix-socket-connect-outside-egress` (Unix), `net-named-pipe-outside-egress`
-    (Windows);
+    `cargo-config-clippy-override`, `clippy-ban-without-canary`, `allow-audit-lint-group`,
+    `allow-audit-macro-attribute`, `allow-audit-path-module`, `allow-audit-nested-target`,
+    `workspace-lints-group-allowed`, `clippy-config-case`, `cargo-config-not-alias`,
+    `build-script-clippy-env`, `canary-malformed`;
+  - besides the canaries, which cover every `allow-invalid` ban on its own system, these run
+    there too: `net-unix-connect-outside-egress`, `net-unix-connect-addr-outside-egress`,
+    `net-tokio-unix-connect-outside-egress` and `net-unix-socket-connect-outside-egress` (Unix),
+    `net-named-pipe-outside-egress` (Windows);
   - for the arch rules: `arch-ring1-depends-on-hyper`.
 
 **Verified.**
