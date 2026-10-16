@@ -10,7 +10,7 @@ Low findings fixed or accepted with a reason. Two fixes change accepted decision
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
 fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
 1 Medium and 5 Low, a fifth 2 Medium and 4 Low, a sixth 2 Medium and 2 Low, a seventh
-1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, and a ninth 4 Low, all resolved below. The PR stays a draft until a review comes back clean.
+1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, and a tenth 2 Low, all resolved below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -221,8 +221,8 @@ overclaim in the text.
 | Finding | What it was | What changed | Proof |
 |---|---|---|---|
 | L1 | The door sent any method. An upstream that answers `TRACE` as RFC 9110 §9.3.8 describes (Apache httpd's default) echoes the request it received, so the provider credential the door inserted came back to the caller | The door sends only GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS. TRACE, CONNECT and extension methods are refused before contact, without consuming the Operation | `methods_the_door_does_not_send_are_refused_before_contact`; negative `egress-sends-trace` **PROVEN** |
-| L2 | The canary shape check matched only the banned item's last segment: a copy-pasted canary calling another ban with the same name (`std::fs::File::create` under the marker for the named-pipe `ServerOptions::create`) passed `allow-audit`, and kept clippy green while its own ban resolved to nothing | The item's type or module must be named too, as a whole word in code (comments and strings masked, the marker included), in the function's signature or the three lines after the marker | `a_canary_must_name_its_type_or_module`; negative `canary-calls-another-item` **PROVEN**; every real canary passes |
-| L3 | The build-script check refused any build script that mentioned clippy (a comment, a lint attribute) and missed one declared as `build = "build/main.rs"` | Build scripts are taken from `cargo metadata` (targets of kind `custom-build`), and only setting a clippy variable for the compiler counts (`rustc-env=CLIPPY…`, in any case, `cargo:` or `cargo::`) | `a_build_script_setting_clippy_env_is_found`; negatives `build-script-clippy-env` and `build-script-declared-path` **PROVEN** |
+| L2 | The canary shape check matched only the banned item's last segment: a copy-pasted canary calling another ban with the same name (`std::fs::File::create` under the marker for the named-pipe `ServerOptions::create`) passed `allow-audit`, and kept clippy green while its own ban resolved to nothing | The item's type or module must be named too, as a whole word in code (comments and strings masked, the marker included), in the function's signature or the three lines after the marker (incomplete: the tenth review, L1) | `a_canary_must_name_its_type_or_module`; negative `canary-calls-another-item` **PROVEN**; every real canary passes |
+| L3 | The build-script check refused any build script that mentioned clippy (a comment, a lint attribute) and missed one declared as `build = "build/main.rs"` | Build scripts are taken from `cargo metadata` (targets of kind `custom-build`), and only setting a clippy variable for the compiler counts (`rustc-env=CLIPPY…`, in any case, `cargo:` or `cargo::`) (narrowed too far: the tenth review, L2) | `a_build_script_setting_clippy_env_is_found`; negatives `build-script-clippy-env` and `build-script-declared-path` **PROVEN** |
 | L4 | `cargo xtask clippy` removed `CLIPPY_CONF_DIR`, so a machine's Cargo `[env]` without `force` could still set it for clippy; the eighth section's heading carried the wrong date | The clippy it runs gets `CLIPPY_CONF_DIR` set to the workspace root, which `[env]` without `force` does not override (with `force` it does; that configuration is the machine's, as ADR-0013 states). The heading carries the commit date | `the_child_environment_is_neutralised`; by reading |
 | Text | ADR-0013 said `OsFs` refused network and device paths "in every spelling", but DOS device names in a last component (`C:\data\NUL`) pass it | ADR-0013 and the test now say "every prefix spelling" and state the gap: every file UAOS opens has a name UAOS chooses, and the data directory, which configuration names, is owed with M3 | review of the text |
 
@@ -231,3 +231,21 @@ overclaim in the text.
 `gates`, `claims` and `headers`; all 40 egress negatives, of which 36 PROVEN here and the four
 Unix ones left to Linux CI. The ban list and canaries did not change, so the round-eight Linux
 cross-check of the Unix canaries stands.
+
+## Tenth review (2026-10-16)
+
+**Reviewed:** `81ebb39` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export. **Result:** 0 High · 0 Medium · 2 Low, both gaps in the ninth round's gate
+fixes; nothing new in the door. The method allowlist sits before the breaker and the send record,
+so a refused method consumes nothing; `CLIPPY_CONF_DIR` pinned to the root still reads the root's
+bans with a nested `clippy.toml` and an outer `CLIPPY_CONF_DIR` set (checked by a seeded
+violation); `cargo metadata` lists every build script the workspace has; the counts held.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | Requiring the owner's name was not enough. std and tokio share eleven type-and-method pairs (`TcpStream::connect`, `UnixDatagram::bind`, …), the std Unix canaries reached their types through an import, and sibling canaries share modules (`tokio::task::spawn_blocking` and the `JoinSet` canaries). A canary calling std's item under tokio's marker, or a sibling's under its own, passed `allow-audit` and kept clippy green while its own ban resolved to nothing (shown on Windows, and for an `allow-invalid` Unix ban in the Linux cross-check) | A canary spells its item by its own path in code: a method its type's full path, an item in a module its whole path, in the signature or the three lines after the marker. The std Unix and Windows named-pipe canaries now use full paths instead of imports | `a_canary_must_spell_its_own_path` (import, same name in another crate, sibling, comment); negatives `canary-calls-another-item` (now std's `TcpStream::connect` under tokio's marker) and `canary-copied-from-sibling` **PROVEN**; every real canary passes; the Linux cross-check of the Unix canaries is clean, and fails with a ban removed |
+| L2 | The ninth round narrowed the build-script check to the literal `rustc-env=CLIPPY`, so a script emitting through a helper (`emit("CLIPPY_ARGS", "-A…")`) passed and switched the bans off for its crate | A build script that names one of clippy's variables (`CLIPPY_` in any case) in its code or strings is refused; comments, lint paths (`clippy::`) and prose are not | `a_build_script_naming_a_clippy_variable_is_found`; negative `build-script-clippy-env` now seeds the helper form, in lowercase, and `build-script-declared-path` the direct form, both **PROVEN** |
+
+**Verified locally (Windows, dedicated target directory):** 25 xtask tests; `cargo xtask clippy`,
+`allow-audit`; the Linux cross-check of the Unix canaries; all 41 egress negatives, of which 37
+PROVEN here and the four Unix ones left to Linux CI. The door's code did not change this round.

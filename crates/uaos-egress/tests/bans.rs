@@ -7,8 +7,10 @@
 //! under `-D warnings` on every system that compiles the canary. Bans that exist only on some
 //! systems are compiled only there, so each CI system proves its own. `cargo xtask allow-audit`
 //! keeps this file complete: it fails on a ban in `clippy.toml` with no `// canary:` marker here
-//! (round 6, L2). `getrandom::fill` is not a dependency here; its canary lives in
-//! `uaos-platform`'s tests.
+//! (round 6, L2), and on a canary that does not spell its item's own path in code: a method's
+//! full type path, an item in a module its whole path, never through an import (rounds 9 and
+//! 10). `getrandom::fill` is not a dependency here; its canary lives in `uaos-platform`'s
+//! tests.
 
 #![allow(clippy::unwrap_used, reason = "test harness")]
 
@@ -512,58 +514,58 @@ mod canaries {
 
     #[cfg(unix)]
     mod unix {
-        use std::os::unix::net::{SocketAddr, UnixDatagram, UnixListener, UnixStream};
+        use std::os::unix::net::SocketAddr;
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
         fn std_stream_connect() {
             // canary: `std::os::unix::net::UnixStream::connect`
-            let _canary = UnixStream::connect("/canary");
+            let _canary = std::os::unix::net::UnixStream::connect("/canary");
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
         fn std_stream_connect_addr(addr: &SocketAddr) {
             // canary: `std::os::unix::net::UnixStream::connect_addr`
-            let _canary = UnixStream::connect_addr(addr);
+            let _canary = std::os::unix::net::UnixStream::connect_addr(addr);
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
         fn std_datagram_bind() {
             // canary: `std::os::unix::net::UnixDatagram::bind`
-            let _canary = UnixDatagram::bind("/canary");
+            let _canary = std::os::unix::net::UnixDatagram::bind("/canary");
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
         fn std_datagram_bind_addr(addr: &SocketAddr) {
             // canary: `std::os::unix::net::UnixDatagram::bind_addr`
-            let _canary = UnixDatagram::bind_addr(addr);
+            let _canary = std::os::unix::net::UnixDatagram::bind_addr(addr);
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
         fn std_datagram_unbound() {
             // canary: `std::os::unix::net::UnixDatagram::unbound`
-            let _canary = UnixDatagram::unbound();
+            let _canary = std::os::unix::net::UnixDatagram::unbound();
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
-        fn std_datagram_connect(socket: &UnixDatagram) {
+        fn std_datagram_connect(socket: &std::os::unix::net::UnixDatagram) {
             // canary: `std::os::unix::net::UnixDatagram::connect`
             let _canary = socket.connect("/canary");
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
-        fn std_datagram_connect_addr(socket: &UnixDatagram, addr: &SocketAddr) {
+        fn std_datagram_connect_addr(socket: &std::os::unix::net::UnixDatagram, addr: &SocketAddr) {
             // canary: `std::os::unix::net::UnixDatagram::connect_addr`
             let _canary = socket.connect_addr(addr);
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
-        fn std_datagram_send_to(socket: &UnixDatagram) {
+        fn std_datagram_send_to(socket: &std::os::unix::net::UnixDatagram) {
             // canary: `std::os::unix::net::UnixDatagram::send_to`
             let _canary = socket.send_to(b"", "/canary");
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
-        fn std_datagram_send_to_addr(socket: &UnixDatagram, addr: &SocketAddr) {
+        fn std_datagram_send_to_addr(socket: &std::os::unix::net::UnixDatagram, addr: &SocketAddr) {
             // canary: `std::os::unix::net::UnixDatagram::send_to_addr`
             let _canary = socket.send_to_addr(b"", addr);
         }
@@ -571,13 +573,13 @@ mod canaries {
         #[expect(clippy::disallowed_methods, reason = "canary")]
         fn std_listener_bind() {
             // canary: `std::os::unix::net::UnixListener::bind`
-            let _canary = UnixListener::bind("/canary");
+            let _canary = std::os::unix::net::UnixListener::bind("/canary");
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
         fn std_listener_bind_addr(addr: &SocketAddr) {
             // canary: `std::os::unix::net::UnixListener::bind_addr`
-            let _canary = UnixListener::bind_addr(addr);
+            let _canary = std::os::unix::net::UnixListener::bind_addr(addr);
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
@@ -641,7 +643,7 @@ mod canaries {
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
-        fn tokio_datagram_from_std(socket: UnixDatagram) {
+        fn tokio_datagram_from_std(socket: std::os::unix::net::UnixDatagram) {
             // canary: `tokio::net::UnixDatagram::from_std`
             let _canary = tokio::net::UnixDatagram::from_std(socket);
         }
@@ -711,12 +713,10 @@ mod canaries {
 
     #[cfg(windows)]
     mod windows {
-        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
-
         #[expect(clippy::disallowed_methods, reason = "canary")]
         fn pipe_client_open() {
             // canary: `tokio::net::windows::named_pipe::ClientOptions::open`
-            let _canary = ClientOptions::new().open("canary");
+            let _canary = tokio::net::windows::named_pipe::ClientOptions::new().open("canary");
         }
 
         #[expect(clippy::disallowed_methods, reason = "canary")]
@@ -734,7 +734,7 @@ mod canaries {
         #[expect(clippy::disallowed_methods, reason = "canary")]
         fn pipe_server_create() {
             // canary: `tokio::net::windows::named_pipe::ServerOptions::create`
-            let _canary = ServerOptions::new().create("canary");
+            let _canary = tokio::net::windows::named_pipe::ServerOptions::new().create("canary");
         }
     }
 }
