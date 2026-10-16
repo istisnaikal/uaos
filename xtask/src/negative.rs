@@ -1684,14 +1684,79 @@ pub(crate) fn cases() -> Vec<Case> {
             // or shredded.
             seed: replace(
                 "crates/uaos-state/src/chunks/mod.rs",
-                "if self.quarantined(pocket, chunk) =>",
-                "if self.quarantined(pocket, chunk) && false =>",
+                "                    Ok(_) => Err(ChunkError::Lost),",
+                "                    Ok(_) => Err(ChunkError::Unavailable),",
             ),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-state", "--test", "durability", "r12_l3_lost_content_reads_back_as_lost"],
             },
             expect: "lost content read back as never stored or shredded",
+        },
+        Case {
+            id: "unauthentic-loss-skipped-at-open",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 thirteenth round L1: an open that skips an unauthentic payload, so its record
+            // becomes durable with no chunk.lost record.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "                    self.remember(key);\n                    continue;\n                }\n                Probe::Absent => LossCause::Missing,",
+                "                    self.remember(key);\n                    continue;\n                }\n                Probe::Lost(LossCause::Unauthentic) => continue,\n                Probe::Absent => LossCause::Missing,",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r13_l1_an_unauthentic_payload_found_at_open_is_journaled"],
+            },
+            expect: "survived without its payload and with no chunk.lost record",
+        },
+        Case {
+            id: "unauthentic-loss-skipped-in-recovery",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 thirteenth round L1: a recovery that skips an unauthentic payload.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "                    locked(&self.pending).remove(&key);\n                    continue;\n                }\n                Probe::Absent => LossCause::Missing,",
+                "                    locked(&self.pending).remove(&key);\n                    continue;\n                }\n                Probe::Lost(LossCause::Unauthentic) => continue,\n                Probe::Absent => LossCause::Missing,",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r13_l1_an_unauthentic_payload_found_in_recovery_is_journaled"],
+            },
+            expect: "became durable without its payload and with no chunk.lost record",
+        },
+        Case {
+            id: "missing-loss-reads-as-unavailable",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 thirteenth round L2: a loss with no file to set aside leaves no marker.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "        self.fs\n            .write_unsynced(&self.lost_marker(pocket, chunk), b\"\")\n            .map_err(storage)?;",
+                "",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r13_l2_a_missing_payload_reads_back_as_lost"],
+            },
+            expect: "a journaled loss reads back as never stored or shredded",
+        },
+        Case {
+            id: "shredded-content-reads-as-lost",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 thirteenth round L3: a shred that leaves an earlier loss's marker.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "        match self.fs.remove_file(&self.lost_marker(pocket, chunk)) {",
+                "        match Err::<(), FsError>(FsError::NotFound { op: \"seeded\" }) {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r13_l3_lost_then_shredded_reads_back_as_shredded"],
+            },
+            expect: "deliberately shredded content reads back as lost",
         },
         Case {
             id: "shred-incomplete-key-only",

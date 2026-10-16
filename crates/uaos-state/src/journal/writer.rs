@@ -239,6 +239,12 @@ pub struct Journal {
     manifest_unstored: bool,
 }
 
+/// The lost chunks by pocket and reference: each referencing record finds its loss in
+/// `O(log L)`, not by a scan of every loss (review WP3.A1, thirteenth round, L4).
+fn loss_causes(lost: &[LostChunk]) -> BTreeMap<(PocketId, ChunkRef), LossCause> {
+    lost.iter().map(|l| ((l.pocket, l.chunk), l.cause)).collect()
+}
+
 fn storage(e: FsError) -> JournalError {
     match e {
         FsError::NoSpace { .. } => JournalError::DiskFull,
@@ -951,18 +957,19 @@ impl Journal {
             .filter(|e| e.event_type == types::CHUNK_LOST)
             .filter_map(|e| e.metadata.as_map().get(RECORD_SEQ_METADATA_KEY)?.parse().ok())
             .collect();
+        let causes = loss_causes(lost);
         envelopes
             .into_iter()
             .filter(|e| !reported.contains(&e.seq.0))
             .filter_map(|e| {
                 let (pocket, chunk) = (e.pocket_id?, e.payload_ref?);
-                let found = lost.iter().find(|l| l.pocket == pocket && l.chunk == chunk)?;
+                let cause = *causes.get(&(pocket, chunk))?;
                 let payload = LostPayload {
                     record_seq: e.seq,
                     operation_id: e.operation_id,
                     pocket,
                     chunk,
-                    cause: found.cause,
+                    cause,
                 };
                 Some((payload, e))
             })
@@ -1380,17 +1387,18 @@ fn recover_tail_payloads(
                 .is_none_or(|shred| *shred < e.seq)
         })
         .collect();
+    let causes = loss_causes(&lost);
     Ok(every
         .into_iter()
         .filter_map(|(pocket, chunk, e)| {
-            let found = lost.iter().find(|l| l.pocket == pocket && l.chunk == chunk)?;
+            let cause = *causes.get(&(pocket, chunk))?;
             Some((
                 LostPayload {
                     record_seq: e.seq,
                     operation_id: e.operation_id,
                     pocket,
                     chunk,
-                    cause: found.cause,
+                    cause,
                 },
                 e.clone(),
             ))
