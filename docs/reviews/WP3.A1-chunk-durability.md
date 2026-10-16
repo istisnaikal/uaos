@@ -10,8 +10,8 @@ process. The High findings blocked merge.
 accepted with a reason. The property test, extended as M6 asked, then found four more defects
 (N1–N4), all fixed and pinned. One item needs a maintainer decision (L7). A second V1 review of
 the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up,
-a third found 1 High, 3 Medium and 5 Low, a fourth 2 Medium and 4 Low, and a fifth 2 Medium
-and 3 Low; all are fixed below.
+a third found 1 High, 3 Medium and 5 Low, a fourth 2 Medium and 4 Low, a fifth 2 Medium and
+3 Low, and a sixth 4 Low; all are fixed below.
 The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
@@ -206,3 +206,22 @@ the shrunk schedule kept in `durability.proptest-regressions`, and negative
 `rotation-skips-current-key` **PROVEN**.
 
 Each round-five test was checked to fail with its fix reverted (seven mutations, all bite).
+
+## Sixth review (2026-10-16)
+
+**Reviewed:** `2712e8b` (on `555494b`) by a fresh-context agent, in a scratch export.
+**Result:** 0 High · 0 Medium · 4 Low. No failure, crash or power-loss order lost a flushed
+record, left a reference to removed content unexplained, left shredded content readable or
+destroyed a KEK a durable key file still needed; 12,000 crash schedules passed, and every
+round-five fix reversal bit.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | The store's own flush of pending chunks (`sync_pending`, public) poisoned after its failing directory flush returned, outside the flush window, so a concurrent journal flush could acknowledge its batch in between | Every file and directory flush in the batch goes through the same `flushed` helper, poisoning inside the window | `r6_l1_a_failed_direct_store_flush_is_seen_by_a_concurrent_journal_flush`; negative `store-flush-poisons-outside-window` **PROVEN** |
+| L2 | A put of the same content while `Journal::shred` ran lifted the mark; if the shred's flush then failed, `recover` made the record durable and a later record referencing the content cancelled the shred | When the record's flush fails, the chunk is marked again (beyond the bound), since the record can still become durable. Round five's negative `shred-marked-after-record` now removes both marks, since either one keeps that test passing | `r6_l2_a_put_during_a_shred_whose_flush_fails_does_not_lift_the_refusal`; negatives `shred-mark-not-restored` and the re-seeded `shred-marked-after-record` **PROVEN** |
+| L3 | A shred refused before its record was written (a malformed record, a stopped writer) still marked its chunk, and a full-disk episode could fill the backlog with shreds that never had a record | When the append fails no record exists (a failed append is never acknowledged, and recovery excludes its bytes), so the mark this attempt set is lifted; an earlier shred's mark stays | `r6_l3_a_shred_refused_before_its_record_leaves_the_content_alone`, `r6_l3_a_disk_full_episode_leaves_no_shred_backlog` |
+| L4 | A read-back of stored content (by a put, a check or recovery) unwrapped its key file without the stripe, so a re-wrap finishing meanwhile failed it with a misleading keyring error | The read-back holds the stripe shared, in the existing lock order (slot, then stripe) | `r6_l4_a_put_reading_back_content_is_not_failed_by_a_finishing_rewrap` |
+
+Each round-six test was checked to fail with its fix reverted (five mutations, all bite). The
+reviewer noted that the crash schedules check neither old-KEK retirement nor that shredded content
+is unreadable; the deterministic tests `r3_l3`, `r4_l2`, `r4_l3` and `r4_m2` pin those.

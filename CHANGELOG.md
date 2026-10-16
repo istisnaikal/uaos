@@ -57,8 +57,8 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     a `PAYLOADS` flag file now records that a journal coordinates a store.
   - **Review:** `docs/reviews/WP3.A1-chunk-durability.md` (4 High, 7 Medium, 7 Low, four defects
     found by the extended property test after the fixes, a second round: 1 High, 1 Medium,
-    6 Low, a third: 1 High, 3 Medium, 5 Low, a fourth: 2 Medium, 4 Low, and a fifth: 2 Medium,
-    3 Low). New codes
+    6 Low, a third: 1 High, 3 Medium, 5 Low, a fourth: 2 Medium, 4 Low, a fifth: 2 Medium,
+    3 Low, and a sixth: 4 Low). New codes
     `STORE_PAYLOAD_LOST` and `STORE_PAYLOAD_FLUSH_FAILED`.
 
 - `uaos-policy` hardening after the retroactive review (`docs/reviews/WP2.1-policy.md`; ADR-0008
@@ -225,9 +225,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   balanced-put target is **not met** on Windows (1.55 ms after the review fixes), where file
   creation dominates. Until the state actor (WP3.3), the request whose append finds the flush
   window due pays for the flush.
-- Gate `journal-durability` gains twenty-two seeded violations, one per silent-loss class found
-  by the five WP3.A1 review rounds and the extended property test (twenty-six for ADR-0018,
-  twenty-seven in the gate).
+- Gate `journal-durability` gains twenty-four seeded violations, one per silent-loss class found
+  by the six WP3.A1 review rounds and the extended property test (twenty-eight for ADR-0018,
+  twenty-nine in the gate).
 - Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
   unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a
   forbid.
