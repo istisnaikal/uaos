@@ -5,8 +5,11 @@
 # an item-level `#[allow(clippy::disallowed_methods, reason = "...")]`.
 # `cargo xtask allow-audit` checks owners per lint, not per method: a file that owns one
 # disallowed method may allow any of them. Review of each `allow` and its reason covers the rest.
-# Paths for crates that are not dependencies yet (tokio, reqwest) are added in the phase that
-# introduces them, because clippy rejects unresolvable paths.
+# Paths for crates that are not dependencies yet (reqwest) are added in the phase that
+# introduces them. Clippy only warns about a path that resolves to nothing, and `-D warnings`
+# does not make that fatal, so the gate runs as `cargo xtask clippy`, which fails on it (review
+# WP3.A5, round 4, M1). Entries marked `allow-invalid` exist only on some systems and are not
+# reported anywhere; each has a seeded violation on the system where it exists.
 
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
@@ -92,4 +95,6 @@ disallowed-types = [
   # Task sets spawn through `collect` and `extend` too, which no method ban can name (round 3, L3).
   { path = "tokio::task::JoinSet", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
   { path = "tokio::task::LocalSet", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
+  # hyper-util's executor spawns every task it is given with `tokio::spawn` (round 4, L1).
+  { path = "hyper_util::rt::TokioExecutor", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
 ]

@@ -11,7 +11,8 @@
     clippy::expect_used,
     clippy::panic,
     clippy::disallowed_methods,
-    reason = "test harness: fixtures abort on failure; the mock server needs real sockets and tasks"
+    clippy::disallowed_types,
+    reason = "test harness: fixtures abort on failure; the mock server needs real sockets and tasks, and the door an executor"
 )]
 
 use std::collections::BTreeMap;

@@ -8,8 +8,8 @@ own documentation said were closed. They blocked merge.
 **Resolution:** every High and Medium finding fixed with a regression test or a seeded violation;
 Low findings fixed or accepted with a reason. Two fixes change accepted decisions and are written
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
-fixes found 1 High, 2 Medium and 7 Low findings, resolved below; a third review comes next and
-the PR stays a draft until one is clean.
+fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, and a fourth
+1 Medium and 5 Low, all resolved below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -126,3 +126,19 @@ an address the door should refuse, and no path let a caller's credential reach a
 
 The reviewer could not build for Linux; the Unix paths in L3 were read from tokio and std. The
 new Unix-only negative turns that reading into a check on the Linux runner.
+
+## Fourth review (2026-10-16)
+
+**Reviewed:** `b4fbfc2` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export. **Result:** 0 High · 1 Medium · 5 Low. The round-3 fixes held: no interleaving
+left the breaker stuck, no path reached an address the door should refuse, and every round-3 ban
+that resolves on Windows fired.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| M1 | A `clippy.toml` path that resolves to nothing is only a warning that `-D warnings` does not make fatal, so a typo or an item moving upstream would switch a ban off with CI green; the `allow-invalid` bans added in round 3 had no negative, and the docs said the one Unix negative proved them all | The gate runs as `cargo xtask clippy`, which fails on clippy's unresolved-path warning (CI's clippy job, `xtask ci` and `xtask quick`). Each `allow-invalid` ban has a negative on the system where it exists; the runner reports a case for another system as "not here" instead of skipped. The named-pipe negative runs only when the negatives run on Windows, not in CI, and the docs say so | negative `clippy-ban-path-unresolved` **PROVEN**; `net-named-pipe-outside-egress` **PROVEN** on Windows; `net-unix-connect-addr-outside-egress`, `net-tokio-unix-connect-outside-egress`, `net-unix-socket-connect-outside-egress` run in the Linux CI job |
+| L1 | hyper-util's `TokioExecutor` spawns with `tokio::spawn` and was on no list, so any crate with hyper-util could spawn outside the supervisor | `hyper_util::rt::TokioExecutor` is a disallowed type (owner: the runtime); test harnesses own `disallowed_types` like `disallowed_methods` | negative `spawn-through-tokio-executor` **PROVEN** |
+| L2 | Attempts sent during an outage that failed after a probe had closed the circuit reopened it for another cooldown | Every admission carries a `Ticket`: an ordinary attempt in the circuit's current epoch, or a probe's generation. Closing after an outage begins a new epoch; a transport failure counts only from the current epoch. The counter wraps instead of saturating | `failures_sent_during_an_outage_do_not_reopen_the_circuit_a_probe_closed` (the reviewer's repro, plus failures in the new epoch still opening it) |
+| L3 | Half of round 3's stale-probe rule (a stale probe's transport failure) was pinned by no test | A test for it | `a_stale_probe_failure_cannot_reopen_a_closed_circuit` |
+| L4 | The property "nothing outside 2000::/3 is public" became false with round 3's NAT64 change and passed only because random draws never hit `64:ff9b::/96` | The property excludes well-known NAT64 addresses, which have their own property and deterministic cases; ADR-0013 is corrected | `nothing_outside_global_unicast_is_public`, `nat64_well_known_follows_its_ipv4_address` |
+| L5 | The data-flow document said the zero-egress capture confirmed no certificate fetches, though that capture is owed; this record's status line was stale | The data flow cites the test that proves it today and marks I-14 as owed; the status line is current | review of the text |
