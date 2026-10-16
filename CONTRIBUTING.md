@@ -30,7 +30,7 @@ proven to bite by `cargo xtask negative`, which seeds a violation and checks the
 | Gate | Command |
 |---|---|
 | format | `cargo fmt --all -- --check` |
-| lint | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
+| lint | `cargo xtask clippy` |
 | tests | `cargo nextest run --workspace --locked` and `cargo test --doc` |
 | architecture direction | `cargo xtask arch-check` |
 | lint exemptions only where owned | `cargo xtask allow-audit` |

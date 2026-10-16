@@ -185,34 +185,39 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **Error codes** `UAOS-EGRESS-0001` to `0005`: blocked, unreachable, timeout, circuit open,
     refused.
 - Reachability rules for the door (ADR-0010).
-  - **`clippy.toml`.** Outbound connects (std and tokio, `TcpSocket` included, Unix sockets
-    and Windows named pipes), name resolution (`lookup_host`, `to_socket_addrs`, hyper-util's
-    `GaiResolver`), UDP and building another HTTP client are banned outside the door; listening
-    (`TcpListener::bind`, `TcpSocket::listen`) outside the API crate; task and thread spawning,
+  - **`clippy.toml`.** Outbound connects (std and tokio, `TcpSocket` included, Unix streams
+    and datagrams, Windows named-pipe clients), name resolution (`lookup_host`,
+    `to_socket_addrs`, hyper-util's `GaiResolver`), UDP and building another HTTP client are
+    banned outside the door; listening (`TcpListener::bind`, `TcpSocket::listen`, Unix
+    listeners, Windows pipe servers) outside the API crate; task and thread spawning,
     and the `JoinSet`, `LocalSet` and hyper-util `TokioExecutor` types, outside the runtime;
     `Door::new` outside its one owner.
-  - **`cargo xtask clippy`** is the clippy gate: clippy with warnings denied, failing also on a
-    `clippy.toml` ban whose path resolves to nothing (clippy itself only warns). The negative
-    runner skips a case written for another operating system without counting it as skipped.
+  - **`cargo xtask clippy`** is the clippy gate: clippy with warnings denied, in plain text,
+    failing also on a `clippy.toml` ban whose path resolves to nothing (clippy itself only
+    warns). **Ban canaries** (`crates/uaos-egress/tests/bans.rs`) call every banned item under
+    `#[expect]` on the systems where it exists, so a ban that stops firing fails clippy there.
+    The negative runner skips a case written for another operating system without counting it
+    as skipped.
   - **`arch.toml`.** The bin's allow list is now explicit and leaves out the door; the bin
     reaches it only through the runtime. `uaos-module-api` and every Ring 1 crate are banned,
     transitively, from network, TLS and async-I/O crates (new `[ring1] ban`, enforced by
     `cargo xtask arch-check`).
   - **`deny.toml`** bans `ring`.
-  - **Seeded violations (23):** `egress-dials-private-range`, `egress-numeric-host`,
+  - **Seeded violations (24):** `egress-dials-private-range`, `egress-numeric-host`,
     `egress-private-reaches-link-local`, `egress-plaintext-resolved`,
     `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel`,
     `egress-embedded-local`, `egress-ctor-outside-root`, `net-dns-outside-egress`,
     `net-resolver-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
     `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor`,
-    `spawn-through-tokio-executor`, `clippy-ban-path-unresolved`,
+    `spawn-through-tokio-executor`, `clippy-ban-path-unresolved`, `clippy-ban-silenced`,
     `arch-ring1-depends-on-hyper`; on Unix only `net-unix-connect-outside-egress`,
     `net-unix-connect-addr-outside-egress`, `net-tokio-unix-connect-outside-egress`,
     `net-unix-socket-connect-outside-egress`; on Windows only (not run in CI)
     `net-named-pipe-outside-egress`.
-  - **Review:** `docs/reviews/WP3.A5-egress.md`, four rounds, all resolved: 2 High, 4 Medium,
-    9 Low; then 1 High, 2 Medium, 7 Low; then 1 Medium, 5 Low; then 1 Medium, 5 Low. Two fixes
-    rest on ADR-0013 Amendment 1, accepted by the maintainer on 2026-10-16.
+  - **Review:** `docs/reviews/WP3.A5-egress.md`, five rounds, all resolved: 2 High, 4 Medium,
+    9 Low; then 1 High, 2 Medium, 7 Low; then 1 Medium, 5 Low; then 1 Medium, 5 Low; then
+    2 Medium, 4 Low. Two fixes rest on ADR-0013 Amendment 1, accepted by the maintainer on
+    2026-10-16.
 - Dependencies for the ADR-0013 stack: tokio, hyper 1, hyper-util, http, rustls 0.23
   (aws-lc-rs only), tokio-rustls, rustls-native-certs, and rcgen for tests only.
   - 48 cargo-vet exemptions, each with a written reason (the unnoted baseline is unchanged);
