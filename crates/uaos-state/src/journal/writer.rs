@@ -67,7 +67,7 @@ use super::manifest::{
     Manifest, ManifestSchema, READER_VERSION, SegmentEntry, SegmentStatus, is_segment_file_name, segment_file_name,
 };
 use super::scan::{VerifiedRecord, genesis_hash, read_verified};
-use crate::chunks::{ChunkStore, LossCause, LostChunk, ShredReport};
+use crate::chunks::{ChunkStore, LossCause, LostChunk, PendingRewrap};
 
 /// Name of the data-directory lock file.
 pub const LOCK_FILE: &str = "uaos.lock";
@@ -342,7 +342,11 @@ impl Journal {
             // (or reported lost) before those records are made durable below.
             if let Some(store) = &payloads {
                 shreds_to_complete = journaled_shreds(&records);
-                lost_in_tail = recover_tail_payloads(&records, durable, store)?;
+                // A marker vouches for payloads only if the journal coordinated a store when it
+                // was written; a plain journal's marker bounds the copy below and nothing else
+                // (review WP3.A1, fourth round, M1).
+                let payloads_checked = if flagged { durable } else { None };
+                lost_in_tail = recover_tail_payloads(&records, payloads_checked, store)?;
             }
             // The previous process may have acknowledged records the OS holds but never
             // flushed. They move to the new active segment unflushed, so a durable manifest
@@ -428,12 +432,17 @@ impl Journal {
         // Only now are the shred records durable: completing a shred whose record a power loss
         // could still take away would leave references to removed content unexplained. A shred
         // is unfinished while a file of the pair or an older KEK version remains (third round,
-        // L3).
+        // L3). The keychain is asked once per pocket: completing a shred finishes its pocket's
+        // rotation (fourth round, L3).
         if let Some(store) = &self.payloads {
+            let mut rotated: BTreeSet<PocketId> = BTreeSet::new();
             for (pocket, chunk) in shreds_to_complete {
-                if store.shred_incomplete(pocket, chunk).map_err(JournalError::Payload)? {
+                let unrotated =
+                    !rotated.contains(&pocket) && store.rotation_unfinished(pocket).map_err(JournalError::Payload)?;
+                if unrotated || store.pair_remains(pocket, chunk).map_err(JournalError::Payload)? {
                     store.shred_now(pocket, chunk).map_err(JournalError::Payload)?;
                 }
+                rotated.insert(pocket);
             }
         }
         self.update_marker(true).map_err(storage)?;
@@ -441,17 +450,20 @@ impl Journal {
     }
 
     /// Shreds a chunk the way ADR-0018 requires: appends `record` (a `chunk.shredded` record
-    /// naming the chunk in metadata key `chunk`), flushes it, then shreds the chunk in the
-    /// attached store. No other record can be appended meanwhile (this holds the writer), and the
-    /// store forgets the chunk before removing its files, so a record appended afterwards that
-    /// references it is refused until the content is stored again (review WP3.A1, third round,
-    /// H1).
+    /// naming the chunk in metadata key `chunk`), flushes it, then rotates the pocket's KEK and
+    /// removes the chunk in the attached store. No other record can be appended meanwhile (this
+    /// holds the writer), and the store refuses the chunk before anything else, so a record
+    /// appended afterwards that references it is refused until the content is stored again
+    /// (review WP3.A1, third round, H1; fourth round, L2).
+    ///
+    /// The re-wrap of the pocket's other keys, one flushed write per key file, is left to the
+    /// returned [`PendingRewrap`], which runs without the writer (fourth round, M2).
     ///
     /// # Errors
     /// `PayloadsRequired` without a store; `InvalidRecord` for anything but such a record; as
     /// [`Journal::append`] and [`Journal::sync`]; `Payload` if the shred itself fails, in which
     /// case its record is durable and the next open completes it.
-    pub fn shred(&mut self, record: EventDraft) -> Result<ShredReport, JournalError> {
+    pub fn shred(&mut self, record: EventDraft) -> Result<PendingRewrap, JournalError> {
         let Some(store) = self.payloads.clone() else {
             return Err(JournalError::PayloadsRequired);
         };
@@ -473,7 +485,8 @@ impl Journal {
             ))?;
         self.append(record)?;
         self.sync()?;
-        store.shred_now(pocket, chunk).map_err(JournalError::Payload)
+        let removed = store.shred_remove(pocket, chunk).map_err(JournalError::Payload)?;
+        Ok(PendingRewrap::new(store, pocket, removed))
     }
 
     /// Stores the in-memory manifest if it disowned contents that were not yet flushed.
@@ -734,9 +747,11 @@ impl Journal {
         Ok(())
     }
 
-    /// Records the durable point (journals with payloads only), at most once per
-    /// [`MARKER_INTERVAL`] unless `force`. The marker names the last flushed record, and every
-    /// payload up to it is durable or its loss journaled:
+    /// Records the durable point, at most once per [`MARKER_INTERVAL`] unless `force`. The
+    /// marker names the last flushed record. Every journal keeps one; for a journal that
+    /// coordinates a store, every payload up to it is durable or its loss journaled. A plain
+    /// journal's marker bounds only the copy at open: the first open with a store checks the
+    /// whole journal (review WP3.A1, fourth round, M1). The marker:
     /// * it **never moves while a loss is unreported**, set aside by the store, or possibly
     ///   undetected because the store is poisoned (review WP3.A1 H1, H2);
     /// * it is written atomically and flushed, so a power loss leaves the previous or the new
@@ -790,14 +805,21 @@ impl Journal {
     /// and continues in a fresh one; after a flush failure it retries rewriting the
     /// memory-only records to a fresh segment.
     ///
-    /// After a payload flush failure it reads the pending chunks back (the store rewrites the
-    /// readable ones to new files) and journals each loss **before** the flush that makes the
-    /// referencing records durable. Every path ends by journaling any loss still unreported.
+    /// After a payload flush failure, or whenever the attached store is poisoned, it reads the
+    /// pending chunks back (the store rewrites the readable ones to new files) and journals each
+    /// loss **before** the flush that makes the referencing records durable. Every path ends by
+    /// journaling any loss still unreported.
     ///
     /// # Errors
     /// `DiskFull` if there is still no space; `Stopped` if a flush still cannot be recovered;
     /// `Payload` if the chunk store cannot be read back.
     pub fn recover(&mut self) -> Result<(), JournalError> {
+        // A store poisoned while the writer stayed healthy (a failed flush outside `sync`, or a
+        // put whose write overlapped one) is recovered the same way; otherwise its refusals
+        // would outlast every call to `recover` (review WP3.A1, fourth round, L1).
+        if self.health == JournalHealth::Healthy && self.payloads.as_ref().is_some_and(|s| s.is_poisoned()) {
+            self.health = JournalHealth::PayloadFlushFailed;
+        }
         match self.health {
             JournalHealth::Healthy => {}
             // While a loss waits to be journaled, the unflushed records move to a fresh segment
@@ -1215,9 +1237,10 @@ fn journaled_shreds(records: &[VerifiedRecord]) -> Vec<(PocketId, ChunkRef)> {
 /// aside before (a recovery at open, an earlier failed open in this process) are included, and
 /// every record in the journal that references a lost chunk is reported, not only the tail's.
 ///
-/// The durable point is the marker (`durable`) if it is valid. Without one (a store attached
-/// for the first time, or a removed marker) the whole journal is checked: a narrower fallback could skip a
-/// record whose loss was never journaled (review WP3.A1 H1). A record already named by a
+/// The durable point is the marker (`durable`) if it is valid and was written while the journal
+/// coordinated a store. Otherwise (a store attached for the first time, a removed marker) the
+/// whole journal is checked: a narrower fallback could skip a record whose loss was never
+/// journaled (review WP3.A1 H1; fourth round, M1). A record already named by a
 /// `chunk.lost` record is not reported again, and a record whose chunk a later `chunk.shredded`
 /// record names is not a loss. Both are looked up in indexes built once (review WP3.A1 L4).
 fn recover_tail_payloads(

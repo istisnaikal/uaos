@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -42,7 +42,7 @@ use uaos_platform::fs::{AppendFile, Fs, FsError, LockGuard};
 use uaos_platform::sim::fs::SimFs;
 use uaos_platform::sim::{SimClock, SimRng};
 use uaos_platform::{Clock, Rng};
-use uaos_state::chunks::keyring::{KekVersion, MemoryKeyring, PocketKeyring};
+use uaos_state::chunks::keyring::{KekVersion, KeyringError, MemoryKeyring, PocketKeyring};
 use uaos_state::chunks::{CHUNKS_DIR, ChunkDurability, ChunkError, ChunkStore, MAX_PENDING, QUARANTINE_DIR};
 use uaos_state::journal::{
     CHUNK_METADATA_KEY, EventDraft, FlushPolicy, JOURNAL_DIR, Journal, JournalError, JournalHealth,
@@ -859,7 +859,7 @@ fn l5_chunk_records_name_their_chunk_and_a_shred_is_not_a_loss() {
     wrong.payload_ref = Some(chunk);
     assert!(matches!(j.append(wrong), Err(JournalError::InvalidRecord(_))));
     // Through the journal: the record is durable before the content goes.
-    j.shred(shredded_record(chunk, 3)).unwrap();
+    j.shred(shredded_record(chunk, 3)).unwrap().finish().unwrap();
     drop(j);
     drop(store);
     let (store, j) = w.restart(true);
@@ -1490,7 +1490,7 @@ fn r3_h1_after_a_shred_a_record_needs_its_content_stored_again() {
         Some(ChunkError::ShredThroughJournal),
         "a coordinated store shredded without its journal"
     );
-    j.shred(shredded_record(x, 2)).unwrap();
+    j.shred(shredded_record(x, 2)).unwrap().finish().unwrap();
     assert_eq!(
         j.append(draft(Some(pocket()), Some(x), 3)).err(),
         Some(JournalError::PayloadNotStored),
@@ -1664,6 +1664,272 @@ fn r3_l3_a_shred_failing_midway_at_open_is_finished_by_the_next() {
         hits.is_empty(),
         "a retried open left a shred unfinished:\n{}",
         hits.join("\n")
+    );
+}
+
+/// Fourth-round M1: a marker a plain journal wrote says nothing about payloads, so the first
+/// open with a store still checks the whole journal.
+#[test]
+fn r4_m1_a_plain_journals_marker_does_not_skip_the_payload_check() {
+    let w = World::new(960);
+    let plain = || {
+        let clock: Arc<dyn Clock> = w.clock.clone();
+        let rng: Arc<dyn Rng> = w.rng.clone();
+        Journal::open(Arc::new(w.fs.clone()), clock, rng, &w.data, NEVER)
+    };
+    let strict = w.try_store(ChunkDurability::Strict).unwrap();
+    let mut j = plain().unwrap();
+    let x = strict.put(pocket(), &content(1)).unwrap();
+    j.append(draft(Some(pocket()), Some(x), 1)).unwrap();
+    let never_stored = strict.reference(pocket(), &content(2)).unwrap();
+    let unchecked = j.append(draft(Some(pocket()), Some(never_stored), 2)).unwrap().seq.0;
+    j.sync().unwrap();
+    drop(j);
+    drop(plain().unwrap()); // a plain reopen writes a marker naming the last record
+    drop(strict);
+    w.sim.crash();
+    let store = w.store();
+    let _j = w.open(&store).unwrap();
+    assert!(
+        w.survey().1.contains(&unchecked),
+        "the first open with a store trusted a plain journal's marker"
+    );
+    w.assert_never_silent(&store, "r4 m1");
+}
+
+/// Fourth-round M2: a shred through the journal leaves the re-wrap of the pocket's other keys
+/// until the writer is free; the old KEK lives until then, and dropping the remainder finishes
+/// it too.
+#[test]
+fn r4_m2_the_rewrap_runs_after_the_writer_is_free() {
+    let w = World::new(961);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let chunks: Vec<ChunkRef> = (0..20).map(|n| write(&store, &mut j, n).1).collect();
+    j.sync().unwrap();
+    let rewrap = j.shred(shredded_record(chunks[0], 100)).unwrap();
+    write(&store, &mut j, 101); // the writer takes records while the re-wrap is still to run
+    assert_eq!(
+        w.keys.kek_versions(pocket()).unwrap().len(),
+        2,
+        "the shred re-wrapped the pocket while it held the writer"
+    );
+    let report = rewrap.finish().unwrap();
+    assert!(report.removed);
+    assert_eq!(report.rewrapped, 19);
+    assert_eq!(w.keys.kek_versions(pocket()).unwrap().len(), 1);
+    drop(j.shred(shredded_record(chunks[1], 102)).unwrap());
+    assert_eq!(
+        w.keys.kek_versions(pocket()).unwrap().len(),
+        1,
+        "a dropped re-wrap left the old KEK alive"
+    );
+    for c in &chunks[2..] {
+        assert!(store.get(pocket(), *c).is_ok());
+    }
+    j.sync().unwrap();
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    w.assert_never_silent(&store, "r4 m2");
+    assert_eq!(store.get(pocket(), chunks[0]).err(), Some(ChunkError::Unavailable));
+}
+
+/// Fourth-round L1: a put whose write overlaps a failed directory flush is not acknowledged,
+/// even when a recovery cleared the poisoning before it joined the pending set; the next
+/// recovery rewrites it.
+#[test]
+fn r4_l1_a_put_spanning_a_failed_directory_flush_is_recovered_with_it() {
+    let w = World::new(962);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    write(&store, &mut j, 1);
+    w.fs.key_write.arm();
+    let t = {
+        let s = Arc::clone(&store);
+        std::thread::spawn(move || s.put(pocket(), &content(2)))
+    };
+    w.fs.key_write.wait_held(); // its data file is written, its key file not yet
+    w.sim.fail_sync_after(2); // both files of chunk 1 flush, then the data-directory flush fails
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    j.recover().unwrap();
+    assert!(!store.is_poisoned());
+    w.fs.key_write.release();
+    assert_eq!(
+        t.join().unwrap().err(),
+        Some(ChunkError::FlushFailed),
+        "a put spanning the failed flush was acknowledged after recovery missed it"
+    );
+    assert!(store.is_poisoned(), "the put left no recovery to include it");
+    j.recover().unwrap();
+    let y = write(&store, &mut j, 2).1;
+    j.sync().unwrap();
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    w.assert_never_silent(&store, "r4 l1");
+    assert_eq!(store.get(pocket(), y).ok(), Some(content(2)));
+}
+
+/// A keyring whose next rotation fails, once.
+#[derive(Debug)]
+struct FailRotate {
+    inner: Arc<MemoryKeyring>,
+    fail: AtomicBool,
+}
+
+impl PocketKeyring for FailRotate {
+    fn cas_key(&self, p: PocketId) -> Result<Arc<uaos_platform::crypto::SecretKey>, KeyringError> {
+        self.inner.cas_key(p)
+    }
+    fn current_kek(&self, p: PocketId) -> Result<(KekVersion, Arc<uaos_platform::crypto::SecretKey>), KeyringError> {
+        self.inner.current_kek(p)
+    }
+    fn kek(&self, p: PocketId, v: KekVersion) -> Result<Arc<uaos_platform::crypto::SecretKey>, KeyringError> {
+        self.inner.kek(p, v)
+    }
+    fn rotate_kek(&self, p: PocketId) -> Result<KekVersion, KeyringError> {
+        if self.fail.swap(false, Ordering::SeqCst) {
+            return Err(KeyringError::Unavailable("injected".to_owned()));
+        }
+        self.inner.rotate_kek(p)
+    }
+    fn retire_keks_before(&self, p: PocketId, v: KekVersion) -> Result<(), KeyringError> {
+        self.inner.retire_keks_before(p, v)
+    }
+    fn kek_versions(&self, p: PocketId) -> Result<Vec<KekVersion>, KeyringError> {
+        self.inner.kek_versions(p)
+    }
+}
+
+/// Fourth-round L2: whichever step of a shred fails after its record is durable (here the KEK
+/// rotation, then a file removal), the store neither vouches for the content nor serves it
+/// until it is stored again, and the next open completes the shred.
+#[test]
+fn r4_l2_a_failed_shred_never_vouches_for_its_content() {
+    for rotation_fails in [true, false] {
+        let w = World::new(963);
+        let keys = Arc::new(FailRotate {
+            inner: Arc::clone(&w.keys),
+            fail: AtomicBool::new(false),
+        });
+        let rng: Arc<dyn Rng> = w.rng.clone();
+        let k: Arc<dyn PocketKeyring> = keys.clone();
+        let store = Arc::new(
+            ChunkStore::open_with(Arc::new(w.fs.clone()), rng, k, &w.data, ChunkDurability::Balanced).unwrap(),
+        );
+        let mut j = w.open(&store).unwrap();
+        let (_, x) = write(&store, &mut j, 1);
+        let (_, kept) = write(&store, &mut j, 2);
+        j.sync().unwrap();
+        if rotation_fails {
+            keys.fail.store(true, Ordering::SeqCst);
+        } else {
+            w.fs.fail_key_remove.store(true, Ordering::SeqCst);
+        }
+        assert!(matches!(j.shred(shredded_record(x, 3)), Err(JournalError::Payload(_))));
+        assert_eq!(
+            j.append(draft(Some(pocket()), Some(x), 4)).err(),
+            Some(JournalError::PayloadNotStored),
+            "rotation fails {rotation_fails}: a record referenced content whose shred is recorded"
+        );
+        assert_eq!(store.get(pocket(), x).err(), Some(ChunkError::Unavailable));
+        assert!(store.get(pocket(), kept).is_ok());
+        j.sync().unwrap();
+        drop(j);
+        drop(store);
+        let (store, _j) = w.restart(true);
+        w.assert_never_silent(&store, "r4 l2");
+        assert_eq!(store.get(pocket(), x).err(), Some(ChunkError::Unavailable));
+        assert_eq!(w.keys.kek_versions(pocket()).unwrap().len(), 1);
+    }
+}
+
+/// Fourth-round L2: storing the content again after a failed shred makes it referenceable.
+#[test]
+fn r4_l2_storing_the_content_again_lifts_the_refusal() {
+    let w = World::new(964);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    j.sync().unwrap();
+    w.fs.fail_key_remove.store(true, Ordering::SeqCst);
+    assert!(j.shred(shredded_record(x, 2)).is_err());
+    assert_eq!(store.put(pocket(), &content(1)).unwrap(), x);
+    assert_eq!(
+        store.pending_len(),
+        0,
+        "a put wrote a fresh pair with the journal over the pair a failed shred left"
+    );
+    let again = j.append(draft(Some(pocket()), Some(x), 3)).unwrap().seq.0;
+    w.clock.advance(1_100_000_000);
+    j.sync().unwrap();
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    w.assert_never_silent(&store, "r4 l2 again");
+    assert!(w.survey().0.iter().any(|(s, _, _)| *s == again));
+    assert_eq!(store.get(pocket(), x).ok(), Some(content(1)));
+}
+
+/// A keyring that counts how often it is asked for a pocket's KEK versions.
+#[derive(Debug)]
+struct CountVersions {
+    inner: Arc<MemoryKeyring>,
+    calls: AtomicUsize,
+}
+
+impl PocketKeyring for CountVersions {
+    fn cas_key(&self, p: PocketId) -> Result<Arc<uaos_platform::crypto::SecretKey>, KeyringError> {
+        self.inner.cas_key(p)
+    }
+    fn current_kek(&self, p: PocketId) -> Result<(KekVersion, Arc<uaos_platform::crypto::SecretKey>), KeyringError> {
+        self.inner.current_kek(p)
+    }
+    fn kek(&self, p: PocketId, v: KekVersion) -> Result<Arc<uaos_platform::crypto::SecretKey>, KeyringError> {
+        self.inner.kek(p, v)
+    }
+    fn rotate_kek(&self, p: PocketId) -> Result<KekVersion, KeyringError> {
+        self.inner.rotate_kek(p)
+    }
+    fn retire_keks_before(&self, p: PocketId, v: KekVersion) -> Result<(), KeyringError> {
+        self.inner.retire_keks_before(p, v)
+    }
+    fn kek_versions(&self, p: PocketId) -> Result<Vec<KekVersion>, KeyringError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.kek_versions(p)
+    }
+}
+
+/// Fourth-round L3: open asks the keychain for a pocket's KEK versions once, however many shreds
+/// the journal records in it.
+#[test]
+fn r4_l3_open_asks_the_keychain_once_per_pocket() {
+    let w = World::new(965);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let chunks: Vec<ChunkRef> = (0..10).map(|n| write(&store, &mut j, n).1).collect();
+    j.sync().unwrap();
+    for (n, c) in (100..).zip(&chunks) {
+        j.shred(shredded_record(*c, n)).unwrap().finish().unwrap();
+    }
+    drop(j);
+    drop(store);
+    w.sim.crash();
+    let keys = Arc::new(CountVersions {
+        inner: Arc::clone(&w.keys),
+        calls: AtomicUsize::new(0),
+    });
+    let rng: Arc<dyn Rng> = w.rng.clone();
+    let k: Arc<dyn PocketKeyring> = keys.clone();
+    let store =
+        Arc::new(ChunkStore::open_with(Arc::new(w.fs.clone()), rng, k, &w.data, ChunkDurability::Balanced).unwrap());
+    keys.calls.store(0, Ordering::SeqCst);
+    let _j = w.open(&store).unwrap();
+    assert_eq!(
+        keys.calls.load(Ordering::SeqCst),
+        1,
+        "open asked the keychain once per recorded shred"
     );
 }
 

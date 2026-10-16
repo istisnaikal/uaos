@@ -191,6 +191,9 @@ negative = [
   "shred-bypasses-journal",
   "shreds-before-manifest-at-open",
   "shred-incomplete-key-only",
+  "plain-marker-trusted",
+  "put-overlapping-failed-flush",
+  "failed-shred-vouched",
 ]
 
 [[gate]]

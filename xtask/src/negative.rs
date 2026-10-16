@@ -528,8 +528,8 @@ pub(crate) fn cases() -> Vec<Case> {
             // WP3.A1 second round: a journaled shred a crash interrupted, left readable.
             seed: replace(
                 "crates/uaos-state/src/journal/writer.rs",
-                "                if store.shred_incomplete(pocket, chunk).map_err(JournalError::Payload)? {",
-                "                if false && store.shred_incomplete(pocket, chunk).map_err(JournalError::Payload)? {",
+                "                if unrotated || store.pair_remains(pocket, chunk).map_err(JournalError::Payload)? {",
+                "                if false && (unrotated || store.pair_remains(pocket, chunk).map_err(JournalError::Payload)?) {",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -583,6 +583,56 @@ pub(crate) fn cases() -> Vec<Case> {
                 args: &["test", "-p", "uaos-state", "--test", "durability", "r3_m2_shreds_at_open_wait_for_the_manifest"],
             },
             expect: "r3 m2: record",
+        },
+        Case {
+            id: "plain-marker-trusted",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 fourth round M1: the first open with a store trusts a plain journal's marker.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "                let payloads_checked = if flagged { durable } else { None };",
+                "                let payloads_checked = durable;",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r4_m1_a_plain_journals_marker_does_not_skip_the_payload_check"],
+            },
+            expect: "trusted a plain journal's marker",
+        },
+        Case {
+            id: "put-overlapping-failed-flush",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 fourth round L1: a put whose write overlapped a failed directory flush is
+            // acknowledged after a recovery that missed it.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "            if self.poison.load(Ordering::SeqCst) != started {",
+                "            if false && self.poison.load(Ordering::SeqCst) != started {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r4_l1_a_put_spanning_a_failed_directory_flush_is_recovered_with_it"],
+            },
+            expect: "acknowledged after recovery missed it",
+        },
+        Case {
+            id: "failed-shred-vouched",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 fourth round L2: after a shred fails midway, the store vouches for the content
+            // from disk, so a later record cancels the journaled shred.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "        if locked(&self.shredding).contains(&key) {\n            return Ok(false);",
+                "        if false && locked(&self.shredding).contains(&key) {\n            return Ok(false);",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r4_l2_a_failed_shred_never_vouches_for_its_content"],
+            },
+            expect: "a record referenced content whose shred is recorded",
         },
         Case {
             id: "shred-incomplete-key-only",
