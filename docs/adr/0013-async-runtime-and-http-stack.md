@@ -106,6 +106,15 @@ on the PR-5 branch.
 - **Second residual.** Windows downloads some roots on demand. A root that has never been
   downloaded on this machine is absent from the local store, so a provider whose chain ends in
   it fails to verify until it is present. `uaos doctor` must diagnose this (M3).
+- **Further residuals of the root store** (review round 2, L3):
+  - `rustls-native-certs` lets the environment variables `SSL_CERT_FILE` and `SSL_CERT_DIR`
+    replace the operating system's store on every platform. That is an ambient input the
+    project otherwise bans; `uaos doctor` must show when it is in effect (M3).
+  - Certificates in the store that fail to parse are skipped; a partly read store is used.
+  - On Windows the loader takes the roots without consulting the Disallowed store or partial
+    distrust dates, so a root the OS distrusts only in part is trusted fully.
+  - An upstream that declares its own roots must declare at least one; an empty list is
+    refused when the door is built.
 - **Alternative rejected.** Keeping the platform verifier as an explicit opt-in, documented as
   a residual. It keeps a channel any peer can drive, for a check that only matters when a
   certificate is revoked early.
@@ -141,12 +150,17 @@ on the PR-5 branch.
   - It runs TLS with the upstream's own name, on aws-lc-rs, against the system's roots or the
     declared ones (Amendment 1A).
 - **Private upstreams.** They must be declared (`allow_private`), and then reach only loopback,
-  private (RFC 1918) and unique-local addresses, never link-local or another special range.
-  Plain HTTP is dialled only at pinned local addresses and is never resolved.
+  private (RFC 1918) and unique-local addresses, never link-local or another special range. An
+  IPv6 form that only embeds a local IPv4 address (IPv4-compatible, NAT64, 6to4) is never
+  local, because its traffic leaves the machine, and the IPv6 metadata endpoints inside
+  `fc00::/7` (`fd00:ec2::254`, `fd20:ce::254`) are refused as such. Plain HTTP is dialled only
+  at pinned local addresses and is never resolved.
 - **`Door::send`.**
   - **Refusals before any contact:** a request bound to another Operation, an undeclared
-    upstream, an oversized body, a path that does not start with `/`, a credential-bearing
-    header from the caller (`authorization`, `cookie`, provider key headers), an open circuit,
+    upstream, an oversized body, a path that does not start with `/`, any of the listed
+    credential-bearing headers from the caller (`CREDENTIAL_HEADERS`: `authorization`,
+    `cookie`, provider key headers and others; checked before anything is stripped; credentials
+    elsewhere, such as in the query string, are not caught here), an open circuit,
     and a second send for the same Operation (a bounded replay window). Only the last consumes
     the Operation.
   - **Headers:** it builds the URI from the upstream's name and port, so the path cannot change
@@ -155,7 +169,8 @@ on the PR-5 branch.
   - **No hidden behaviour:** it returns redirects without following them, and hyper-util's
     transparent retry is switched off.
   - **Breaker:** each upstream has a circuit that counts only transport failures and, after its
-    cooldown, lets exactly one probe through.
+    cooldown, lets exactly one probe through. Every admitted attempt is settled exactly once,
+    also when its caller drops the request: a cancelled probe lets the next attempt probe.
 - **The credential's value** is marked sensitive when the `Credential` is built and never
   appears in its `Debug` output.
 - **Connection tasks.** They run on an executor the caller passes in. The runtime passes its
@@ -168,13 +183,21 @@ on the PR-5 branch.
   - name resolution: `lookup_host` and `ToSocketAddrs::to_socket_addrs`, which needs no
     dependency at all;
   - UDP: `UdpSocket::bind` (std and tokio);
-  - another HTTP client: hyper-util's `HttpConnector::new` and `build_http`.
+  - another HTTP client: hyper-util's `HttpConnector::new`, `new_with_resolver` and
+    `build_http`;
+  - Unix-socket connects (std and tokio; these paths exist only on Unix);
+  - listening: `TcpListener::bind` (std and tokio), whose owner will be the API crate, because
+    binding opens a network handle and `bind` with a name resolves it.
 
-  Spawning (`tokio::task::{spawn, spawn_blocking, spawn_local}`, `JoinSet::spawn`,
-  `Handle`/`Runtime` spawns, `std::thread::{spawn, Builder::spawn}`) is banned outside the
-  runtime, and `Door::new` everywhere but its one owner. These bans cover the listed entry
-  points. A dependency that opens sockets itself is kept out by `arch.toml` and supply-chain
-  review.
+  Spawning (`tokio::task::{spawn, spawn_blocking, spawn_local}`, the `JoinSet` and `LocalSet`
+  spawns, `Handle`/`Runtime` spawns, `std::thread::{spawn, Builder::spawn, scope}`) is banned
+  outside the runtime, and `Door::new` everywhere but its one owner. These bans cover the
+  listed entry points. A dependency that opens sockets itself is kept out by `arch.toml` and
+  supply-chain review. `cargo xtask allow-audit` checks owners per lint, not per method, so a
+  file that owns one disallowed method could allow another; review of each `allow` covers that.
+  **Known exception:** the system resolver (`tokio::net::lookup_host`) runs `getaddrinfo` on
+  tokio's blocking pool, outside the supervisor; the resolution timeout stops the wait, not the
+  thread. Moving resolution onto the supervisor's pool is runtime work (PR-6).
 - **`arch.toml`.**
   - The bin's allow list is explicit and leaves out `uaos-egress` (Amendment 1B).
   - `uaos-module-api` and every Ring 1 crate are banned, transitively, from tokio, hyper,
@@ -182,20 +205,24 @@ on the PR-5 branch.
 - **`deny.toml`.** `ring` is banned, so TLS stays on aws-lc-rs.
 - **Seeded violations:**
   - for the door's behaviour: `egress-dials-private-range`, `egress-numeric-host`,
-    `egress-private-reaches-link-local`, `egress-plaintext-resolved` and
-    `egress-breaker-admits-after-cooldown`;
+    `egress-private-reaches-link-local`, `egress-plaintext-resolved`,
+    `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel` and
+    `egress-embedded-local`;
   - for the clippy bans: `egress-ctor-outside-root`, `net-dns-outside-egress`,
-    `net-connect-outside-egress`, `net-udp-outside-egress` and `spawn-outside-supervisor`;
+    `net-connect-outside-egress`, `net-udp-outside-egress`, `net-listen-outside-api` and
+    `spawn-outside-supervisor`;
   - for the arch rules: `arch-ring1-depends-on-hyper`.
 
 **Verified.**
-- **11 unit tests**, including five property tests:
+- **17 unit tests**, including six property tests, the breaker's state machine and the
+  dial path's own refusals:
   - IPv4-mapped addresses follow their IPv4 verdict;
   - nothing outside 2000::/3 is public;
   - every embedding form is refused whatever its inner address;
-  - the local network is exactly loopback, private and unique-local;
+  - the local network is exactly loopback, private and unique-local, and no embedding form
+    is ever local;
   - nothing the standard library calls special is ever allowed.
-- **19 integration tests** against loopback mocks. They read what the mock received and the
+- **21 integration tests** against loopback mocks. They read what the mock received and the
   door's own counters, and cover:
   - the header policy;
   - op binding and replay;
@@ -205,7 +232,8 @@ on the PR-5 branch.
   - a private upstream never reaching link-local;
   - plain HTTP only to pinned local addresses, unresolved;
   - zero contact at construction;
-  - the breaker opening and its single probe;
+  - the breaker opening, its single probe, and a cancelled probe;
+  - an upstream that declares no root, refused when the door is built;
   - a stranger's certificate, and a trusted authority's certificate for another name, both
     refused with no request received;
   - an oversized body refused with no connection;
