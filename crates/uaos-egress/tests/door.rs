@@ -889,22 +889,76 @@ async fn a_content_length_beside_transfer_encoding_is_dropped() {
     );
 }
 
-/// Round 14, L2: a transfer coding other than `chunked` would reach the caller coded and
-/// unmarked once `transfer-encoding` is stripped; it is an error.
+/// Rounds 14 and 15 (L2, L1): anything but exactly what hyper de-frames, one field whose value is
+/// `chunked`, would reach the caller still coded or still framed once `transfer-encoding` is
+/// stripped; it is an error.
 #[tokio::test]
 async fn a_transfer_coding_other_than_chunked_is_an_error() {
-    let door =
-        raw_upstream(b"HTTP/1.1 200 OK\r\ntransfer-encoding: gzip, chunked\r\n\r\n5\r\nabcde\r\n0\r\n\r\n").await;
-    let got = door.send(op(1), request(op(1), "local"), None).await;
+    for raw in [
+        &b"HTTP/1.1 200 OK\r\ntransfer-encoding: gzip, chunked\r\n\r\n5\r\nabcde\r\n0\r\n\r\n"[..],
+        &b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked,\r\n\r\n5\r\nabcde\r\n0\r\n\r\n"[..],
+        &b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\ntransfer-encoding:\r\n\r\n5\r\nabcde\r\n0\r\n\r\n"[..],
+        &b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked, chunked\r\n\r\n5\r\nabcde\r\n0\r\n\r\n"[..],
+    ] {
+        let door = raw_upstream(raw).await;
+        let got = door.send(op(1), request(op(1), "local"), None).await;
+        assert!(
+            matches!(
+                got,
+                Err(EgressError::Unreachable(
+                    "the upstream used a transfer coding the door does not decode"
+                ))
+            ),
+            "a coded body reached the caller unmarked: {:?} for {:?}",
+            got.map(|r| r.headers),
+            String::from_utf8_lossy(raw)
+        );
+    }
+}
+
+/// Round 15, L2: hyper checks `content-length` only where it reads a body. A `204` keeps none,
+/// and for a HEAD request or a `304` it is forwarded only as one length in digits.
+#[tokio::test]
+async fn content_length_on_answers_without_a_body() {
+    let head = |raw: &'static [u8]| async move {
+        let door = raw_upstream(raw).await;
+        let mut sent = request(op(1), "local");
+        sent.method = Method::HEAD;
+        let got = door.send(op(1), sent, None).await.unwrap();
+        got.headers
+            .get_all("content-length")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let get = |raw: &'static [u8]| async move {
+        let door = raw_upstream(raw).await;
+        let got = door.send(op(1), request(op(1), "local"), None).await.unwrap();
+        got.headers
+            .get_all("content-length")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     assert!(
-        matches!(
-            got,
-            Err(EgressError::Unreachable(
-                "the upstream used a transfer coding the door does not decode"
-            ))
-        ),
-        "a coded body reached the caller unmarked: {:?}",
-        got.map(|r| r.headers)
+        get(b"HTTP/1.1 204 No Content\r\ncontent-length: 100\r\n\r\n")
+            .await
+            .is_empty(),
+        "a 204 kept its content-length"
+    );
+    assert!(
+        head(b"HTTP/1.1 200 OK\r\ncontent-length: 5, 7\r\n\r\n")
+            .await
+            .is_empty()
+    );
+    assert!(
+        get(b"HTTP/1.1 304 Not Modified\r\ncontent-length: abc, 9\r\n\r\n")
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        head(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\ncontent-length: 5\r\n\r\n").await,
+        vec![HeaderValue::from_static("5")]
     );
 }
 
