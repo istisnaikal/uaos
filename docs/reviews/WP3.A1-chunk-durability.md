@@ -9,7 +9,8 @@ process. The High findings blocked merge.
 **Resolution:** every High and Medium finding fixed with a regression test; Low findings fixed or
 accepted with a reason. The property test, extended as M6 asked, then found four more defects
 (N1–N4), all fixed and pinned. One item needs a maintainer decision (L7). A second V1 review of
-the fixes is pending; the PR stays draft until it is clean.
+the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up;
+all are fixed below. The PR stays a draft until a third review is clean.
 
 ## Findings as reported
 
@@ -113,8 +114,27 @@ perform them: the `chunk.shredded` record is written and flushed first.
 
 ## Bench
 
-The fixes cost nothing measurable on the balanced put path: p50 1.14 ms, p95 1.34 ms, p99 1.55 ms
-on the reference machine, against 1.20/1.69/1.93 ms for `2cf78f8` in the same session
+The fixes did not make the balanced put path slower: p50 1.14 ms, p95 1.34 ms, p99 1.55 ms on
+the reference machine, against 1.20/1.69/1.93 ms for `2cf78f8` in the same session (run once, so
+one comparison, not a measured improvement)
 (`docs/adr/appendix/0018-chunk-put-2026-10-15.md`). One measurement lesson is recorded there: builds
 in the target directory shared by several worktrees produced byte-different binaries of the same
 code that ran about 0.5 ms slower, so bench numbers now come only from a dedicated target.
+
+## Second review (2026-10-16)
+
+**Reviewed:** `35895c7`, `fc4b5a8`, `9865502` by a fresh-context agent with the same checklist,
+in a scratch export. **Result:** 1 High · 1 Medium · 6 Low, plus two pre-existing defects.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| H1 | **Introduced by the fixes.** Open stored the manifest that marked the old segment suspect at the marker *before* the copied records were flushed. The marker lags by up to a second, so records the previous run had flushed and acknowledged after it existed only in the unflushed copy; a power loss right after the manifest write, or a failed open's flush and rewrite, lost them | The manifest is stored only after the copied records and their `chunk.lost` records are flushed; until then the old manifest names the old file, and the marker cannot move while the manifest is unstored | `r2_h1_a_power_loss_during_open_keeps_what_the_previous_run_flushed` (a filesystem that dies right after the manifest write), `r2_h1_a_failed_open_keeps_what_the_previous_run_flushed` (every fault position, both disk models, crash or power loss); negative `open-stores-manifest-before-flush` **PROVEN**; the property test now follows a failed open with a power loss too |
+| M1 | Several fixes were pinned by no test: (1) disk-full recovery with an unreported loss flushing; (2) the same after a failed relocation; (3) the marker guard alone; (4) `is_stored` trusting an earlier process's pair; (5) a vanished pending file treated as flushed; (6) a loss set aside only after its quarantine | One deterministic test for each of (1), (2), (4), (5), (6), each checked to fail with its fix reverted. **Accepted for (3):** the marker guard is now defence in depth; the states it blocks are refused earlier (`sync` refuses with an unreported loss, a poisoned store fails the payload flush, and open recovers a poisoned store) | `r2_m1_*` (five tests); negatives `is-stored-trusts-earlier-pair`, `flush-skips-missing-pending-file`, `loss-set-aside-after-quarantine` **PROVEN** for the three that can lose content silently |
+| L1 | Open ignored a store poisoned, or holding set-aside losses, before the journal attached, wrote no marker, and so allowed a later plain open | Open recovers a poisoned store first. Losses the store set aside are reported for every record in the journal that references them; with no journal yet, none can be referenced | `r2_l1_a_store_poisoned_before_the_journal_attached_is_recovered_at_open` |
+| L2 | Only `sync_pending` poisoned the store; failed directory flushes elsewhere did not | In balanced mode, any failed flushed write or chunk-directory flush poisons the store. The docs say so | `r2_l2_a_failed_directory_flush_poisons_a_balanced_store` |
+| L3 | `verify_and_sync` dropped the losses it had found when it failed midway | It sets each loss aside in the store before quarantining it; open takes them | Covered by the L1 path (losses taken at open) |
+| L4 | A loss could be reported twice when a chunk was lost again after its first report was appended but not flushed | Records an unflushed `chunk.lost` already names are skipped | Fixed by construction; no deterministic test (it needs a concurrent put between two recovery steps) |
+| L5 | `PendingFull` had no test and its contract was unstated | `put` documents that the caller flushes the journal and retries | `r2_l5_pending_full_is_refused_and_cleared_by_a_flush` (16,384 puts; the simulated filesystem no longer collects garbage on every rename, which made this quadratic) |
+| L6 | The appendix said "within run-to-run noise" although `2cf78f8` measured slower and was run once | The text states the measured difference and that it is one comparison | review of the text |
+| Pre-existing | A shred that rotated the KEK and then crashed before removing the files: the store's startup re-wrapped the leftover key, and the content stayed readable | The journal completes, at open, every shred it recorded whose pair is still on disk, **after** the open's flush. Completing it earlier was found by the crash schedules to act on a shred record a power loss could still take away | `a_shred_interrupted_after_its_record_is_completed_at_open`, `r2_a_shred_is_completed_only_once_its_record_is_durable`; negative `shred-not-completed-at-open` **PROVEN** |
+| Pre-existing | `get` racing a shred of another chunk could report existing content as unavailable | `get` holds the rotation lock shared | By construction (lock order unchanged: rotation only) |
