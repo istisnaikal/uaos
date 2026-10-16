@@ -181,7 +181,10 @@ mod tests {
     use super::*;
 
     /// Rounds 7 and 8 (M2, M1): every method refuses network and device paths, in every
-    /// spelling, before any call; local ones pass.
+    /// prefix spelling, before any call; local ones pass. DOS device names in the last
+    /// component (`C:\data\NUL`) are not refused: every file UAOS opens has a name UAOS chooses,
+    /// and the data directory, which configuration names, is owed with M3 (review WP3.A5,
+    /// round 9).
     #[cfg(windows)]
     #[test]
     fn network_and_device_paths_are_refused() {
