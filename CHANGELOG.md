@@ -59,9 +59,10 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     found by the extended property test after the fixes, a second round: 1 High, 1 Medium,
     6 Low, a third: 1 High, 3 Medium, 5 Low, a fourth: 2 Medium, 4 Low, a fifth: 2 Medium,
     3 Low, a sixth: 4 Low, a seventh: 1 Medium, 2 Low, an eighth: 1 Low, a ninth: 4 Low, a
-    tenth: 4 Low, and an eleventh: 1 High, 3 Low).
-    New codes
-    `STORE_PAYLOAD_LOST` and `STORE_PAYLOAD_FLUSH_FAILED`.
+    tenth: 4 Low, an eleventh: 1 High, 3 Low, and a twelfth: 3 Low). New codes
+    `STORE_PAYLOAD_LOST` (content whose loss was journaled reads back as lost:
+    `ChunkError::Lost`) and `STORE_PAYLOAD_FLUSH_FAILED`. ADR-0003 §3 and §5 carry amendment
+    notes pointing to ADR-0018.
 
 - `uaos-policy` hardening after the retroactive review (`docs/reviews/WP2.1-policy.md`; ADR-0008
   Amendment 1):
@@ -228,9 +229,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   `fc4b5a8`; not re-measured after later rounds), where file
   creation dominates. Until the state actor (WP3.3), the request whose append finds the flush
   window due pays for the flush.
-- Gate `journal-durability` gains twenty-nine more seeded violations, one per class found by
+- Gate `journal-durability` gains thirty more seeded violations, one per class found by
   the WP3.A1 review rounds (every round but the eighth, which added a property test) and the
-  extended property tests (thirty-three for ADR-0018 with the four above, thirty-four in the
+  extended property tests (thirty-four for ADR-0018 with the four above, thirty-five in the
   gate). The nightly lane runs both chunk-durability properties at 20,000 schedules each per
   OS; merges run 64. Their oracles require, after a process crash, the payload of every
   acknowledged record no failed flush could have dropped, and a clean recovery to leave

@@ -2645,6 +2645,39 @@ fn r11_l1_a_loss_is_queued_once() {
     assert_eq!(reports, 1, "record {seq} has {reports} chunk.lost records");
 }
 
+// ── Twelfth review (WP3.A1, twelfth round) ─────────────────────────────────────────────────
+
+/// Twelfth-round L3: content whose loss was journaled read back as `Unavailable`, whose message
+/// says "never stored or shredded"; it reads back as lost (`STORE_PAYLOAD_LOST`), also after a
+/// restart.
+#[test]
+fn r12_l3_lost_content_reads_back_as_lost() {
+    let w = World::new(1201);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, x) = write(&store, &mut j, 1); // unflushed, its payload pending
+    w.sim.fail_next_sync(); // the payload's bytes are dropped
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    j.recover().unwrap();
+    assert!(w.survey().1.contains(&seq), "the loss was not journaled");
+    assert_eq!(
+        store.get(pocket(), x),
+        Err(ChunkError::Lost),
+        "lost content read back as never stored or shredded"
+    );
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(false);
+    assert_eq!(store.get(pocket(), x), Err(ChunkError::Lost));
+    assert_eq!(
+        ChunkError::Lost.code(),
+        uaos_contracts::error::codes::STORE_PAYLOAD_LOST
+    );
+    // Stored again, it reads back.
+    store.put(pocket(), &content(1)).unwrap();
+    assert_eq!(store.get(pocket(), x).ok(), Some(content(1)));
+}
+
 /// First-round L4 and tenth-round L2: an open that finds one lost chunk referenced by more
 /// records than it lists journals a loss for every one and lists the latest `MAX_LOST_LISTED`.
 #[test]
@@ -2911,9 +2944,12 @@ proptest! {
                         Some((s, j))
                     };
                     let mut lost_power = power;
+                    let clean = !w.sim.sync_fault_pending() && !w.fs.append_fault_pending();
                     (store, journal) = if let Some(pair) = reopen(&w) {
                         pair
                     } else {
+                        // Only an armed fault may fail an open (round 12).
+                        prop_assert!(!clean, "an open with no fault armed failed");
                         w.sim.clear_sync_fault();
                         w.fs.clear_append_fault();
                         if acked.len().is_multiple_of(2) {
@@ -2935,6 +2971,15 @@ proptest! {
                     let present: BTreeSet<u64> = records.iter().map(|(s, _, _)| *s).collect();
                     acked.retain(|s, _| present.contains(s));
                     exposed.retain(|s| acked.contains_key(s));
+                    // An open verifies every surviving record's payload and makes it durable, so a
+                    // record whose payload reads back and no `chunk.lost` names is safe from any
+                    // later failed flush (round 12).
+                    let (records, reported, _) = w.survey();
+                    for (seq, _, chunk) in &records {
+                        if !reported.contains(seq) && store.get(pocket(), *chunk).is_ok() {
+                            exposed.remove(seq);
+                        }
+                    }
                 }
             }
         }
@@ -3130,9 +3175,12 @@ proptest! {
                         Some((s, j))
                     };
                     let mut lost_power = power;
+                    let clean = !w.sim.sync_fault_pending() && !w.fs.append_fault_pending();
                     (store, journal) = if let Some(pair) = reopen(&w) {
                         pair
                     } else {
+                        // Only an armed fault may fail an open (round 12).
+                        prop_assert!(!clean, "an open with no fault armed failed");
                         w.sim.clear_sync_fault();
                         w.fs.clear_append_fault();
                         if acked.len().is_multiple_of(2) {
@@ -3155,6 +3203,15 @@ proptest! {
                     let present: BTreeSet<u64> = records.iter().map(|(s, _, _)| *s).collect();
                     acked.retain(|s, _| present.contains(s));
                     exposed.retain(|s| acked.contains_key(s));
+                    // An open verifies every surviving record's payload and makes it durable, so a
+                    // record whose payload reads back and no `chunk.lost` names is safe from any
+                    // later failed flush (round 12).
+                    let (records, reported, _) = w.survey();
+                    for (seq, _, chunk) in &records {
+                        if !reported.contains(seq) && store.get(pocket(), *chunk).is_ok() {
+                            exposed.remove(seq);
+                        }
+                    }
                     shred_written.clear();
                     last_put.clear();
                 }

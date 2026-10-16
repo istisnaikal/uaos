@@ -12,7 +12,7 @@ accepted with a reason. The property test, extended as M6 asked, then found four
 the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up,
 a third found 1 High, 3 Medium and 5 Low, a fourth 2 Medium and 4 Low, a fifth 2 Medium and
 3 Low, a sixth 4 Low, a seventh 1 Medium and 2 Low, an eighth 1 Low, a ninth 4 Low, a tenth
-4 Low, and an eleventh 1 High and 3 Low; all are fixed below.
+4 Low, an eleventh 1 High and 3 Low, and a twelfth 3 Low; all are fixed below.
 The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
@@ -324,3 +324,30 @@ closed; the power-loss excuse and the pruned exposure set are sound.
 **Verified locally (Windows, dedicated target directory):** 68 durability tests and the rest of
 `uaos-state`, `uaos-testkit` and `uaos-ledger`; workspace clippy with warnings denied; 3 × 4,000
 and 2 × 20,000 schedules of each property, in release; the 34 `journal-durability` negatives.
+
+## Twelfth review (2026-10-16)
+
+**Reviewed:** `dae8763` (on `555494b`) by a fresh-context agent, in a scratch export, with the
+writer's health state machine reviewed transition by transition. **Result:** 0 High · 0 Medium ·
+3 Low, all in docs and messages; no durability, loss-ordering, open, shred or KEK defect. The
+reviewer's own probes passed 40,000 schedules of each property extended with full-disk episodes
+and two more append-fault shapes, 20,000 + 60,000 more with two stricter oracles, and 1,560
+iterations of a concurrent stress (puts, reads and direct flushes on one thread, re-wraps on
+another, the journal with faults on a third).
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | ADR-0003 still said open flushes the previous run's records before it seals the segment, the mechanism N4 replaced; ADR-0018 said it amends only ADR-0003 §5 | ADR-0003 §3 and §5 carry dated amendment notes pointing to ADR-0018, and ADR-0018 lists both | review of the text |
+| L2 | `PayloadsRequired`'s doc said `journal/FLUSHED` forces the store, and the layout comment said `FLUSHED` exists only with a store; since the third round's M1, `journal/PAYLOADS` does that and every journal keeps `FLUSHED` | Both comments corrected; `journal/PAYLOADS` added to the layout | review of the text |
+| L3 | Content whose loss was journaled read back as `Unavailable`, whose message says never stored or shredded and points at `chunk.shredded`; the registered `STORE_PAYLOAD_LOST` was never produced | `get` returns `ChunkError::Lost` (`STORE_PAYLOAD_LOST`) when the chunk's files sit in the pocket's quarantine; content stored again reads back | `r12_l3_lost_content_reads_back_as_lost` (also after a restart); negative `lost-content-reads-as-unavailable` **PROVEN** |
+
+**Adopted from the reviewer's probes.** Two stricter oracles in both properties: an open with no
+fault armed must succeed (the harness used to fall back to a power loss), and a record whose
+payload an open verified (it reads back and no `chunk.lost` names it) no longer counts as exposed
+to a later failed flush. ADR-0018's "Not modelled" now states that `SimFs` drops a failed flush's
+bytes back to the durable prefix, while Linux can leave a hole of dropped pages (pre-existing
+since P1).
+
+**Verified locally (Windows, dedicated target directory):** 69 durability tests and the rest of
+`uaos-state`; workspace clippy with warnings denied; 3 × 4,000 and 2 × 20,000 schedules of each
+property, in release, with the stricter oracles; the 35 `journal-durability` negatives.

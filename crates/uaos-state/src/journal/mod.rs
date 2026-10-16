@@ -8,7 +8,8 @@
 //! uaos.lock                       exclusive lock: one daemon per data directory
 //! journal/MANIFEST                segment list (replaced atomically on rotation)
 //! journal/seg-<first seq>-<gen>.jsonl   one uaos.event/1 record per line
-//! journal/FLUSHED                 durable point, with an attached chunk store (ADR-0018)
+//! journal/FLUSHED                 durable point: the last flushed record (every journal)
+//! journal/PAYLOADS                the journal coordinates a chunk store; open it with one (ADR-0018)
 //! ```
 
 mod error;

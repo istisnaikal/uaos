@@ -70,7 +70,7 @@ pub enum JournalError {
     /// [`super::Journal::recover`] has read the pending content back and reported any loss.
     #[error("making stored content durable failed; records are refused until recovery")]
     PayloadFlushFailed,
-    /// The journal coordinates a chunk store (`journal/FLUSHED` exists) and was opened without
+    /// The journal coordinates a chunk store (`journal/PAYLOADS` exists) and was opened without
     /// it, which would make unverified payload references durable.
     #[error("this journal coordinates a chunk store; open it with its chunk store")]
     PayloadsRequired,
