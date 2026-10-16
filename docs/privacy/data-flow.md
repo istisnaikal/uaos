@@ -31,7 +31,7 @@ flowchart LR
 | Telemetry | off | published schema only | `uaos telemetry preview` shows the exact payload |
 | Benchmark publish | off | sanitized/synthetic results | opt-in per publication |
 | NTP / provider health (doctor) | off | — | only with `uaos doctor --online` |
-| Certificate checks (OCSP, CRL, AIA) | **never**: UAOS verifies provider certificates with rustls against the operating system's root store, read locally, and fetches nothing during a handshake (ADR-0013 Amendment 1A) | none | earlier designs let the OS verifier fetch URLs named in the server's certificate; that verifier is removed. The cost, stated in the amendment: revocation is not checked at RC-1. The zero-egress capture (I-14) confirms no such traffic |
+| Certificate checks (OCSP, CRL, AIA) | **never**: UAOS verifies provider certificates with rustls against the operating system's root store, read locally, and fetches nothing during a handshake (ADR-0013 Amendment 1A) | none | earlier designs let the OS verifier fetch URLs named in the server's certificate; that verifier is removed. The cost, stated in the amendment: revocation is not checked at RC-1. Proof today: the egress test `the_system_trust_fetches_nothing_a_certificate_names` (a certificate naming issuer, OCSP and CRL URLs on a local listener; the listener receives nothing). The OS-level zero-egress capture (I-14) is still owed (M3) |
 
 ### What the agent's own client sends through UAOS
 
