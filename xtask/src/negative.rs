@@ -520,8 +520,8 @@ pub(crate) fn cases() -> Vec<Case> {
             // Review WP3.A5 round 13, L2: a content-length beside transfer-encoding forwarded.
             seed: replace(
                 "crates/uaos-egress/src/door.rs",
-                "        if headers.contains_key(header::TRANSFER_ENCODING) {",
-                "        if headers.contains_key(header::TRANSFER_ENCODING) && headers.is_empty() {",
+                "        headers.remove(header::CONTENT_LENGTH);\n        return Ok(());",
+                "        return Ok(());",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -545,6 +545,47 @@ pub(crate) fn cases() -> Vec<Case> {
                 args: &["test", "-p", "uaos-platform", "--lib", "network_and_device_paths_are_refused"],
             },
             expect: "uaos-canary.invalid",
+        },
+        Case {
+            id: "egress-forwards-unknown-transfer-coding",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 14, L2: a body coded with something other than `chunked` passed on
+            // unmarked.
+            seed: replace("crates/uaos-egress/src/door.rs", "        if !chunked_only {", "        if !chunked_only && false {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_transfer_coding_other_than_chunked_is_an_error"],
+            },
+            expect: "a coded body reached the caller unmarked",
+        },
+        Case {
+            id: "egress-forwards-repeated-length",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 14, L2: a repeated content-length passed on as is.
+            seed: replace("crates/uaos-egress/src/door.rs", "    if lengths.len() > 1 {", "    if lengths.len() > 1 && false {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_repeated_content_length_is_forwarded_once"],
+            },
+            expect: "a repeated content-length was forwarded",
+        },
+        Case {
+            id: "osfs-bare-volume",
+            gate: "test",
+            tool: Some(WINDOWS_ONLY),
+            // Review WP3.A5 round 14, L1: `\\?\C:` alone, the raw volume, admitted as a disk path.
+            seed: replace(
+                "crates/uaos-platform/src/real/fs.rs",
+                "Prefix::VerbatimDisk(_) => parts.next() != Some(Component::RootDir),",
+                "Prefix::VerbatimDisk(_) => false,",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-platform", "--lib", "network_and_device_paths_are_refused"],
+            },
+            expect: r"create_dir_all \\?\C:",
         },
         Case {
             id: "egress-sends-trace",

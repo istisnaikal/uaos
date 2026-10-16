@@ -10,7 +10,7 @@ Low findings fixed or accepted with a reason. Two fixes change accepted decision
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
 fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
 1 Medium and 5 Low, a fifth 2 Medium and 4 Low, a sixth 2 Medium and 2 Low, a seventh
-1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, an eleventh 3 Low, a twelfth 2 Low, and a thirteenth 1 Medium and 2 Low, all resolved below. The PR stays a draft until a review comes back clean.
+1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, an eleventh 3 Low, a twelfth 2 Low, a thirteenth 1 Medium and 2 Low, and a fourteenth 2 Low, all resolved below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -312,3 +312,26 @@ longer breaks a line in four.
 **Verified locally (Windows, dedicated target directory):** 24 egress unit and 24 integration
 tests; 24 platform tests; 29 xtask tests; `cargo xtask clippy`, `allow-audit`; all 48 egress
 negatives, of which 44 PROVEN here and the four Unix ones left to Linux CI.
+
+## Fourteenth review (2026-10-16)
+
+**Reviewed:** `601d164` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export, again weighted toward the door and `OsFs`. **Result:** 0 High · 0 Medium · 2 Low.
+Nothing reaches an address the door should refuse, leaks a credential, bypasses TLS, retries,
+follows a redirect, or lets `OsFs` reach the network. The round-13 fixes were checked by applying
+their seeds by hand; an endless run of 100s ends at `response_timeout`; trailers, early closes and
+non-UTF-8 `connection` values were checked; every Windows path spelling that reaches the network
+is refused.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | `OsFs` admitted `\\?\C:`, a verbatim disk prefix with nothing after it, which names the raw volume: a device. Unelevated, every open of it fails; an elevated process could have read or written the volume through `read`, `open_append` or the lock | A verbatim disk path is admitted only with a root directory after the prefix (`\\?\C:\` and below) | `network_and_device_paths_are_refused` with `\\?\C:`, every `Fs` method; `\\?\C:\data` still passes; negative `osfs-bare-volume` **PROVEN** (Windows only) |
+| L2 | The round-13 sentence "the caller receives the decoded body" held only for `chunked`: hyper removes only that layer, so `transfer-encoding: gzip, chunked` reached the caller coded with the header stripped, and a list-form or repeated `content-length` passed as is | A transfer coding other than `chunked` is an error (the door asks for none); a repeated `content-length` is forwarded once; ADR-0013, the CHANGELOG and the doc comment say the relay frames the body it forwards | `a_transfer_coding_other_than_chunked_is_an_error`, `a_repeated_content_length_is_forwarded_once`; negatives `egress-forwards-unknown-transfer-coding` and `egress-forwards-repeated-length` **PROVEN** |
+
+Noted, not a finding: when the `osfs-doubled-separator-unc` negative's seed takes effect, Windows
+tries to resolve the canary name `uaos-canary.invalid` (DNS, LLMNR, NetBIOS); the case runs only by
+hand on Windows, and `.invalid` never resolves.
+
+**Verified locally (Windows, dedicated target directory):** 24 egress unit and 26 integration
+tests; 24 platform tests; 29 xtask tests; `cargo xtask clippy`, `allow-audit`; all 51 egress
+negatives, of which 47 PROVEN here and the four Unix ones left to Linux CI.

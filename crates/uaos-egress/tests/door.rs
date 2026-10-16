@@ -889,6 +889,44 @@ async fn a_content_length_beside_transfer_encoding_is_dropped() {
     );
 }
 
+/// Round 14, L2: a transfer coding other than `chunked` would reach the caller coded and
+/// unmarked once `transfer-encoding` is stripped; it is an error.
+#[tokio::test]
+async fn a_transfer_coding_other_than_chunked_is_an_error() {
+    let door =
+        raw_upstream(b"HTTP/1.1 200 OK\r\ntransfer-encoding: gzip, chunked\r\n\r\n5\r\nabcde\r\n0\r\n\r\n").await;
+    let got = door.send(op(1), request(op(1), "local"), None).await;
+    assert!(
+        matches!(
+            got,
+            Err(EgressError::Unreachable(
+                "the upstream used a transfer coding the door does not decode"
+            ))
+        ),
+        "a coded body reached the caller unmarked: {:?}",
+        got.map(|r| r.headers)
+    );
+}
+
+/// Round 14, L2: a repeated `content-length`, as a list or as several fields, is forwarded once.
+#[tokio::test]
+async fn a_repeated_content_length_is_forwarded_once() {
+    for raw in [
+        &b"HTTP/1.1 200 OK\r\ncontent-length: 5, 5\r\n\r\nabcde"[..],
+        &b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\ncontent-length: 5\r\n\r\nabcde"[..],
+    ] {
+        let door = raw_upstream(raw).await;
+        let got = door.send(op(1), request(op(1), "local"), None).await.unwrap();
+        let lengths: Vec<_> = got.headers.get_all("content-length").iter().cloned().collect();
+        assert_eq!(
+            lengths,
+            vec![HeaderValue::from_static("5")],
+            "a repeated content-length was forwarded"
+        );
+        assert_eq!(&got.body.collect().await.unwrap().to_bytes()[..], b"abcde");
+    }
+}
+
 /// L2: a caller's `content-length` cannot truncate the body; the door frames it.
 #[tokio::test]
 async fn a_caller_content_length_is_dropped() {

@@ -181,8 +181,12 @@ on the PR-5 branch.
   - **No hidden behaviour:** it returns redirects without following them, and hyper-util's
     transparent retry is switched off. A `101 Switching Protocols` answer is an error: nothing
     the door sends asks for an upgrade, and passed on it would let a relay switch its client's
-    connection. A `content-length` sent beside `transfer-encoding` is dropped, since the caller
-    receives the decoded body (RFC 9112 §6.3).
+    connection. The response's framing headers describe the body the caller receives, which
+    hyper has de-framed: a transfer coding other than `chunked` is an error (the door strips
+    `te`, so it asks for none, and hyper decodes only `chunked`; a coded body would otherwise
+    reach the caller unmarked), a `content-length` beside `transfer-encoding` is dropped (RFC
+    9112 §6.3), and a repeated `content-length` is forwarded once. The relay frames the body it
+    forwards.
   - **Breaker:** each upstream has a circuit that counts only transport failures and, after its
     cooldown, lets exactly one probe through. Every admitted attempt is settled exactly once,
     also when its caller drops the request: a cancelled probe lets the next attempt probe. Each
@@ -224,7 +228,8 @@ on the PR-5 branch.
     device paths (`PermissionDenied`) before any call, whoever builds it, in every prefix
     spelling std hands to the system, the NT one (`\??\UNC\...`) included, and any path that
     starts with two separators (Windows reads `\\host\\share` as UNC where std parses no
-    prefix; only a verbatim disk path may start that way). DOS device names in
+    prefix; only a verbatim disk path may start that way, and it must name a directory:
+    `\\?\C:` alone is the raw volume). DOS device names in
     a last component (`C:\data\NUL`) pass the check; every file UAOS opens has a name UAOS
     chooses, and the data directory, which configuration names, is owed with the residuals
     below;
@@ -311,8 +316,9 @@ on the PR-5 branch.
     `egress-private-reaches-link-local`, `egress-plaintext-resolved`,
     `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel`,
     `egress-embedded-local`, `egress-sends-trace`, `egress-forwards-switching-protocols` and
-    `egress-forwards-contradicting-length`, and `osfs-doubled-separator-unc` (Windows) for the
-    platform's file system;
+    `egress-forwards-contradicting-length`, `egress-forwards-unknown-transfer-coding` and
+    `egress-forwards-repeated-length`, and `osfs-doubled-separator-unc` and `osfs-bare-volume`
+    (Windows) for the platform's file system;
   - for the clippy bans: `egress-ctor-outside-root`, `net-dns-outside-egress`,
     `net-resolver-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
     `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor`,
@@ -345,7 +351,7 @@ on the PR-5 branch.
   - nothing the standard library calls special is ever allowed.
 - **The ban canaries** (`tests/bans.rs`), one per `clippy.toml` entry; the Unix ones were
   also cross-checked with clippy for a Linux target (all fulfilled; a removed ban fails).
-- **24 integration tests** against loopback mocks. They read what the mock received and the
+- **26 integration tests** against loopback mocks. They read what the mock received and the
   door's own counters, and cover:
   - the header policy;
   - op binding and replay;
@@ -364,8 +370,9 @@ on the PR-5 branch.
   - a path without a leading `/` refused without consuming the Operation;
   - TRACE, CONNECT and an extension method refused before contact, without consuming the
     Operation;
-  - a `101 Switching Protocols` answer returned as an error, and a `content-length` beside
-    `transfer-encoding` dropped from the response;
+  - a `101 Switching Protocols` answer and a transfer coding other than `chunked` returned as
+    errors, a `content-length` beside `transfer-encoding` dropped from the response, and a
+    repeated one forwarded once;
   - the address cap;
   - the credential never printed;
   - **a certificate naming issuer, OCSP and CRL URLs on a local listener: the handshake fails

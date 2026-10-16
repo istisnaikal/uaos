@@ -177,6 +177,50 @@ pub const CREDENTIAL_HEADERS: [&str; 9] = [
     "ocp-apim-subscription-key",
 ];
 
+/// Makes the response's framing headers describe the body the caller receives, which hyper has
+/// already de-framed (review WP3.A5, rounds 13 and 14):
+/// * a transfer coding other than `chunked` is an error: the door asks for none (it strips
+///   `te`), and hyper decodes only `chunked`, so a coded body would reach the caller unmarked
+///   once `transfer-encoding` is stripped as hop-by-hop;
+/// * a `content-length` beside `transfer-encoding` is dropped (RFC 9112 §6.3);
+/// * a repeated `content-length` (as a list or as several fields, which hyper accepts only when
+///   all are equal) is forwarded once.
+fn frame_for_caller(headers: &mut HeaderMap) -> Result<(), EgressError> {
+    if headers.contains_key(header::TRANSFER_ENCODING) {
+        let chunked_only = headers
+            .get_all(header::TRANSFER_ENCODING)
+            .iter()
+            .flat_map(|v| v.to_str().unwrap_or("?").split(','))
+            .map(str::trim)
+            .filter(|coding| !coding.is_empty())
+            .all(|coding| coding.eq_ignore_ascii_case("chunked"));
+        if !chunked_only {
+            return Err(EgressError::Unreachable(
+                "the upstream used a transfer coding the door does not decode",
+            ));
+        }
+        headers.remove(header::CONTENT_LENGTH);
+        return Ok(());
+    }
+    let lengths: Vec<String> = headers
+        .get_all(header::CONTENT_LENGTH)
+        .iter()
+        .flat_map(|v| v.to_str().unwrap_or_default().split(','))
+        .map(|l| l.trim().to_owned())
+        .collect();
+    if lengths.len() > 1 {
+        match lengths.first().and_then(|l| HeaderValue::from_str(l).ok()) {
+            Some(single) => {
+                headers.insert(header::CONTENT_LENGTH, single);
+            }
+            None => {
+                headers.remove(header::CONTENT_LENGTH);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn strip_hop_by_hop(headers: &mut HeaderMap) {
     let named: Vec<HeaderName> = headers
         .get_all(header::CONNECTION)
@@ -374,7 +418,8 @@ impl Door {
     /// client, even a failed one, a retry needs a new Operation. The URI is built from the
     /// upstream's own name and port, so nothing in the request can redirect it. The credential
     /// is inserted last. Redirects are returned, never followed. A `101 Switching Protocols`
-    /// answer is an error, and a `content-length` beside `transfer-encoding` is dropped.
+    /// answer and a transfer coding other than `chunked` are errors; the response's framing
+    /// headers are made to describe the de-framed body (see `frame_for_caller`).
     ///
     /// # Errors
     /// [`EgressError`].
@@ -477,11 +522,7 @@ impl Door {
             return Err(EgressError::Unreachable("the upstream switched protocols unasked"));
         }
         let mut headers = parts.headers;
-        // A body framed by `transfer-encoding` reaches the caller decoded, so a `content-length`
-        // sent beside it describes nothing the caller receives (RFC 9112 §6.3; round 13, L2).
-        if headers.contains_key(header::TRANSFER_ENCODING) {
-            headers.remove(header::CONTENT_LENGTH);
-        }
+        frame_for_caller(&mut headers)?;
         strip_hop_by_hop(&mut headers);
         Ok(EgressResponse {
             status: parts.status,
