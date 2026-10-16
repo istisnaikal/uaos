@@ -761,13 +761,14 @@ pub(crate) fn cases() -> Vec<Case> {
             id: "build-script-clippy-env",
             gate: "allow-audit",
             tool: None,
-            // Review WP3.A5 round 8, L5: a build script that could set clippy's environment.
+            // Review WP3.A5 rounds 8 and 10 (L5, L2): a build script that could set clippy's
+            // environment, here through a helper that builds the line.
             seed: write(
                 "crates/uaos-state/build.rs",
-                "fn main() {\n    println!(\"cargo:rustc-env=clippy_conf_dir=crates\");\n}\n".to_owned(),
+                "fn emit(key: &str, value: &str) {\n    println!(\"cargo:rustc-env={key}={value}\");\n}\n\nfn main() {\n    emit(\"clippy_args\", \"-Aclippy::disallowed_methods\");\n}\n".to_owned(),
             ),
             runner: Runner::Xtask(&["allow-audit"]),
-            expect: "sets clippy's environment",
+            expect: "names one of clippy's variables",
         },
         Case {
             id: "canary-malformed",
@@ -789,14 +790,29 @@ pub(crate) fn cases() -> Vec<Case> {
             id: "canary-calls-another-item",
             gate: "allow-audit",
             tool: None,
-            // Review WP3.A5 round 9, L2: a canary that calls another ban with the same name.
+            // Review WP3.A5 rounds 9 and 10 (L2, L1): a canary that calls the ban of the same
+            // type and method in another crate.
             seed: replace(
                 "crates/uaos-egress/tests/bans.rs",
-                "let _canary = ServerOptions::new().create(\"canary\");",
-                "let _canary = std::fs::File::create(\"canary\");",
+                "let _canary = tokio::net::TcpStream::connect(\"canary.invalid:1\");",
+                "let _canary = std::net::TcpStream::connect(\"canary.invalid:1\");",
             ),
             runner: Runner::Xtask(&["allow-audit"]),
-            expect: "the canary for `tokio::net::windows::named_pipe::ServerOptions::create`",
+            expect: "the canary for `tokio::net::TcpStream::connect`",
+        },
+        Case {
+            id: "canary-copied-from-sibling",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 10, L1: a canary copied from a sibling in the same module, whose
+            // own ban fulfils the expectation.
+            seed: replace(
+                "crates/uaos-egress/tests/bans.rs",
+                "    #[expect(clippy::disallowed_methods, reason = \"canary\")]\n    fn task_spawn_blocking() {\n        // canary: `tokio::task::spawn_blocking`\n        let _canary = tokio::task::spawn_blocking(|| ());",
+                "    #[expect(clippy::disallowed_types, clippy::disallowed_methods, reason = \"canary\")]\n    fn task_spawn_blocking(set: &mut tokio::task::JoinSet<()>) {\n        // canary: `tokio::task::spawn_blocking`\n        let _canary = set.spawn_blocking(|| ());",
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "the canary for `tokio::task::spawn_blocking`",
         },
         Case {
             id: "build-script-declared-path",
@@ -815,7 +831,7 @@ pub(crate) fn cases() -> Vec<Case> {
                 ),
             ),
             runner: Runner::Xtask(&["allow-audit"]),
-            expect: "main.rs: a build script sets clippy's environment",
+            expect: "main.rs: a build script names one of clippy's variables",
         },
         Case {
             id: "net-unix-connect-outside-egress",
