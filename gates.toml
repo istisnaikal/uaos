@@ -31,7 +31,7 @@ source = "CLAUDE.md §4 CI merge blocker: fmt/clippy/test; plan §4.3 code stand
 lane = "merge"
 status = "active"
 job = "clippy"
-negative = ["clippy-unwrap", "clippy-unsafe", "clippy-ambient-clock", "clippy-nondeterministic-map"]
+negative = ["clippy-unwrap", "clippy-unsafe", "clippy-ambient-clock", "clippy-nondeterministic-map", "egress-ctor-outside-root", "net-dns-outside-egress", "net-connect-outside-egress", "net-udp-outside-egress", "spawn-outside-supervisor", "net-listen-outside-api", "net-resolver-outside-egress", "net-socket-listen-outside-api", "net-unix-connect-outside-egress", "net-unix-connect-addr-outside-egress", "net-tokio-unix-connect-outside-egress", "net-unix-socket-connect-outside-egress", "net-named-pipe-outside-egress", "spawn-through-tokio-executor", "clippy-ban-path-unresolved", "clippy-ban-silenced"]
 
 [[gate]]
 id = "test"
@@ -39,7 +39,7 @@ source = "CLAUDE.md §4 CI merge blocker: fmt/clippy/test"
 lane = "merge"
 status = "active"
 job = "test"
-negative = ["test-failure", "identity-epoch-check-skipped"]
+negative = ["test-failure", "identity-epoch-check-skipped", "egress-dials-private-range", "egress-numeric-host", "egress-private-reaches-link-local", "egress-plaintext-resolved", "egress-breaker-admits-after-cooldown", "egress-probe-stuck-on-cancel", "egress-embedded-local", "egress-sends-trace", "egress-forwards-switching-protocols", "egress-forwards-contradicting-length", "osfs-doubled-separator-unc", "egress-forwards-unknown-transfer-coding", "egress-forwards-repeated-length", "osfs-bare-volume", "egress-forwards-bodiless-length", "egress-delivered-reported-unsent", "egress-timeout-reported-unsent", "egress-unsent-reported-delivered"]
 
 # ── supply chain and hygiene ─────────────────────────────────────────────────────────────
 [[gate]]
@@ -97,7 +97,7 @@ source = "plan §1.2 one mechanism per concern; ADR-0001"
 lane = "merge"
 status = "active"
 job = "arch"
-negative = ["arch-forbidden-edge", "arch-ring1-reaches-kernel"]
+negative = ["arch-forbidden-edge", "arch-ring1-reaches-kernel", "arch-ring1-depends-on-hyper"]
 
 [[gate]]
 id = "schema-compat"
@@ -145,7 +145,7 @@ source = "plan v2 PD-19, §2.1 reachability: guarded lints (unsafe_code, disallo
 lane = "merge"
 status = "active"
 job = "arch"
-negative = ["allow-audit-guarded-lint-outside-owner", "allow-audit-unsafe-outside-owner"]
+negative = ["allow-audit-guarded-lint-outside-owner", "allow-audit-unsafe-outside-owner", "clippy-config-nested", "lints-not-inherited", "cargo-config-clippy-override", "clippy-ban-without-canary", "allow-audit-lint-group", "allow-audit-macro-attribute", "allow-audit-path-module", "allow-audit-nested-target", "workspace-lints-group-allowed", "clippy-config-case", "cargo-config-not-alias", "build-script-clippy-env", "canary-malformed", "canary-calls-another-item", "build-script-declared-path", "canary-copied-from-sibling", "canary-setup-calls-another-ban", "build-script-module", "build-dependency-path", "build-script-include-in-owner"]
 
 [[gate]]
 id = "vet-ratchet"

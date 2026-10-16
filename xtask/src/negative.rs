@@ -54,6 +54,12 @@ const CLIPPY: Runner = Runner::Program {
     ],
 };
 const LIB: &str = "crates/uaos-contracts/src/limits.rs";
+/// A case's `tool` when its seed only compiles on Unix. Elsewhere it does not run and does not
+/// count as skipped; the CI negative job, which runs on Linux with `--require-all-tools`, runs it.
+const UNIX_ONLY: &str = "unix";
+/// Likewise for Windows. The CI negative job never runs these: they are proven by running the
+/// negatives on Windows (review WP3.A5, round 4, M1).
+const WINDOWS_ONLY: &str = "windows";
 
 fn append(path: &'static str, text: &'static str) -> Seed {
     Box::new(move |ws| {
@@ -79,10 +85,20 @@ fn replace(path: &'static str, old: &'static str, new: &'static str) -> Seed {
     Box::new(move |ws| {
         let p = ws.join(path);
         let s = std::fs::read_to_string(&p).map_err(|e| format!("{path}: {e}"))?;
-        if !s.contains(old) {
-            return Err(format!(
-                "seed anchor not found in {path} (update the negative case): {old:?}"
-            ));
+        // Exactly once: an anchor that also matches elsewhere would seed the first match, which
+        // may not be the site the case is about, and the case would then prove nothing.
+        match s.matches(old).count() {
+            0 => {
+                return Err(format!(
+                    "seed anchor not found in {path} (update the negative case): {old:?}"
+                ));
+            }
+            1 => {}
+            n => {
+                return Err(format!(
+                    "seed anchor occurs {n} times in {path} (make it unique to its site): {old:?}"
+                ));
+            }
         }
         std::fs::write(&p, s.replacen(old, new, 1)).map_err(|e| format!("{path}: {e}"))
     })
@@ -302,6 +318,789 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "lost or changed",
         },
         Case {
+            id: "egress-dials-private-range",
+            gate: "test",
+            tool: None,
+            // T5: a door whose classification lets the loopback range through.
+            seed: replace(
+                "crates/uaos-egress/src/addr.rs",
+                "([127, 0, 0, 0], 8, Blocked::Loopback),",
+                "([127, 0, 0, 0], 32, Blocked::Loopback),",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &[
+                    "test",
+                    "-p",
+                    "uaos-egress",
+                    "--test",
+                    "door",
+                    "private_answers_are_refused_unless_the_upstream_is_declared_private",
+                ],
+            },
+            expect: "the door dialled a private range",
+        },
+        Case {
+            id: "egress-numeric-host",
+            gate: "test",
+            tool: None,
+            // T5: an upstream named by an address literal in disguise (`2130706433`).
+            seed: replace(
+                "crates/uaos-egress/src/host.rs",
+                "if name.rsplit('.').next().is_some_and(is_numeric_label) {",
+                "if false && name.rsplit('.').next().is_some_and(is_numeric_label) {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--lib", "address_literals_are_refused"],
+            },
+            expect: "was accepted as a host name",
+        },
+        Case {
+            id: "egress-ctor-outside-root",
+            gate: "clippy",
+            tool: None,
+            // ADR-0010: code other than the composition root building an egress door.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\npub fn seeded_violation() -> Result<Door, EgressError> {\n    Door::new(\n        Vec::new(),\n        std::sync::Arc::new(SystemResolver),\n        std::sync::Arc::new(uaos_platform::real::SystemClock::new()),\n        hyper_util::rt::TokioExecutor::new(),\n        DoorLimits::default(),\n    )\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "uaos_egress::Door::new",
+        },
+        Case {
+            id: "egress-private-reaches-link-local",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 H2: a private upstream admitted to every special-purpose range, metadata included.
+            seed: replace(
+                "crates/uaos-egress/src/upstream.rs",
+                "Reach::Blocked(_) if self.allow_private && is_local_network(ip) => Ok(()),",
+                "Reach::Blocked(_) if self.allow_private => Ok(()),",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_private_upstream_never_reaches_link_local_or_special_ranges"],
+            },
+            expect: "dialled the metadata range",
+        },
+        Case {
+            id: "egress-plaintext-resolved",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 H2: plain HTTP that depends on name resolution.
+            seed: replace(
+                "crates/uaos-egress/src/upstream.rs",
+                "            if self.pinned.is_empty() {\n                return Err(UpstreamError::PlaintextNeedsPinned);\n            }\n",
+                "",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "plain_http_is_declared_only_toward_pinned_local_addresses"],
+            },
+            expect: "would be resolved",
+        },
+        Case {
+            id: "egress-breaker-admits-after-cooldown",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 M4: a breaker with no half-open state.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "Breaker::Probing { .. } => Err(PROBE_RECHECK.min(cooldown)),",
+                "Breaker::Probing { generation } => Ok(Ticket::Probe { generation }),",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "after_the_cooldown_exactly_one_probe_goes_through"],
+            },
+            expect: "more than one probe",
+        },
+        Case {
+            id: "net-dns-outside-egress",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 M2: DNS through std, which needs no dependency at all.
+            seed: append(
+                "crates/uaos-state/src/lib.rs",
+                "\n/// Seeded.\n#[must_use]\npub fn seeded_violation() -> bool {\n    use std::net::ToSocketAddrs as _;\n    (\"exfil.example\", 80).to_socket_addrs().is_ok()\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "std::net::ToSocketAddrs::to_socket_addrs",
+        },
+        Case {
+            id: "net-connect-outside-egress",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 M2: an outbound TCP connection outside the connector.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\npub async fn seeded_violation(addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpStream> {\n    tokio::net::TcpSocket::new_v4()?.connect(addr).await\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::net::TcpSocket::connect",
+        },
+        Case {
+            id: "net-udp-outside-egress",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 M2: a UDP socket.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\npub async fn seeded_violation() -> std::io::Result<tokio::net::UdpSocket> {\n    tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).await\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::net::UdpSocket::bind",
+        },
+        Case {
+            id: "spawn-outside-supervisor",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 M2: a task spawned on a runtime handle, outside the supervisor.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\npub fn seeded_violation() {\n    drop(tokio::runtime::Handle::current().spawn(async {}));\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::runtime::Handle::spawn",
+        },
+        Case {
+            id: "egress-probe-stuck-on-cancel",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 2, H1: a breaker probe whose caller drops the future is never settled.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "            self.door
+                .breaker_record(self.upstream, self.ticket, Outcome::NotAttempted);",
+                "            let _ = (self.door, self.upstream, self.ticket);",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_cancelled_probe_lets_the_next_attempt_probe"],
+            },
+            expect: "a cancelled probe left the circuit refusing",
+        },
+        Case {
+            id: "egress-embedded-local",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 2, M1: an IPv6 form that only embeds a loopback address counted as local.
+            seed: replace(
+                "crates/uaos-egress/src/addr.rs",
+                "    if let IpAddr::V6(v6) = ip\n        && embeds_ipv4(v6)\n    {\n        return false;\n    }\n",
+                "    let _ = embeds_ipv4;\n",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--lib", "plaintext_is_refused_toward_embedded_forms"],
+            },
+            expect: "2002:7f00:1::1",
+        },
+        Case {
+            id: "egress-forwards-switching-protocols",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 13, L1: a 101 answer handed to the caller as final.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "        if parts.status.is_informational() {",
+                "        if parts.status.is_informational() && parts.status.as_u16() == 0 {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_switching_protocols_answer_is_an_error"],
+            },
+            expect: "a 101 reached the caller",
+        },
+        Case {
+            id: "egress-forwards-contradicting-length",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 13, L2: a content-length beside transfer-encoding forwarded.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "        }\n        headers.remove(header::CONTENT_LENGTH);\n        return Ok(());",
+                "        }\n        return Ok(());",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_content_length_beside_transfer_encoding_is_dropped"],
+            },
+            expect: "a content-length contradicting the decoded body was forwarded",
+        },
+        Case {
+            id: "osfs-doubled-separator-unc",
+            gate: "test",
+            tool: Some(WINDOWS_ONLY),
+            // Review WP3.A5 round 13, M1: a UNC path spelled with doubled separators, which std
+            // does not parse as UNC and Windows does.
+            seed: replace(
+                "crates/uaos-platform/src/real/fs.rs",
+                "            .is_some_and(|start| start.iter().all(|b| *b == b'\\\\' || *b == b'/'));",
+                "            .is_some_and(|_| false);",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-platform", "--lib", "network_and_device_paths_are_refused"],
+            },
+            expect: "uaos-canary.invalid",
+        },
+        Case {
+            id: "egress-forwards-unknown-transfer-coding",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 14, L2: a body coded with something other than `chunked` passed on
+            // unmarked.
+            seed: replace("crates/uaos-egress/src/door.rs", "        if !chunked_only {", "        if !chunked_only && false {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_transfer_coding_other_than_chunked_is_an_error"],
+            },
+            expect: "a coded body reached the caller unmarked",
+        },
+        Case {
+            id: "egress-forwards-repeated-length",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 14, L2: a repeated content-length passed on as is.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "            headers.insert(header::CONTENT_LENGTH, single);",
+                "            let _ = single;",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_repeated_content_length_is_forwarded_once"],
+            },
+            expect: "a repeated content-length was forwarded",
+        },
+        Case {
+            id: "egress-forwards-bodiless-length",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 15, L2: a 204 forwarded with the content-length it should not
+            // carry.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "    if status == StatusCode::NO_CONTENT {",
+                "    if status == StatusCode::NO_CONTENT && status.as_u16() == 0 {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "content_length_on_answers_without_a_body"],
+            },
+            expect: "a 204 kept its content-length",
+        },
+        Case {
+            id: "egress-delivered-reported-unsent",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 16, M1: a request cut off after it was sent reported as never
+            // sent, and retryable.
+            seed: replace(
+                "crates/uaos-egress/src/lib.rs",
+                "            Self::Interrupted(\"the connection failed after the request was sent\")",
+                "            Self::Unreachable(\"the connection failed before a response arrived\")",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "errors_say_whether_the_request_may_have_reached_the_provider"],
+            },
+            expect: "a request the provider received was reported as never sent",
+        },
+        Case {
+            id: "egress-timeout-reported-unsent",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 17, L3: no answer within the response timeout reported as
+            // nothing sent, retryable.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "                return Err(EgressError::Interrupted(\"no answer within the response timeout\"));",
+                "                return Err(EgressError::Timeout);",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "no_answer_within_the_response_timeout_is_interrupted"],
+            },
+            expect: "an unanswered request was reported as never sent",
+        },
+        Case {
+            id: "egress-unsent-reported-delivered",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 17, L1: a connection lost before hyper took the request reported
+            // as possibly received.
+            seed: replace(
+                "crates/uaos-egress/src/lib.rs",
+                "        let mut unsent = e.is_connect() || e.connect_info().is_none();",
+                "        let mut unsent = e.is_connect();",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_connection_lost_before_the_request_left_is_unreachable"],
+            },
+            expect: "nothing was sent, but the door reported",
+        },
+        Case {
+            id: "osfs-bare-volume",
+            gate: "test",
+            tool: Some(WINDOWS_ONLY),
+            // Review WP3.A5 round 14, L1: `\\?\C:` alone, the raw volume, admitted as a disk path.
+            seed: replace(
+                "crates/uaos-platform/src/real/fs.rs",
+                "Prefix::VerbatimDisk(_) => parts.next() != Some(Component::RootDir),",
+                "Prefix::VerbatimDisk(_) => false,",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-platform", "--lib", "network_and_device_paths_are_refused"],
+            },
+            expect: r"create_dir_all \\?\C:",
+        },
+        Case {
+            id: "egress-sends-trace",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 9, L1: TRACE echoes the request, credential included, back.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "        if !SENT_METHODS.contains(&request.method) {",
+                "        if SENT_METHODS.is_empty() {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "methods_the_door_does_not_send_are_refused_before_contact"],
+            },
+            expect: "TRACE was not refused before contact",
+        },
+        Case {
+            id: "net-listen-outside-api",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 round 2, M2: a listener, whose bind also resolves names, outside the API crate.
+            seed: append(
+                "crates/uaos-state/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\npub fn seeded_violation() -> std::io::Result<std::net::TcpListener> {\n    std::net::TcpListener::bind(\"localhost:0\")\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "std::net::TcpListener::bind",
+        },
+        Case {
+            id: "net-resolver-outside-egress",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 round 3, M1: hyper-util's own resolver, a DNS lookup outside the door.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n#[must_use]\npub fn seeded_violation() -> hyper_util::client::legacy::connect::dns::GaiResolver {\n    hyper_util::client::legacy::connect::dns::GaiResolver::new()\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "GaiResolver::new",
+        },
+        Case {
+            id: "net-socket-listen-outside-api",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 round 3, M1: a raw socket turned into a listener outside the API crate.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\npub fn seeded_violation() -> std::io::Result<tokio::net::TcpListener> {\n    tokio::net::TcpSocket::new_v4()?.listen(1)\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::net::TcpSocket::listen",
+        },
+        Case {
+            id: "net-unix-connect-addr-outside-egress",
+            gate: "clippy",
+            tool: Some(UNIX_ONLY),
+            // Review WP3.A5 round 4, M1: each `allow-invalid` ban is proven where it exists.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\n#[cfg(unix)]\npub fn seeded_violation() -> std::io::Result<std::os::unix::net::UnixStream> {\n    std::os::unix::net::UnixStream::connect_addr(&std::os::unix::net::SocketAddr::from_pathname(\"/run/seeded.sock\")?)\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "std::os::unix::net::UnixStream::connect_addr",
+        },
+        Case {
+            id: "net-tokio-unix-connect-outside-egress",
+            gate: "clippy",
+            tool: Some(UNIX_ONLY),
+            // Review WP3.A5 round 4, M1.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\n#[cfg(unix)]\npub async fn seeded_violation() -> std::io::Result<tokio::net::UnixStream> {\n    tokio::net::UnixStream::connect(\"/run/seeded.sock\").await\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::net::UnixStream::connect",
+        },
+        Case {
+            id: "net-unix-socket-connect-outside-egress",
+            gate: "clippy",
+            tool: Some(UNIX_ONLY),
+            // Review WP3.A5 round 4, M1.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\n#[cfg(unix)]\npub async fn seeded_violation() -> std::io::Result<tokio::net::UnixStream> {\n    tokio::net::UnixSocket::new_stream()?.connect(\"/run/seeded.sock\").await\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::net::UnixSocket::connect",
+        },
+        Case {
+            id: "net-named-pipe-outside-egress",
+            gate: "clippy",
+            tool: Some(WINDOWS_ONLY),
+            // Review WP3.A5 round 4, M1: the Windows counterpart of the Unix-socket bans.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\n#[cfg(windows)]\npub fn seeded_violation() -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {\n    tokio::net::windows::named_pipe::ClientOptions::new().open(\"seeded\")\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "named_pipe::ClientOptions::open",
+        },
+        Case {
+            id: "spawn-through-tokio-executor",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 round 4, L1: hyper-util's executor spawns with `tokio::spawn`.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n#[must_use]\npub fn seeded_violation() -> hyper_util::rt::TokioExecutor {\n    hyper_util::rt::TokioExecutor::new()\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "hyper_util::rt::TokioExecutor",
+        },
+        Case {
+            id: "clippy-ban-path-unresolved",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 round 4, M1: a ban whose path resolves to nothing is off, and clippy
+            // only warns about it.
+            seed: replace(
+                "clippy.toml",
+                "\"tokio::task::JoinSet::spawn_local_on\"",
+                "\"tokio::task::JoinSet::spawn_local_onx\"",
+            ),
+            runner: Runner::Xtask(&["clippy"]),
+            expect: "resolve to nothing",
+        },
+        Case {
+            id: "clippy-ban-silenced",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 round 5, L2: a ban that stops firing (here, removed) leaves its
+            // canary's expectation unfulfilled, which fails clippy.
+            seed: replace(
+                "clippy.toml",
+                "  { path = \"tokio::net::TcpSocket::listen\", reason = \"only the API crate listens, on loopback (owner: uaos-api)\" },\n",
+                "",
+            ),
+            runner: CLIPPY,
+            expect: "unfulfilled",
+        },
+        Case {
+            id: "clippy-config-nested",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 6, M2: a crate-local clippy.toml replaces every ban for its crate.
+            seed: write("crates/uaos-state/clippy.toml", "allow-unwrap-in-tests = true\n".to_owned()),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "a clippy.toml below the root",
+        },
+        Case {
+            id: "lints-not-inherited",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 6, M2: a member's own [lints] replaces the workspace's.
+            seed: replace(
+                "crates/uaos-state/Cargo.toml",
+                "[lints]\nworkspace = true",
+                "[lints.clippy]\ndisallowed_methods = \"allow\"",
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "must be exactly `workspace = true`",
+        },
+        Case {
+            id: "cargo-config-clippy-override",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 6, M2: Cargo configuration pointing clippy at another config.
+            seed: append(".cargo/config.toml", "\n[env]\nCLIPPY_CONF_DIR = \"crates/uaos-state\"\n"),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "`env` is not allowed",
+        },
+        Case {
+            id: "clippy-ban-without-canary",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 6, L2: a ban added without a canary, in a compact layout.
+            seed: replace(
+                "clippy.toml",
+                "disallowed-methods = [",
+                "disallowed-methods = [\n  { path=\"std::process::abort\", reason=\"seeded\" },",
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "`std::process::abort` has no canary",
+        },
+        Case {
+            id: "allow-audit-lint-group",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, H1: a lint group that contains a guarded lint switches it off.
+            seed: append_owned(
+                LIB,
+                format!(
+                    "\n/// Seeded.\n#[{}({}, reason = \"seeded\")]\n#[must_use]\npub fn seeded_violation() -> u8 {{\n    1\n}}\n",
+                    "allow", "clippy::style"
+                ),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "names `clippy::style`",
+        },
+        Case {
+            id: "allow-audit-macro-attribute",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, H1: an attribute a macro builds from its arguments.
+            seed: append_owned(
+                LIB,
+                format!(
+                    "\nmacro_rules! seeded {{\n    ($a:meta) => {{\n        #[$a]\n        /// Seeded.\n        pub fn seeded_violation() {{}}\n    }};\n}}\nseeded!({}({}, reason = \"seeded\"));\n",
+                    "allow", "clippy::disallowed_methods"
+                ),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "names `disallowed_methods`",
+        },
+        Case {
+            id: "allow-audit-path-module",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, H1: library code compiled from a file under an owner path.
+            seed: both(
+                append(LIB, "\n#[path = \"../tests/seeded.rs\"]\nmod seeded;\n"),
+                write("crates/uaos-contracts/tests/seeded.rs", "//! Seeded.\n".to_owned()),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "a `#[path]` module",
+        },
+        Case {
+            id: "allow-audit-nested-target",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, H1: a nested folder named like the root's skipped build folder.
+            seed: write(
+                "crates/uaos-redact/src/target/seeded.rs",
+                format!("#[{}({}, reason = \"seeded\")]\nfn seeded() {{}}\n", "allow", "clippy::disallowed_methods"),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "src/target/seeded.rs",
+        },
+        Case {
+            id: "workspace-lints-group-allowed",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, M1: a group allowed in the workspace lint table.
+            seed: replace(
+                "Cargo.toml",
+                "disallowed_methods = \"deny\"",
+                "disallowed_methods = \"deny\"\nstyle = { level = \"allow\", priority = 1 }",
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "`style` set to `allow`",
+        },
+        Case {
+            id: "clippy-config-case",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, M1: a clippy.toml named in another case, which Windows and
+            // macOS read.
+            seed: write("crates/uaos-state/CLIPPY.TOML", "allow-unwrap-in-tests = true\n".to_owned()),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "replaces the root's bans",
+        },
+        Case {
+            id: "cargo-config-not-alias",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, M1: compiler flags in Cargo configuration.
+            seed: append(".cargo/config.toml", "\n[build]\nrustflags = [\"-Aclippy::disallowed_methods\"]\n"),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "`build` is not allowed",
+        },
+        Case {
+            id: "build-script-clippy-env",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 rounds 8 and 10 (L5, L2): a build script that could set clippy's
+            // environment, here through a helper that builds the line.
+            seed: write(
+                "crates/uaos-state/build.rs",
+                "fn emit(key: &str, value: &str) {\n    println!(\"cargo:rustc-env={key}={value}\");\n}\n\nfn main() {\n    emit(\"clippy_args\", \"-Aclippy::disallowed_methods\");\n}\n".to_owned(),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "names one of clippy's variables",
+        },
+        Case {
+            id: "canary-malformed",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 7, L1: a marker that is not a canary.
+            seed: both(
+                replace(
+                    "clippy.toml",
+                    "disallowed-methods = [",
+                    "disallowed-methods = [\n  { path = \"std::process::abort\", reason = \"seeded\" },",
+                ),
+                append("crates/uaos-egress/tests/bans.rs", "\n// canary: `std::process::abort`\n"),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "is not one banned call",
+        },
+        Case {
+            id: "canary-calls-another-item",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 rounds 9 and 10 (L2, L1): a canary that calls the ban of the same
+            // type and method in another crate.
+            seed: replace(
+                "crates/uaos-egress/tests/bans.rs",
+                "let _canary = tokio::net::TcpStream::connect(\"canary.invalid:1\");",
+                "let _canary = std::net::TcpStream::connect(\"canary.invalid:1\");",
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "the canary for `tokio::net::TcpStream::connect`",
+        },
+        Case {
+            id: "canary-setup-calls-another-ban",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 11, L1: a canary whose setup line calls another ban of the same
+            // lint, which keeps the expectation fulfilled when its own ban is dead.
+            seed: replace(
+                "crates/uaos-egress/tests/bans.rs",
+                "        fn std_datagram_connect(socket: &std::os::unix::net::UnixDatagram) {\n            // canary: `std::os::unix::net::UnixDatagram::connect`\n            let _canary = socket.connect(\"/canary\");",
+                "        fn std_datagram_connect() {\n            // canary: `std::os::unix::net::UnixDatagram::connect`\n            let socket = std::os::unix::net::UnixDatagram::unbound().ok();\n            let _canary = socket.map(|s| s.connect(\"/canary\"));",
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "also uses `std::os::unix::net::UnixDatagram::unbound`",
+        },
+        Case {
+            id: "build-script-module",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 11, L2: a build script that keeps its code in another file.
+            seed: both(
+                write(
+                    "crates/uaos-state/build.rs",
+                    "mod build_env;\n\nfn main() {\n    build_env::emit();\n}\n".to_owned(),
+                ),
+                write(
+                    "crates/uaos-state/build_env.rs",
+                    "pub fn emit() {\n    println!(\"cargo:rustc-env=clippy_args=-Aclippy::disallowed_methods\");\n}\n".to_owned(),
+                ),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "uses another file",
+        },
+        Case {
+            id: "build-script-include-in-owner",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 12, L1: a build script in an owner crate, where `include!` is
+            // otherwise allowed, that includes the helper setting clippy's arguments.
+            seed: both(
+                write(
+                    "crates/uaos-testkit/build.rs",
+                    "include!(\"build_env.rs\");\n\nfn main() {\n    emit_env();\n}\n".to_owned(),
+                ),
+                write(
+                    "crates/uaos-testkit/build_env.rs",
+                    "fn emit_env() {\n    println!(\"cargo:rustc-env={}=-Aclippy::disallowed_types\", \"clippy_args\".to_ascii_uppercase());\n}\n".to_owned(),
+                ),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "crates/uaos-testkit/build.rs: a build script uses another file",
+        },
+        Case {
+            id: "build-dependency-path",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 11, L2: a path build dependency, whose code runs in the build
+            // script.
+            seed: both(
+                write("crates/uaos-state/build.rs", "fn main() {}\n".to_owned()),
+                append("crates/uaos-state/Cargo.toml", "\n[build-dependencies]\nuaos-contracts = { path = \"../uaos-contracts\" }\n"),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "build dependency `uaos-contracts` is a path dependency",
+        },
+        Case {
+            id: "canary-copied-from-sibling",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 10, L1: a canary copied from a sibling in the same module, whose
+            // own ban fulfils the expectation.
+            seed: replace(
+                "crates/uaos-egress/tests/bans.rs",
+                "    #[expect(clippy::disallowed_methods, reason = \"canary\")]\n    fn task_spawn_blocking() {\n        // canary: `tokio::task::spawn_blocking`\n        let _canary = tokio::task::spawn_blocking(|| ());",
+                "    #[expect(clippy::disallowed_types, clippy::disallowed_methods, reason = \"canary\")]\n    fn task_spawn_blocking(set: &mut tokio::task::JoinSet<()>) {\n        // canary: `tokio::task::spawn_blocking`\n        let _canary = set.spawn_blocking(|| ());",
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "the canary for `tokio::task::spawn_blocking`",
+        },
+        Case {
+            id: "build-script-declared-path",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 9, L3: a build script at the path `build = "..."` names.
+            seed: both(
+                write(
+                    "crates/uaos-state/build/main.rs",
+                    "fn main() {\n    println!(\"cargo:rustc-env=CLIPPY_CONF_DIR=crates\");\n}\n".to_owned(),
+                ),
+                replace(
+                    "crates/uaos-state/Cargo.toml",
+                    "name = \"uaos-state\"\n",
+                    "name = \"uaos-state\"\nbuild = \"build/main.rs\"\n",
+                ),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "main.rs: a build script names one of clippy's variables",
+        },
+        Case {
+            id: "net-unix-connect-outside-egress",
+            gate: "clippy",
+            tool: Some(UNIX_ONLY),
+            // Review WP3.A5 round 3, L3: the Unix-socket bans are `allow-invalid`, so a wrong path
+            // would go silent; this proves they resolve where they exist.
+            seed: append(
+                "crates/uaos-egress/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\n#[cfg(unix)]\npub fn seeded_violation() -> std::io::Result<std::os::unix::net::UnixStream> {\n    std::os::unix::net::UnixStream::connect(\"/run/seeded.sock\")\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "std::os::unix::net::UnixStream::connect",
+        },
+        Case {
+            id: "arch-ring1-depends-on-hyper",
+            gate: "arch-check",
+            tool: None,
+            // ADR-0010: a Ring 1 module that reaches a network crate.
+            seed: both(
+                both(
+                    write(
+                        "modules/mod-seeded/Cargo.toml",
+                        "[package]\nname = \"mod-seeded\"\nversion = \"0.0.0\"\nedition = \"2024\"\nlicense = \"Apache-2.0\"\npublish = false\n\n[dependencies]\nhyper.workspace = true\n".to_owned(),
+                    ),
+                    write("modules/mod-seeded/src/lib.rs", "// SPDX-License-Identifier: Apache-2.0\n".to_owned()),
+                ),
+                replace("Cargo.toml", "members = [\"crates/*\", \"xtask\"]", "members = [\"crates/*\", \"modules/*\", \"xtask\"]"),
+            ),
+            runner: Runner::Xtask(&["arch-check"]),
+            expect: "transitively depends on banned crate `hyper`",
+        },
+        Case {
             id: "ledger-reserve-beyond-available",
             gate: "budget-concurrency",
             tool: None,
@@ -509,6 +1308,8 @@ The journal is tamper-proof.
 enum Outcome {
     Proven,
     Skipped(String),
+    /// The case is for another operating system.
+    Elsewhere(&'static str),
     Broken(String),
 }
 
@@ -521,6 +1322,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
 
     let mut failures = Vec::new();
     let mut skipped = Vec::new();
+    let mut elsewhere = 0usize;
     for case in cases() {
         if !selected.is_empty() && !selected.iter().any(|s| s.as_str() == case.id) {
             continue;
@@ -535,6 +1337,10 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                 println!("  SKIPPED  {:<30} {why}", case.id);
                 skipped.push(case.id);
             }
+            Outcome::Elsewhere(os) => {
+                println!("  NOT HERE {:<30} runs on {os} only", case.id);
+                elsewhere += 1;
+            }
             Outcome::Broken(why) => {
                 println!("  BROKEN   {:<30} {why}", case.id);
                 failures.push(format!("{}: {why}", case.id));
@@ -546,7 +1352,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     }
     if failures.is_empty() {
         println!(
-            "xtask negative: every exercised gate bites ({} skipped for missing tools)",
+            "xtask negative: every exercised gate bites ({} skipped for missing tools, {elsewhere} for another system)",
             skipped.len()
         );
         Ok(())
@@ -556,10 +1362,13 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
 }
 
 fn run_case(case: &Case, root: &Path, base: &Path, shared_target: &Path) -> Outcome {
-    if let Some(tool) = case.tool
-        && !tool_available(tool)
-    {
-        return Outcome::Skipped(format!("`{tool}` not installed"));
+    match case.tool {
+        Some(UNIX_ONLY) if !cfg!(unix) => return Outcome::Elsewhere("Unix"),
+        Some(WINDOWS_ONLY) if !cfg!(windows) => return Outcome::Elsewhere("Windows"),
+        Some(tool) if tool != UNIX_ONLY && tool != WINDOWS_ONLY && !tool_available(tool) => {
+            return Outcome::Skipped(format!("`{tool}` not installed"));
+        }
+        _ => {}
     }
     if let Runner::History(gate, make_history) = &case.runner {
         let repo = base.join(case.id);
@@ -752,5 +1561,25 @@ fn history_case(
         Ok(()) => Err("gate PASSED on the seeded violation — it does not bite".to_owned()),
         Err(e) if e.contains(expect) => Ok(()),
         Err(e) => Err(format!("gate failed without mentioning `{expect}`: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace;
+
+    /// A seed anchor names exactly one site: one that also matched elsewhere would seed the first
+    /// match, which may not be the case's site (review WP3.A1, round 10; WP3.A5, round 12).
+    #[test]
+    fn a_seed_anchor_must_occur_exactly_once() {
+        let dir = std::env::temp_dir().join(format!("uaos-xtask-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.rs"), "a\nb\na\n").unwrap();
+        assert!(replace("f.rs", "b\n", "c\n")(&dir).is_ok());
+        let twice = replace("f.rs", "a\n", "x\n")(&dir).unwrap_err();
+        assert!(twice.contains("occurs 2 times"), "{twice}");
+        let missing = replace("f.rs", "zzz", "y")(&dir).unwrap_err();
+        assert!(missing.contains("not found"), "{missing}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

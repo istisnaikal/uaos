@@ -13,6 +13,7 @@
 mod allow_audit;
 mod arch;
 mod claims;
+mod clippy;
 mod dco;
 mod decisions;
 mod docs_sync;
@@ -31,6 +32,7 @@ usage: cargo xtask <command>
 
   ci                     run the local merge fast lane (fmt, clippy, tests, all xtask checks)
   quick                  the fast subset for contributors: fmt, clippy, unit tests, local checks
+  clippy                 clippy with warnings denied; also fails on a clippy.toml ban that resolves to nothing
   arch-check             enforce dependency direction (arch.toml)
   allow-audit            fail if a guarded lint is allowed outside its owner paths (arch.toml)
   vet-ratchet            fail if cargo-vet exemptions without notes grow (or shrink unrecorded)
@@ -58,6 +60,7 @@ fn main() -> ExitCode {
         "ci" => ci(),
         "quick" => quick(),
         "evidence" => evidence::check(&util::workspace_root(), rest),
+        "clippy" => clippy::check(&util::workspace_root()),
         "arch-check" => arch::check(&util::workspace_root()),
         "allow-audit" => allow_audit::check(&util::workspace_root()),
         "vet-ratchet" => vet_ratchet::check(&util::workspace_root()),
@@ -97,20 +100,7 @@ fn main() -> ExitCode {
 fn quick() -> Result<(), String> {
     let root = util::workspace_root();
     util::run_step(&root, "fmt", "cargo", &["fmt", "--all", "--", "--check"])?;
-    util::run_step(
-        &root,
-        "clippy",
-        "cargo",
-        &[
-            "clippy",
-            "--workspace",
-            "--all-targets",
-            "--locked",
-            "--",
-            "-D",
-            "warnings",
-        ],
-    )?;
+    clippy::check(&root)?;
     util::run_step(
         &root,
         "unit tests",
@@ -130,20 +120,7 @@ fn quick() -> Result<(), String> {
 fn ci() -> Result<(), String> {
     let root = util::workspace_root();
     util::run_step(&root, "fmt", "cargo", &["fmt", "--all", "--", "--check"])?;
-    util::run_step(
-        &root,
-        "clippy",
-        "cargo",
-        &[
-            "clippy",
-            "--workspace",
-            "--all-targets",
-            "--locked",
-            "--",
-            "-D",
-            "warnings",
-        ],
-    )?;
+    clippy::check(&root)?;
     util::run_step(&root, "test", "cargo", &["test", "--workspace", "--locked"])?;
     arch::check(&root)?;
     allow_audit::check(&root)?;

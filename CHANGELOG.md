@@ -151,6 +151,125 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       - replayed edits are their own class;
       - the selector set is closed;
       - numbers are grammar-only.
+- `uaos-egress`, the one outbound door (P3 Move 1, PR-5; ADR-0013, threat T5).
+  - **Destinations.** Only declared upstreams, named by DNS names. Address literals are refused
+    in every spelling.
+  - **DNS.** The door resolves names itself, within a timeout, classifies every answer, and
+    dials the classified address, at most four per attempt. It refuses every special-purpose
+    range, including IPv4 embedded in IPv4-mapped, NAT64 and 6to4 forms, and Teredo; a
+    well-known NAT64 address of a public IPv4 address is public, so IPv6-only networks reach
+    IPv4-only providers through DNS64. An upstream
+    declared private may also reach loopback, private and unique-local addresses, never
+    link-local (the metadata service). Plain HTTP is dialled only at pinned local addresses and
+    never resolved.
+  - **TLS.** On aws-lc-rs, HTTP/1.1, against the system's root certificates read locally and
+    verified by rustls: a handshake fetches nothing, so a server's certificate cannot make UAOS
+    contact an address of its choosing. Revocation is not checked (ADR-0013 Amendment 1,
+    accepted 2026-10-16).
+  - **Requests.**
+    - Redirects are returned, never followed, and nothing is retried.
+    - The URI comes from the upstream's declaration; the path must start with `/`.
+    - Only GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS are sent. TRACE, which would echo
+      the credential back to the caller, CONNECT and extension methods are refused before
+      contact.
+    - A `101 Switching Protocols` answer, and any `transfer-encoding` but one field whose
+      value is `chunked`, are errors. A `content-length` sent beside `transfer-encoding` is
+      dropped, a `204` keeps none, and otherwise it is forwarded as one value when all its
+      values are the same digits (hyper checks it only where it reads a body).
+    - Hop-by-hop headers, `host` and `content-length` are stripped and no UAOS header is added.
+    - A request carrying one of the listed credential-bearing headers (`authorization`,
+      `cookie`, provider key headers and others) is refused, before anything is stripped.
+    - The provider credential is inserted last; its value is never printed.
+    - Errors say whether the request may have reached the provider: `Unreachable` and
+      `Timeout` mean nothing was sent (retryable), also when the connection fails while hyper
+      sets it up; new codes `EGRESS_INTERRUPTED` (cut off or unanswered after the request was
+      sent) and `EGRESS_UNUSABLE_RESPONSE` (answered in a form the door does not pass on, or
+      could not parse) are not retryable and say the provider may have billed it. `Door::new`
+      refuses a response timeout that does not exceed the connect phase.
+    - One send per Operation; a request bound to another Operation is refused.
+    - A circuit breaker per upstream counts transport failures and lets one probe through
+      after its cooldown; a probe whose caller gives up lets the next attempt probe, and a
+      probe that settles after the circuit moved on changes nothing unless it answered. A
+      transport failure counts only if its attempt was admitted since the circuit last closed
+      after an outage. While a probe is in flight, `retry_after` is a 1 s hint.
+    - IPv6 forms that embed a local IPv4 address are never treated as local, and the IPv6
+      cloud metadata endpoints are refused.
+  - **Connection tasks** run on an executor the runtime provides.
+  - **Error codes** `UAOS-EGRESS-0001` to `0005`: blocked, unreachable, timeout, circuit open,
+    refused.
+- Reachability rules for the door (ADR-0010).
+  - **`clippy.toml`.** Outbound connects (std and tokio, `TcpSocket` included, Unix streams
+    and datagrams, Windows named-pipe clients), name resolution (`lookup_host`,
+    `to_socket_addrs`, hyper-util's `GaiResolver`), UDP and building another HTTP client are
+    banned outside the door; listening (`TcpListener::bind`, `TcpSocket::listen`, Unix
+    listeners, Windows pipe servers) outside the API crate; every std file-system, `Path`,
+    link and ownership call outside `uaos-platform` (a Windows UNC path reaches the network),
+    and every `getrandom` entry point; `OsFs` refuses UNC and device paths in every prefix
+    spelling (the NT `\??\` one included), any path starting with two separators, and a bare
+    volume (`\\?\C:`); task and
+    thread spawning,
+    and the `JoinSet`, `LocalSet` and hyper-util `TokioExecutor` types, outside the runtime;
+    `Door::new` outside its one owner.
+  - **`cargo xtask clippy`** is the clippy gate: clippy with warnings denied, in plain text,
+    failing also on a `clippy.toml` ban whose path resolves to nothing (clippy itself only
+    warns). **Ban canaries** (`crates/uaos-egress/tests/bans.rs`) call every banned item under
+    `#[expect]` on the systems where it exists, so a ban that stops firing fails clippy there.
+    The negative runner skips a case written for another operating system without counting it
+    as skipped. **`cargo xtask allow-audit`** also fails on a ban without a canary and on lint
+    switches outside attributes: a nested `clippy.toml`, a member's own `[lints]`, a workspace
+    lint table not denying a guarded lint, Cargo configuration naming `CLIPPY_CONF_DIR` or lint
+    flags; it reads every mention of a guarded lint in code (macro-built attributes, lint
+    groups, old names), refuses `#[path]` and `include!` outside owners, allows only `[alias]`
+    in Cargo configuration (names in any case), refuses build scripts (every one `cargo
+    metadata` lists) that name one of clippy's variables or keep code in another file, and path
+    build-dependencies, reads `.rs` files in any case, and checks each canary's shape: its item
+    spelled by the item's own path, and no other ban of the same lint spelled by its full path in
+    its function. `cargo
+    xtask clippy` neutralises the
+    environment of the clippy it runs (compiler flags, wrapper, clippy's arguments) and pins
+    clippy's configuration to the workspace root.
+  - **`arch.toml`.** The bin's allow list is now explicit and leaves out the door; the bin
+    reaches it only through the runtime. `uaos-module-api` and every Ring 1 crate are banned,
+    transitively, from network, TLS and async-I/O crates (new `[ring1] ban`, enforced by
+    `cargo xtask arch-check`).
+  - **`deny.toml`** bans `ring`.
+  - **Seeded violations (55):** `egress-dials-private-range`, `egress-numeric-host`,
+    `egress-private-reaches-link-local`, `egress-plaintext-resolved`,
+    `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel`,
+    `egress-embedded-local`, `egress-sends-trace`, `egress-forwards-switching-protocols`,
+    `egress-forwards-contradicting-length`, `egress-forwards-unknown-transfer-coding`,
+    `egress-forwards-repeated-length`, `egress-forwards-bodiless-length`,
+    `egress-delivered-reported-unsent`, `egress-timeout-reported-unsent`,
+    `egress-unsent-reported-delivered`, `egress-ctor-outside-root`,
+    `net-dns-outside-egress`,
+    `net-resolver-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
+    `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor`,
+    `spawn-through-tokio-executor`, `clippy-ban-path-unresolved`, `clippy-ban-silenced`,
+    `clippy-config-nested`, `lints-not-inherited`, `cargo-config-clippy-override`,
+    `clippy-ban-without-canary`, `allow-audit-lint-group`, `allow-audit-macro-attribute`,
+    `allow-audit-path-module`, `allow-audit-nested-target`, `workspace-lints-group-allowed`,
+    `clippy-config-case`, `cargo-config-not-alias`, `build-script-clippy-env`,
+    `build-script-declared-path`, `canary-malformed`, `canary-calls-another-item`,
+    `canary-copied-from-sibling`, `canary-setup-calls-another-ban`, `build-script-module`,
+    `build-dependency-path`, `build-script-include-in-owner`,
+    `arch-ring1-depends-on-hyper`; on Unix only `net-unix-connect-outside-egress`,
+    `net-unix-connect-addr-outside-egress`, `net-tokio-unix-connect-outside-egress`,
+    `net-unix-socket-connect-outside-egress`; on Windows only (not run in CI)
+    `net-named-pipe-outside-egress`, `osfs-doubled-separator-unc` and `osfs-bare-volume`.
+  - **Review:** `docs/reviews/WP3.A5-egress.md`, seventeen rounds, all resolved: 2 High,
+    4 Medium, 9 Low; then 1 High, 2 Medium, 7 Low; then 1 Medium, 5 Low; then 1 Medium, 5 Low;
+    then 2 Medium, 4 Low; then 2 Medium, 2 Low; then 1 High, 2 Medium, 3 Low; then 1 Medium,
+    7 Low; then 4 Low; then 2 Low; then 3 Low; then 2 Low; then 1 Medium, 2 Low; then 2 Low;
+    then 2 Low; then 1 Medium; then 5 Low. Two fixes rest on ADR-0013 Amendment 1, accepted by
+    the
+    maintainer on 2026-10-16.
+- Dependencies for the ADR-0013 stack: tokio, hyper 1, hyper-util, http, rustls 0.23
+  (aws-lc-rs only), tokio-rustls, rustls-native-certs, and rcgen for tests only.
+  - 48 cargo-vet exemptions, each with a written reason (the unnoted baseline is unchanged);
+    21 of them are lockfile-only crates that compile for no target.
+  - cargo-vet 0.10 ignores the newer Bytecode Alliance audits for this stack, so they are not
+    imported yet.
+
 - Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
   unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a
   forbid.

@@ -25,8 +25,27 @@ uaos-platform = { path = "crates/uaos-platform" }
 uaos-policy = { path = "crates/uaos-policy" }
 uaos-redact = { path = "crates/uaos-redact" }
 uaos-state = { path = "crates/uaos-state" }
+uaos-egress = { path = "crates/uaos-egress" }
 
 # External — every addition needs a justification in the PR (CONTRIBUTING.md §Dependencies).
+# Async and HTTP stack (ADR-0013, D-26). tokio with only the features each crate asks for; hyper 1
+# and hyper-util directly: no reqwest or axum, whose redirects and pooling are hidden policy.
+bytes = "1.12.1"
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", default-features = false }
+hyper-util = { version = "0.1.21", default-features = false }
+tokio = { version = "1.53.2", default-features = false }
+tower-service = "0.3.3"
+# TLS on aws-lc-rs only (plan D18). Certificates are verified by rustls against the roots in the
+# operating system's store, read locally; nothing is fetched during a handshake (ADR-0013
+# amendment, review WP3.A5 H1).
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-native-certs = "0.8.5"
+rustls-pki-types = "1.15.1"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
+# Dev only: a throwaway certificate authority for the loopback TLS mock in tests.
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
 # aws-lc-rs: the single audited crypto family for TLS and primitives (plan D18).
 aws-lc-rs = { version = "1.18.2", default-features = false, features = ["aws-lc-sys", "alloc"] }
 # Multi-literal search for redaction anchors and known vault secrets (already shipped via regex).

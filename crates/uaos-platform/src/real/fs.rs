@@ -8,9 +8,60 @@ use std::path::{Path, PathBuf};
 
 use crate::fs::{AppendFile, Fs, FsError, LockGuard, temp_sibling};
 
-/// `std::fs`-backed implementation of [`Fs`].
+/// `std::fs`-backed implementation of [`Fs`]. It works only on local paths: a Windows UNC path
+/// (`\\host\share`, `\\?\UNC\...`) resolves its host and opens SMB to it, and a device
+/// path (`\\.\...`, `\\?\GLOBALROOT\...`) reaches past the file system, so both are refused
+/// with [`FsError::PermissionDenied`] before any call (review WP3.A5, round 7, M2), and so is
+/// any path that starts with two separators, which Windows reads as UNC even where std parses no
+/// prefix (round 13, M1), and a verbatim disk path naming the bare volume (`\\?\C:`, a
+/// device; round 14, L1). Data stays local (red line 1).
 #[derive(Debug, Default)]
 pub struct OsFs;
+
+/// Refuses a path that is not on a local disk.
+#[cfg_attr(
+    not(windows),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "only Windows has network and device path spellings to refuse"
+    )
+)]
+fn local(path: &Path, op: &'static str) -> Result<(), FsError> {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut parts = path.components();
+        // Windows reads two leading separators, in any mix of `\` and `/`, as a network path
+        // even where std parses no UNC prefix (`\\host\\share`, `//host//share`): std
+        // requires a non-empty server and share, the system collapses the doubled separator
+        // (review WP3.A5, round 13, M1). Only a verbatim disk path may start that way, and std
+        // parses that one as a prefix.
+        let doubled = path
+            .as_os_str()
+            .as_encoded_bytes()
+            .get(..2)
+            .is_some_and(|start| start.iter().all(|b| *b == b'\\' || *b == b'/'));
+        let refused = match parts.next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::Disk(_) => false,
+                // `\\?\C:` alone names the raw volume, a device; `\\?\C:\` is its root
+                // directory (round 14, L1).
+                Prefix::VerbatimDisk(_) => parts.next() != Some(Component::RootDir),
+                _ => true,
+            },
+            // `\??\...` names the NT object namespace (`\??\UNC\host`, devices): std does not
+            // parse it as a prefix but hands it to the system unchanged (review WP3.A5, round 8, M1).
+            Some(Component::RootDir) => doubled || parts.next() == Some(Component::Normal(std::ffi::OsStr::new("??"))),
+            _ => doubled,
+        };
+        if refused {
+            return Err(FsError::PermissionDenied { op });
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (path, op);
+    Ok(())
+}
 
 #[derive(Debug)]
 struct OsAppendFile(File);
@@ -45,10 +96,12 @@ impl LockGuard for OsLockGuard {}
 #[allow(clippy::disallowed_methods, reason = "uaos-platform is the filesystem owner (D15)")]
 impl Fs for OsFs {
     fn create_dir_all(&self, path: &Path) -> Result<(), FsError> {
+        local(path, "create_dir_all")?;
         std::fs::create_dir_all(path).map_err(|e| FsError::from_io("create_dir_all", &e))
     }
 
     fn open_append(&self, path: &Path) -> Result<Box<dyn AppendFile>, FsError> {
+        local(path, "open_append")?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -58,10 +111,12 @@ impl Fs for OsFs {
     }
 
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+        local(path, "read")?;
         std::fs::read(path).map_err(|e| FsError::from_io("read", &e))
     }
 
     fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
+        local(path, "list_dir")?;
         let mut out = Vec::new();
         for entry in std::fs::read_dir(path).map_err(|e| FsError::from_io("list_dir", &e))? {
             out.push(entry.map_err(|e| FsError::from_io("list_dir", &e))?.path());
@@ -71,15 +126,19 @@ impl Fs for OsFs {
     }
 
     fn rename(&self, from: &Path, to: &Path) -> Result<(), FsError> {
+        local(from, "rename")?;
+        local(to, "rename")?;
         std::fs::rename(from, to).map_err(|e| FsError::from_io("rename", &e))
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+        local(path, "remove_file")?;
         std::fs::remove_file(path).map_err(|e| FsError::from_io("remove_file", &e))
     }
 
     #[cfg(unix)]
     fn sync_dir(&self, path: &Path) -> Result<(), FsError> {
+        local(path, "sync_dir")?;
         File::open(path)
             .and_then(|dir| dir.sync_all())
             .map_err(|_| FsError::SyncFailed { op: "sync_dir" })
@@ -89,12 +148,14 @@ impl Fs for OsFs {
     fn sync_dir(&self, path: &Path) -> Result<(), FsError> {
         // NTFS journals directory metadata; there is no portable way (and no need) to flush a
         // directory handle on Windows. Confirm the directory exists so callers get NotFound.
+        local(path, "sync_dir")?;
         std::fs::metadata(path)
             .map(|_| ())
             .map_err(|e| FsError::from_io("sync_dir", &e))
     }
 
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+        local(path, "write_atomic")?;
         let tmp = temp_sibling(path);
         let result = (|| {
             let mut file = File::create(&tmp).map_err(|e| FsError::from_io("write_atomic", &e))?;
@@ -118,6 +179,7 @@ impl Fs for OsFs {
     }
 
     fn try_lock_exclusive(&self, path: &Path) -> Result<Box<dyn LockGuard>, FsError> {
+        local(path, "lock")?;
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -135,6 +197,48 @@ impl Fs for OsFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rounds 7, 8 and 13 (M2, M1, M1): every method refuses network and device paths, in every
+    /// prefix spelling, before any call; local ones pass. DOS device names in the last
+    /// component (`C:\data\NUL`) are not refused: every file UAOS opens has a name UAOS chooses,
+    /// and the data directory, which configuration names, is owed with M3 (review WP3.A5,
+    /// round 9).
+    #[cfg(windows)]
+    #[test]
+    fn network_and_device_paths_are_refused() {
+        let refused = |r: Result<(), FsError>| matches!(r, Err(FsError::PermissionDenied { .. }));
+        let scratch = Scratch::new("refused");
+        let local_file = scratch.0.join("local");
+        for path in [
+            r"\\uaos-canary.invalid\share\x",
+            r"\\?\UNC\uaos-canary.invalid\share\x",
+            r"\\.\pipe\uaos-canary",
+            r"\\?\GLOBALROOT\Device\uaos-canary",
+            r"\??\UNC\uaos-canary.invalid\share\x",
+            r"\??\GLOBALROOT\Device\Null",
+            r"/??/pipe/uaos-canary",
+            r"\\uaos-canary.invalid\\share\x",
+            r"//uaos-canary.invalid//share/x",
+            r"\/uaos-canary.invalid\\share\x",
+            r"\\uaos-canary.invalid\",
+            r"\\?\C:",
+        ] {
+            let p = Path::new(path);
+            assert!(refused(OsFs.create_dir_all(p)), "create_dir_all {path}");
+            assert!(refused(OsFs.open_append(p).map(drop)), "open_append {path}");
+            assert!(refused(OsFs.read(p).map(drop)), "read {path}");
+            assert!(refused(OsFs.list_dir(p).map(drop)), "list_dir {path}");
+            assert!(refused(OsFs.rename(p, &local_file)), "rename from {path}");
+            assert!(refused(OsFs.rename(&local_file, p)), "rename to {path}");
+            assert!(refused(OsFs.remove_file(p)), "remove_file {path}");
+            assert!(refused(OsFs.sync_dir(p)), "sync_dir {path}");
+            assert!(refused(OsFs.write_atomic(p, b"x")), "write_atomic {path}");
+            assert!(refused(OsFs.try_lock_exclusive(p).map(drop)), "lock {path}");
+        }
+        for path in [r"C:\data", r"\\?\C:\data", "relative", r"\data", r"\x\??"] {
+            assert!(local(Path::new(path), "read").is_ok(), "{path}");
+        }
+    }
 
     /// A unique scratch directory under the OS temp dir, removed on drop.
     struct Scratch(PathBuf);
@@ -156,6 +260,7 @@ mod tests {
     }
 
     impl Drop for Scratch {
+        #[allow(clippy::disallowed_methods, reason = "test scaffolding")]
         fn drop(&mut self) {
             let _cleanup = std::fs::remove_dir_all(&self.0);
         }
