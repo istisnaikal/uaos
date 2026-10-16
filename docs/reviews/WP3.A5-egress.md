@@ -10,7 +10,7 @@ Low findings fixed or accepted with a reason. Two fixes change accepted decision
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
 fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
 1 Medium and 5 Low, a fifth 2 Medium and 4 Low, a sixth 2 Medium and 2 Low, a seventh
-1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, an eleventh 3 Low, and a twelfth 2 Low, all resolved below. The PR stays a draft until a review comes back clean.
+1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, an eleventh 3 Low, a twelfth 2 Low, and a thirteenth 1 Medium and 2 Low, all resolved below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -291,3 +291,24 @@ Also: the seed-anchor uniqueness rule has a unit test (`a_seed_anchor_must_occur
 **Verified locally (Windows, dedicated target directory):** 29 xtask tests; `cargo xtask clippy`,
 `allow-audit`; all 45 egress negatives, of which 41 PROVEN here and the four Unix ones left to
 Linux CI. The door's code did not change this round.
+
+## Thirteenth review (2026-10-16)
+
+**Reviewed:** `7924f8a` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export, asked to spend at least half its effort on the door after four rounds on the
+gates. **Result:** 0 High · 1 Medium · 2 Low, all in the door and the platform's file system;
+the twelfth round's gate change held. Address classification was checked against the IANA
+registries; DNS, TLS, credentials, the breaker and the absence of retries and redirects held.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| M1 | `OsFs` let UNC paths through when written with a doubled separator: std parses `\\nas\\share\x`, `//nas//share/x` and `\/nas\\share\x` as a root directory and plain components (it needs a non-empty server and share), while Windows collapses the separator and opens `\\nas\share\x`. Over loopback SMB, `OsFs.read(r"\\127.0.0.1\\C$\Windows\win.ini")` returned the file. A data directory written with doubled backslashes in configuration would reach a host over SMB with the user's NTLM identity (red line 1). Nothing configuration-supplied reaches `OsFs` yet (M3) | On Windows, a path that starts with two separators, in any mix of `\` and `/`, is refused unless std parses it as a verbatim disk path. ADR-0013, T5, the CHANGELOG and `OsFs`'s doc say so | `network_and_device_paths_are_refused` with four doubled spellings, every `Fs` method; negative `osfs-doubled-separator-unc` **PROVEN** (Windows only, like the named-pipe ban) |
+| L1 | An upstream answering `101 Switching Protocols` (the door strips `upgrade`, so it asked for nothing) reached the caller as a final response, with the upgraded connection lost; a relay copying the status would switch its own client's connection | A 1xx status from the client is an error (`the upstream switched protocols unasked`); the breaker counts it as answered | `a_switching_protocols_answer_is_an_error`; negative `egress-forwards-switching-protocols` **PROVEN** |
+| L2 | A response with `transfer-encoding: chunked` and a contradicting `content-length` reached the caller with the `content-length` kept and the body decoded; relayed as is, the client got no response | A `content-length` beside `transfer-encoding` is dropped (RFC 9112 §6.3) | `a_content_length_beside_transfer_encoding_is_dropped`; negative `egress-forwards-contradicting-length` **PROVEN** |
+
+Also: ADR-0013 says hyper writes `host` and frames the body, and the CHANGELOG's review bullet no
+longer breaks a line in four.
+
+**Verified locally (Windows, dedicated target directory):** 24 egress unit and 24 integration
+tests; 24 platform tests; 29 xtask tests; `cargo xtask clippy`, `allow-audit`; all 48 egress
+negatives, of which 44 PROVEN here and the four Unix ones left to Linux CI.

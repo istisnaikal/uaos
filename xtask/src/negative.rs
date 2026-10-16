@@ -498,6 +498,55 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "2002:7f00:1::1",
         },
         Case {
+            id: "egress-forwards-switching-protocols",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 13, L1: a 101 answer handed to the caller as final.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "        if parts.status.is_informational() {",
+                "        if parts.status.is_informational() && parts.status.as_u16() == 0 {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_switching_protocols_answer_is_an_error"],
+            },
+            expect: "a 101 reached the caller",
+        },
+        Case {
+            id: "egress-forwards-contradicting-length",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 13, L2: a content-length beside transfer-encoding forwarded.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "        if headers.contains_key(header::TRANSFER_ENCODING) {",
+                "        if headers.contains_key(header::TRANSFER_ENCODING) && headers.is_empty() {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_content_length_beside_transfer_encoding_is_dropped"],
+            },
+            expect: "a content-length contradicting the decoded body was forwarded",
+        },
+        Case {
+            id: "osfs-doubled-separator-unc",
+            gate: "test",
+            tool: Some(WINDOWS_ONLY),
+            // Review WP3.A5 round 13, M1: a UNC path spelled with doubled separators, which std
+            // does not parse as UNC and Windows does.
+            seed: replace(
+                "crates/uaos-platform/src/real/fs.rs",
+                "            .is_some_and(|start| start.iter().all(|b| *b == b'\\\\' || *b == b'/'));",
+                "            .is_some_and(|_| false);",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-platform", "--lib", "network_and_device_paths_are_refused"],
+            },
+            expect: "uaos-canary.invalid",
+        },
+        Case {
             id: "egress-sends-trace",
             gate: "test",
             tool: None,

@@ -373,7 +373,8 @@ impl Door {
     /// already sent. Only the last consumes the Operation: once a request is handed to the
     /// client, even a failed one, a retry needs a new Operation. The URI is built from the
     /// upstream's own name and port, so nothing in the request can redirect it. The credential
-    /// is inserted last. Redirects are returned, never followed.
+    /// is inserted last. Redirects are returned, never followed. A `101 Switching Protocols`
+    /// answer is an error, and a `content-length` beside `transfer-encoding` is dropped.
     ///
     /// # Errors
     /// [`EgressError`].
@@ -469,7 +470,18 @@ impl Door {
         };
         admitted.settle(Outcome::Answered);
         let (parts, body) = response.into_parts();
+        // The client returns a 1xx only for `101 Switching Protocols`, which nothing the door
+        // sends asks for (it strips `upgrade`); passed on, it would let a relay switch its
+        // client's connection (review WP3.A5, round 13, L1).
+        if parts.status.is_informational() {
+            return Err(EgressError::Unreachable("the upstream switched protocols unasked"));
+        }
         let mut headers = parts.headers;
+        // A body framed by `transfer-encoding` reaches the caller decoded, so a `content-length`
+        // sent beside it describes nothing the caller receives (RFC 9112 §6.3; round 13, L2).
+        if headers.contains_key(header::TRANSFER_ENCODING) {
+            headers.remove(header::CONTENT_LENGTH);
+        }
         strip_hop_by_hop(&mut headers);
         Ok(EgressResponse {
             status: parts.status,

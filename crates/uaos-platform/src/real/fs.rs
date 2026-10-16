@@ -11,8 +11,9 @@ use crate::fs::{AppendFile, Fs, FsError, LockGuard, temp_sibling};
 /// `std::fs`-backed implementation of [`Fs`]. It works only on local paths: a Windows UNC path
 /// (`\\host\share`, `\\?\UNC\...`) resolves its host and opens SMB to it, and a device
 /// path (`\\.\...`, `\\?\GLOBALROOT\...`) reaches past the file system, so both are refused
-/// with [`FsError::PermissionDenied`] before any call (review WP3.A5, round 7, M2). Data stays
-/// local (red line 1).
+/// with [`FsError::PermissionDenied`] before any call (review WP3.A5, round 7, M2), and so is
+/// any path that starts with two separators, which Windows reads as UNC even where std parses no
+/// prefix (round 13, M1). Data stays local (red line 1).
 #[derive(Debug, Default)]
 pub struct OsFs;
 
@@ -29,12 +30,22 @@ fn local(path: &Path, op: &'static str) -> Result<(), FsError> {
     {
         use std::path::{Component, Prefix};
         let mut parts = path.components();
+        // Windows reads two leading separators, in any mix of `\` and `/`, as a network path
+        // even where std parses no UNC prefix (`\\host\\share`, `//host//share`): std
+        // requires a non-empty server and share, the system collapses the doubled separator
+        // (review WP3.A5, round 13, M1). Only a verbatim disk path may start that way, and std
+        // parses that one as a prefix.
+        let doubled = path
+            .as_os_str()
+            .as_encoded_bytes()
+            .get(..2)
+            .is_some_and(|start| start.iter().all(|b| *b == b'\\' || *b == b'/'));
         let refused = match parts.next() {
             Some(Component::Prefix(prefix)) => !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)),
             // `\??\...` names the NT object namespace (`\??\UNC\host`, devices): std does not
             // parse it as a prefix but hands it to the system unchanged (review WP3.A5, round 8, M1).
-            Some(Component::RootDir) => parts.next() == Some(Component::Normal(std::ffi::OsStr::new("??"))),
-            _ => false,
+            Some(Component::RootDir) => doubled || parts.next() == Some(Component::Normal(std::ffi::OsStr::new("??"))),
+            _ => doubled,
         };
         if refused {
             return Err(FsError::PermissionDenied { op });
@@ -180,7 +191,7 @@ impl Fs for OsFs {
 mod tests {
     use super::*;
 
-    /// Rounds 7 and 8 (M2, M1): every method refuses network and device paths, in every
+    /// Rounds 7, 8 and 13 (M2, M1, M1): every method refuses network and device paths, in every
     /// prefix spelling, before any call; local ones pass. DOS device names in the last
     /// component (`C:\data\NUL`) are not refused: every file UAOS opens has a name UAOS chooses,
     /// and the data directory, which configuration names, is owed with M3 (review WP3.A5,
@@ -199,6 +210,10 @@ mod tests {
             r"\??\UNC\uaos-canary.invalid\share\x",
             r"\??\GLOBALROOT\Device\Null",
             r"/??/pipe/uaos-canary",
+            r"\\uaos-canary.invalid\\share\x",
+            r"//uaos-canary.invalid//share/x",
+            r"\/uaos-canary.invalid\\share\x",
+            r"\\uaos-canary.invalid\",
         ] {
             let p = Path::new(path);
             assert!(refused(OsFs.create_dir_all(p)), "create_dir_all {path}");
