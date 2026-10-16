@@ -194,6 +194,10 @@ negative = [
   "plain-marker-trusted",
   "put-overlapping-failed-flush",
   "failed-shred-vouched",
+  "flush-acked-across-poisoning",
+  "shred-marked-after-record",
+  "failed-put-lifts-shred-mark",
+  "rotation-skips-current-key",
 ]
 
 [[gate]]

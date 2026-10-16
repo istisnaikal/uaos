@@ -116,7 +116,9 @@ record. What follows describes the code after those fixes.
     that fails while it runs keeps the store poisoned. A put that joins the pending set while
     the store is poisoned is refused, and so is a put whose write overlapped a failed flush,
     which poisons the store again so that the next recovery rewrites it even if one already
-    ran.
+    ran. A journal flush is not acknowledged if the store was poisoned while it ran: every
+    flushed write or directory flush that can poison holds a flush window until it has, and the
+    flush takes that window before it acknowledges its batch.
   - **Recovery rewrites; it never re-flushes.** `recover` reads each pending chunk back. A
     readable one is rewritten to new files and flushed, because after a writeback error a second
     flush of the same file can report success without writing anything. An unreadable one is
@@ -134,13 +136,14 @@ record. What follows describes the code after those fixes.
     coordinates a store, so it cannot be opened without one (`JournalError::PayloadsRequired`).
     For a journal that coordinates a store, every payload up to the marker is durable or its
     loss journaled, and the marker never moves while a loss is unreported or the store is
-    poisoned. A plain journal's marker says nothing about payloads: it bounds only the copy at
-    open.
+    poisoned. A plain journal's marker says nothing about payloads, so the first open with a
+    store invalidates it before writing the flag; no later open, even after that one fails, reads
+    it as vouching for payloads.
   - **Recovery on open.** `open_with_payloads` reads back, rewrites and flushes the payloads of
-    every record after the marker. Without a valid marker written while the journal coordinated a
-    store (a store attached for the first time, a removed marker) it checks the **whole
-    journal**, not the last segment, so the work is bounded by the marker's lag (about a second
-    of records) only when such a marker exists. Losses found here, and losses the store set aside earlier, are
+    every record after the marker. Without a valid marker (a store attached for the first time,
+    whose plain marker was invalidated, or a removed marker) it checks the **whole journal**, not
+    the last segment, so the work is bounded by the marker's lag (about a second of records)
+    only when a marker exists. Losses found here, and losses the store set aside earlier, are
     reported for every record in the journal that references them. The records after the
     durable point are then **copied**, unflushed, to a fresh active segment, the `chunk.lost`
     records for them are appended after them, and one flush makes both durable. Only then is the
@@ -161,10 +164,13 @@ record. What follows describes the code after those fixes.
     `Journal::shred`, which appends that record, flushes it, rotates the KEK and removes the
     chunk while no other record can be appended. The re-wrap of the pocket's other keys runs
     after the writer is free, through the returned `PendingRewrap` (finished explicitly or when
-    dropped); until then the old KEK lives. From the moment a shred begins, the store neither
-    vouches for the chunk nor serves it until the content is stored again or the shred
-    completes, so a record appended afterwards that references it is refused, also when the
-    shred fails midway. A direct `ChunkStore::shred` on a coordinated store is refused. A shred whose record is durable but which a crash interrupted is completed when the
+    dropped); until then the old KEK lives. The store marks the chunk before the record is
+    appended, and until a put of the content succeeds or the shred completes, it neither vouches
+    for the chunk nor serves it: a record appended afterwards that references it is refused,
+    whichever step of the shred failed, its own flush included. At most
+    `MAX_UNFINISHED_SHREDS` (4,096) failed shreds stay marked; past that, a shred is refused
+    before its record until earlier ones are retried. A direct `ChunkStore::shred` on a
+    coordinated store is refused. A shred whose record is durable but which a crash interrupted is completed when the
     journal opens, once its record is durable again after the open's flush, and it counts as
     unfinished while a file of the pair or an older KEK version remains; the store's own startup
     would otherwise re-wrap the leftover key and leave the content readable. Both `chunk.lost` and
@@ -178,12 +184,16 @@ record. What follows describes the code after those fixes.
     lock per stripe of pockets (64 stripes) keeps a shred from destroying the KEK a concurrent
     put is wrapping under or a read is unwrapping with; only puts, reads and flushes in the same
     stripe wait while a shred re-wraps its pocket (two flushed writes per key file). The journal
-    writer does not wait for the re-wrap.
+    writer is released before the re-wrap, but its flush still waits while a re-wrap holds the
+    stripe of a pocket in which a chunk is pending.
   - **A pair a shred leaves on disk is never overwritten with the journal.** A shred forgets its
     chunk before removing the files; if the removal fails, the chunk is indexed as possibly on
     disk, so a later put of the same content rewrites the pair flushed with its own data key.
   - **Rotation re-wraps are always flushed.** The old KEK is destroyed right after, so an
-    unflushed re-wrap lost to power would leave a key file only the destroyed KEK can open.
+    unflushed re-wrap lost to power would leave a key file only the destroyed KEK can open. For
+    the same reason every readable key file of the pocket is written again, as a fresh flushed
+    file, before old versions are destroyed, also one already at the current version: a re-wrap
+    whose directory flush failed leaves its new file visible but not durable.
   - **Quarantine is durable.** The quarantine folder is flushed before any later flush of the
     chunk folders can make the removal there durable.
 
@@ -202,16 +212,19 @@ record. What follows describes the code after those fixes.
     fails when they are reverted: second round L3 (losses set aside before quarantine) and L4 (a
     concurrent put between two recovery steps); third round M3 (the stripe count), the marker
     half of M1 (restarts are also held flat by removing the replaced segment), the data-file
-    half of L3, and two parts of L4 (recovery clears only what it saw; `prepare` poisons).
-  - **Random crash schedules.** Writes, repeated payloads, write-ahead shreds, flushes, failed
+    half of L3, and two parts of L4 (recovery clears only what it saw; `prepare` poisons);
+    fifth round, the flush window, which closes the microseconds between a concurrent write's
+    failure and its poisoning (the generation check it completes is tested).
+  - **Random crash schedules.** Writes, repeated payloads, write-ahead shreds (their re-wraps
+    left pending across later operations, finished later, or lost to a crash), flushes, failed
     flushes, failed appends, clock advances, process crashes, power losses and recoveries, with
     faults still armed during the next open, followed by a crash or a power loss. 64 cases per
     merge; 12,000 run locally on the final code. Every acknowledged record survives a process crash (except records that existed only
     in memory after a flush and its rewrite both failed, ADR-0003). Every flushed record's
     payload survives a power loss unless its loss was journaled first. No surviving record's
     payload is unreadable without a `chunk.lost` record.
-- **Gate self-test.** The `journal-durability` gate lists twenty-three seeded violations in
-  `gates.toml`: twenty-two for this ADR, one per silent-loss class the four reviews and the
+- **Gate self-test.** The `journal-durability` gate lists twenty-seven seeded violations in
+  `gates.toml`: twenty-six for this ADR, one per silent-loss class the five reviews and the
   schedules found (one of them, `chunk-put-shared-temp`, checks temporary naming only), and P1's
   `journal-ack-without-write`.
 - **Not modelled, stated plainly.** `SimFs` cannot model a failed directory flush that drops

@@ -591,8 +591,8 @@ pub(crate) fn cases() -> Vec<Case> {
             // WP3.A1 fourth round M1: the first open with a store trusts a plain journal's marker.
             seed: replace(
                 "crates/uaos-state/src/journal/writer.rs",
-                "                let payloads_checked = if flagged { durable } else { None };",
-                "                let payloads_checked = durable;",
+                "fs.write_atomic(&dir.join(FLUSH_MARKER), none.as_bytes())",
+                "Ok::<(), FsError>(drop(none))",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -633,6 +633,87 @@ pub(crate) fn cases() -> Vec<Case> {
                 args: &["test", "-p", "uaos-state", "--test", "durability", "r4_l2_a_failed_shred_never_vouches_for_its_content"],
             },
             expect: "a record referenced content whose shred is recorded",
+        },
+        Case {
+            id: "flush-acked-across-poisoning",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 fifth round M2: a journal flush acknowledged although a flushed write elsewhere
+            // failed while it ran and may have dropped the batch's directory entries.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "        drop(self.flush_window.write().unwrap_or_else(PoisonError::into_inner));\n        if self.poison.load(Ordering::SeqCst) != started {",
+                "        drop(self.flush_window.write().unwrap_or_else(PoisonError::into_inner));\n        if false && self.poison.load(Ordering::SeqCst) != started {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r5_m2_a_flush_is_not_acknowledged_across_a_failed_rewrap"],
+            },
+            expect: "acknowledged across a failed flush",
+        },
+        Case {
+            id: "shred-marked-after-record",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 fifth round L1: a shred whose own flush fails leaves its chunk unmarked, so
+            // once the record is durable a later record cancels the shred.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "        store.begin_shred(pocket, chunk).map_err(JournalError::Payload)?;\n",
+                "",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r5_l1_a_shred_whose_flush_failed_stays_refused"],
+            },
+            expect: "whose shred record is durable",
+        },
+        Case {
+            id: "failed-put-lifts-shred-mark",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 fifth round L1: a put lifts a failed shred's mark before its own write fails.
+            seed: both(
+                replace(
+                    "crates/uaos-state/src/chunks/mod.rs",
+                    "        self.stored_again(key);\n        Ok(chunk)\n    }",
+                    "        Ok(chunk)\n    }",
+                ),
+                replace(
+                    "crates/uaos-state/src/chunks/mod.rs",
+                    "        self.check_poison()?;\n        if locked(&self.known).contains(&key) {\n            // Written by this process",
+                    "        self.check_poison()?;\n        self.stored_again(key);\n        if locked(&self.known).contains(&key) {\n            // Written by this process",
+                ),
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r5_l1_a_failed_put_keeps_a_failed_shred_refused"],
+            },
+            expect: "a failed put lifted the refusal",
+        },
+        Case {
+            id: "rotation-skips-current-key",
+            gate: "journal-durability",
+            tool: None,
+            // Found by the fifth WP3.A1 round's crash schedules: a re-wrap that skips a key file
+            // already at the current version retires the KEK the durable copy still needs.
+            seed: both(
+                replace(
+                    "crates/uaos-state/src/chunks/mod.rs",
+                    "                Ok((data_key, _)) => {\n                    self.write_key(pocket, chunk, &data_key, current, &kek, Flush::Now)?;",
+                    "                Ok((data_key, version)) if version < current => {\n                    self.write_key(pocket, chunk, &data_key, current, &kek, Flush::Now)?;",
+                ),
+                replace(
+                    "crates/uaos-state/src/chunks/mod.rs",
+                    "                Err(ChunkError::Unavailable | ChunkError::Corrupt) => {}\n                Err(e) => return Err(e),",
+                    "                Ok(_) | Err(ChunkError::Unavailable | ChunkError::Corrupt) => {}\n                Err(e) => return Err(e),",
+                ),
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r5_a_failed_rewrap_never_leaves_a_key_only_a_retired_kek_opens"],
+            },
+            expect: "retired a KEK a durable key file still needed",
         },
         Case {
             id: "shred-incomplete-key-only",

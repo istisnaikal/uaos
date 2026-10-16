@@ -81,6 +81,10 @@ pub const MAX_PENDING: usize = 16_384;
 /// Chunks remembered as written or verified by this process. Past it the memory is cleared;
 /// later puts then rewrite chunks once more, which costs time, never correctness (I-08).
 pub const MAX_KNOWN: usize = 262_144;
+/// Chunks a shred has begun on and that are not yet removed, kept refused in memory (review
+/// WP3.A1, fourth round, L2). Only shreds that fail leave entries; at the bound, new shreds are
+/// refused until earlier ones are retried or their content stored again (fifth round, L3).
+pub const MAX_UNFINISHED_SHREDS: usize = 4_096;
 
 /// Rotation locks, one per stripe of pockets: a shred re-wraps and destroys KEKs while holding
 /// its pocket's stripe exclusively, and only puts, reads and flushes in the same stripe wait for
@@ -139,6 +143,10 @@ pub enum ChunkError {
     /// [`crate::journal::Journal::shred`], which records it first.
     #[error("this store is coordinated by a journal; shred through the journal")]
     ShredThroughJournal,
+    /// [`MAX_UNFINISHED_SHREDS`] shreds failed and were neither retried nor followed by a put
+    /// of their content; retry them first.
+    #[error("too many shreds left unfinished by failures; retry them first")]
+    ShredBacklog,
 }
 
 impl ChunkError {
@@ -151,7 +159,7 @@ impl ChunkError {
             Self::Keyring(_) => codes::STORE_KEYRING_UNAVAILABLE,
             Self::DiskFull => codes::JOURNAL_DISK_FULL,
             Self::FlushFailed => codes::STORE_PAYLOAD_FLUSH_FAILED,
-            Self::PendingFull => codes::RUNTIME_OVERLOAD,
+            Self::PendingFull | Self::ShredBacklog => codes::RUNTIME_OVERLOAD,
             Self::InstanceLocked => codes::JOURNAL_INSTANCE_LOCKED,
             Self::ShredThroughJournal => codes::CONFIG_INVALID,
             Self::TooLarge | Self::Storage(_) | Self::Platform(_) => codes::JOURNAL_WRITE_FAILED,
@@ -206,7 +214,8 @@ pub struct LostChunk {
 pub struct ShredReport {
     /// Whether the chunk existed (a repeated shred is a no-op that still completes rotation).
     pub removed: bool,
-    /// Number of surviving data keys re-wrapped under the new KEK.
+    /// Number of surviving data keys written again under the new KEK: every readable key file
+    /// of the pocket, so none is left durable only under a version about to be destroyed.
     pub rewrapped: usize,
     /// KEK version now in force; every older version has been destroyed.
     pub kek_version: KekVersion,
@@ -215,8 +224,10 @@ pub struct ShredReport {
 /// The second half of a shred done through [`crate::journal::Journal::shred`]: the chunk is
 /// gone and its record is durable, but the pocket's other keys are still wrapped under the old
 /// KEK, which lives until [`PendingRewrap::finish`] re-wraps them and destroys it. It runs
-/// without the journal writer, so a large pocket stalls only its stripe of the store, never the
-/// journal (review WP3.A1, fourth round, M2). Dropped unfinished, it finishes on the dropping
+/// without the journal writer, so a large pocket no longer holds up every append (review WP3.A1,
+/// fourth round, M2). It still holds its stripe of the store: puts, reads and flushes there wait,
+/// and so does the journal's flush while a chunk in that stripe is pending (fifth round, L2).
+/// Dropped unfinished, it finishes on the dropping
 /// thread; if that fails, or the process dies first, the next shred in the pocket or the
 /// store's next open finishes the rotation.
 #[derive(Debug)]
@@ -315,6 +326,9 @@ pub struct ChunkStore {
     /// they are stored again or removed (review WP3.A1, fourth round, L2). Only a failed shred
     /// leaves an entry, and a retry of it or a put of the content clears it.
     shredding: Mutex<BTreeSet<Key>>,
+    /// Held shared by every flushed write and directory flush that poisons on failure, until it
+    /// has; `flush_batch` takes it exclusively before it acknowledges a batch (fifth round, M2).
+    flush_window: RwLock<()>,
 }
 
 /// The first 8 bytes of a reference, which index the key files present (see `earlier`).
@@ -413,6 +427,7 @@ impl ChunkStore {
             keyed_pockets: Mutex::new(BTreeSet::new()),
             attached: AtomicBool::new(false),
             shredding: Mutex::new(BTreeSet::new()),
+            flush_window: RwLock::new(()),
         };
         for pocket in store.pockets()? {
             store.sweep_temporaries(pocket)?;
@@ -488,10 +503,7 @@ impl ChunkStore {
             .create_dir_all(&self.pocket_dir(pocket).join(QUARANTINE_DIR))
             .map_err(storage)?;
         for dir in [self.root.clone(), self.pocket_dir(pocket)] {
-            if let Err(e) = self.fs.sync_dir(&dir) {
-                self.poison_if_balanced();
-                return Err(storage(e));
-            }
+            self.flushed(|| self.fs.sync_dir(&dir))?;
         }
         prepared.insert(pocket);
         Ok(())
@@ -664,10 +676,9 @@ impl ChunkStore {
         let _slot = self.slot(key);
         // Under the slot: a flush that failed while this put waited is seen here.
         self.check_poison()?;
-        // Stored again: a shred that failed after its record no longer covers this content.
-        locked(&self.shredding).remove(&key);
         if locked(&self.known).contains(&key) {
             // Written by this process and, in balanced mode, still pending or already flushed.
+            self.stored_again(key);
             return Ok(chunk);
         }
         // A pair already on disk is replaced only by a flushed write that keeps its data key
@@ -683,7 +694,37 @@ impl ChunkStore {
             Probe::Lost(_) => self.adopt(key, content, None, Flush::Now)?,
             Probe::Failed(e) => return Err(e),
         }
+        self.stored_again(key);
         Ok(chunk)
+    }
+
+    /// The content of `key` is stored again: a shred that failed no longer covers it. Called only
+    /// once a put has succeeded (review WP3.A1, fifth round, L1).
+    fn stored_again(&self, key: Key) {
+        locked(&self.shredding).remove(&key);
+    }
+
+    /// Marks `chunk` as being shredded: from now on the store neither vouches for it nor serves
+    /// it until it is stored again or the shred completes. The journal marks it before it
+    /// appends the shred record (fifth round, L1); nothing is forgotten here, since a chunk
+    /// still pending must stay pending until the record's flush.
+    ///
+    /// # Errors
+    /// `ShredBacklog` at [`MAX_UNFINISHED_SHREDS`].
+    pub(crate) fn begin_shred(&self, pocket: PocketId, chunk: ChunkRef) -> Result<(), ChunkError> {
+        let key = (pocket, chunk);
+        let _slot = self.slot(key);
+        self.mark_shredding(key)
+    }
+
+    /// Adds `key` to the chunks being shredded, within the bound. The caller holds its slot.
+    fn mark_shredding(&self, key: Key) -> Result<(), ChunkError> {
+        let mut shredding = locked(&self.shredding);
+        if !shredding.contains(&key) && shredding.len() >= MAX_UNFINISHED_SHREDS {
+            return Err(ChunkError::ShredBacklog);
+        }
+        shredding.insert(key);
+        Ok(())
     }
 
     /// Writes a pair for `key` and tracks it. The caller holds the chunk's slot.
@@ -752,23 +793,26 @@ impl ChunkStore {
     /// interleaved. The overhead SLO is judged at p95 and p99, so the rename stays until other
     /// platforms' numbers say otherwise.
     fn write(&self, path: &Path, bytes: &[u8], flush: Flush) -> Result<(), ChunkError> {
-        let result = match flush {
-            Flush::Now => self.fs.write_atomic(path, bytes),
-            Flush::WithJournal => self.fs.write_unsynced(path, bytes),
-        };
-        if result.is_err() && flush == Flush::Now {
-            self.poison_if_balanced();
+        match flush {
+            Flush::Now => self.flushed(|| self.fs.write_atomic(path, bytes)),
+            Flush::WithJournal => self.fs.write_unsynced(path, bytes).map_err(storage),
         }
-        result.map_err(storage)
     }
 
-    /// In balanced mode, a failed flush of a chunk file or directory may have covered pending
-    /// chunks' directory entries, and a later flush of the same directory proves nothing about
-    /// them: the store is poisoned until recovery rewrites them (review WP3.A1, second round, L2).
-    fn poison_if_balanced(&self) {
-        if self.durability == ChunkDurability::Balanced {
-            self.poison();
-        }
+    /// Runs a flushed write or a directory flush. In balanced mode, a failed one may have
+    /// covered pending chunks' directory entries, and a later flush of the same directory proves
+    /// nothing about them: the store is poisoned until recovery rewrites them (review WP3.A1,
+    /// second round, L2). It is poisoned before the flush window is released, so a journal
+    /// flush that overlapped the failure sees it before acknowledging anything (fifth round,
+    /// M2).
+    fn flushed(&self, op: impl FnOnce() -> Result<(), FsError>) -> Result<(), ChunkError> {
+        let _window = self.flush_window.read().unwrap_or_else(PoisonError::into_inner);
+        op().map_err(|e| {
+            if self.durability == ChunkDurability::Balanced {
+                self.poison();
+            }
+            storage(e)
+        })
     }
 
     fn write_key(
@@ -811,11 +855,7 @@ impl ChunkStore {
         }
         // The new entries are made durable now, before any later flush of `data/` or `keys/`
         // can make their removal there durable (third round, L1).
-        if let Err(e) = self.fs.sync_dir(&dir) {
-            self.poison_if_balanced();
-            return Err(storage(e));
-        }
-        Ok(())
+        self.flushed(|| self.fs.sync_dir(&dir))
     }
 
     fn remember(&self, key: Key) {
@@ -929,19 +969,21 @@ impl ChunkStore {
     /// may have dropped the unflushed content, so nothing is trusted until
     /// [`ChunkStore::recover_pending`] has read it back.
     pub fn sync_pending(&self) -> Result<(), ChunkError> {
+        let started = self.poison.load(Ordering::SeqCst);
         self.check_poison()?;
         let batch: Vec<Key> = locked(&self.pending).iter().copied().collect();
         if batch.is_empty() {
             return Ok(());
         }
-        let result = self.flush_batch(&batch);
+        let result = self.flush_batch(&batch, started);
         if result.is_err() {
             self.poison();
         }
         result
     }
 
-    fn flush_batch(&self, batch: &[Key]) -> Result<(), ChunkError> {
+    /// Flushes `batch` and acknowledges it, unless the store was poisoned since `started`.
+    fn flush_batch(&self, batch: &[Key], started: u64) -> Result<(), ChunkError> {
         let mut pockets = BTreeSet::new();
         let mut flushed = Vec::with_capacity(batch.len());
         for &key in batch {
@@ -964,6 +1006,14 @@ impl ChunkStore {
         for pocket in pockets {
             self.fs.sync_dir(&self.data_dir(pocket)).map_err(storage)?;
             self.fs.sync_dir(&self.key_dir(pocket)).map_err(storage)?;
+        }
+        // A flushed write elsewhere that failed while this batch was flushed (a re-wrap, a
+        // rewrite, a quarantine) may have dropped these chunks' entries. Every such write still
+        // in progress finishes, and poisons if it failed, before this check; one that starts
+        // later fails after these entries are durable (fifth round, M2).
+        drop(self.flush_window.write().unwrap_or_else(PoisonError::into_inner));
+        if self.poison.load(Ordering::SeqCst) != started {
+            return Err(ChunkError::FlushFailed);
         }
         let mut pending = locked(&self.pending);
         for key in &flushed {
@@ -1174,7 +1224,7 @@ impl ChunkStore {
         let key = (pocket, chunk);
         // Slot first, then rotation: the same order as a put, so the two never deadlock.
         let _slot = self.slot(key);
-        locked(&self.shredding).insert(key);
+        self.mark_shredding(key)?;
         self.forget_on_disk(key);
         self.prepare(pocket)?;
         let _exclusive = self.rotation_exclusive(pocket);
@@ -1188,10 +1238,7 @@ impl ChunkStore {
             }
         }
         for dir in [self.key_dir(pocket), self.data_dir(pocket)] {
-            if let Err(e) = self.fs.sync_dir(&dir) {
-                self.poison_if_balanced();
-                return Err(storage(e));
-            }
+            self.flushed(|| self.fs.sync_dir(&dir))?;
         }
         locked(&self.shredding).remove(&key);
         Ok(removed)
@@ -1210,8 +1257,8 @@ impl ChunkStore {
         })
     }
 
-    /// Re-wraps every data key still under an older KEK version, then destroys the older
-    /// versions. No-op when only one version exists. Re-wraps are flushed in either durability
+    /// Writes every readable data key of the pocket again under the current KEK, then destroys
+    /// the older versions. No-op when only one version exists. Re-wraps are flushed in either durability
     /// mode: the old versions are destroyed right after, so an unflushed re-wrap lost to a power
     /// loss would leave a key file only a destroyed KEK can open. Runs at open (no other user
     /// yet) or as a shred's second half (holding the pocket's stripe exclusively). Returns the
@@ -1243,14 +1290,19 @@ impl ChunkStore {
                 continue;
             };
             match self.data_key(pocket, chunk) {
-                Ok((data_key, version)) if version < current => {
+                // Every readable key is written again under the current KEK, also one already at
+                // that version: a re-wrap whose directory flush failed leaves its new file
+                // visible but not durable, and retiring the old KEK would leave, after a power
+                // loss, only the old file that the retired KEK alone opens (found by the crash
+                // schedules of the fifth WP3.A1 round). A fresh file, flushed, is durable.
+                Ok((data_key, _)) => {
                     self.write_key(pocket, chunk, &data_key, current, &kek, Flush::Now)?;
                     rewrapped += 1;
                 }
                 // Unreadable key files (shredded, or torn by a power loss in balanced mode)
                 // cannot be re-wrapped; they are reported when a record that references them is
                 // checked, and must not stop the store from opening.
-                Ok(_) | Err(ChunkError::Unavailable | ChunkError::Corrupt) => {}
+                Err(ChunkError::Unavailable | ChunkError::Corrupt) => {}
                 Err(e) => return Err(e),
             }
         }

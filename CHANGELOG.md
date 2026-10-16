@@ -45,13 +45,20 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **`Journal::shred`** records a shred, flushes the record, rotates the KEK and removes the
     chunk while no other record can be appended, and returns a `PendingRewrap` that re-wraps the
     pocket's other keys once the writer is free (or when dropped); a store a journal coordinates
-    refuses a direct shred. From the moment a shred begins, the store neither vouches for the
-    chunk nor serves it until the content is stored again or the shred completes.
+    refuses a direct shred. The store marks the chunk before the record is appended and neither
+    vouches for it nor serves it until a put of the content succeeds or the shred completes; at
+    most 4,096 failed shreds stay marked (`ChunkError::ShredBacklog` beyond).
+  - **A journal flush is not acknowledged across a poisoning** of the store while it ran, and the
+    first open with a store invalidates a plain journal's marker before it records the store.
+  - **A KEK rotation writes every readable key file again before destroying old versions**, so a
+    re-wrap whose directory flush failed cannot leave a key file only a destroyed KEK opens
+    (found by the extended crash schedules; it predates this PR).
   - **Every journal keeps a durable-point marker**, so restarts copy only the records after it;
     a `PAYLOADS` flag file now records that a journal coordinates a store.
   - **Review:** `docs/reviews/WP3.A1-chunk-durability.md` (4 High, 7 Medium, 7 Low, four defects
     found by the extended property test after the fixes, a second round: 1 High, 1 Medium,
-    6 Low, a third: 1 High, 3 Medium, 5 Low, and a fourth: 2 Medium, 4 Low). New codes
+    6 Low, a third: 1 High, 3 Medium, 5 Low, a fourth: 2 Medium, 4 Low, and a fifth: 2 Medium,
+    3 Low). New codes
     `STORE_PAYLOAD_LOST` and `STORE_PAYLOAD_FLUSH_FAILED`.
 
 - `uaos-policy` hardening after the retroactive review (`docs/reviews/WP2.1-policy.md`; ADR-0008
@@ -218,9 +225,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   balanced-put target is **not met** on Windows (1.55 ms after the review fixes), where file
   creation dominates. Until the state actor (WP3.3), the request whose append finds the flush
   window due pays for the flush.
-- Gate `journal-durability` gains eighteen seeded violations, one per silent-loss class found by
-  the four WP3.A1 review rounds and the extended property test (twenty-two for ADR-0018,
-  twenty-three in the gate).
+- Gate `journal-durability` gains twenty-two seeded violations, one per silent-loss class found
+  by the five WP3.A1 review rounds and the extended property test (twenty-six for ADR-0018,
+  twenty-seven in the gate).
 - Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
   unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a
   forbid.
