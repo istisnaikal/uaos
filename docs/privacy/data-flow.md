@@ -31,7 +31,7 @@ flowchart LR
 | Telemetry | off | published schema only | `uaos telemetry preview` shows the exact payload |
 | Benchmark publish | off | sanitized/synthetic results | opt-in per publication |
 | NTP / provider health (doctor) | off | — | only with `uaos doctor --online` |
-| OS certificate checks (OCSP, CRL, AIA) | triggered by the operating system's certificate verifier when UAOS opens TLS to the user's provider (ADR-0013 §5) | the certificate's serial or issuer URL, to the certificate authority named in the provider's certificate; nothing from the request | UAOS uses the platform verifier and does not add these fetches itself; they are classified in the zero-egress capture (I-14) and listed here so they are never a surprise |
+| Certificate checks (OCSP, CRL, AIA) | **never**: UAOS verifies provider certificates with rustls against the operating system's root store, read locally, and fetches nothing during a handshake (ADR-0013 Amendment 1A) | none | earlier designs let the OS verifier fetch URLs named in the server's certificate; that verifier is removed. The cost, stated in the amendment: revocation is not checked at RC-1. The zero-egress capture (I-14) confirms no such traffic |
 
 ### What the agent's own client sends through UAOS
 
