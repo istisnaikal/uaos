@@ -20,9 +20,11 @@
 //! tail, and it never flushes the previous run's segment again: after a failed flush (in that
 //! run, or in an open that failed since) a new flush of the same file can report success
 //! without writing anything, and a failing one drops what the OS held. The records after the
-//! last durable point are copied to a fresh active segment and the old file is kept as suspect
-//! up to that point; one flush then covers the copied records together with any `chunk.lost`
-//! records open appends for them, before open returns.
+//! last durable point are copied to a fresh active segment, followed by any `chunk.lost`
+//! records open appends for them, and flushed together. Only then is the manifest stored that
+//! keeps the old file as suspect up to that point: until the copies are durable, the old
+//! manifest still names the old file, and a failed or interrupted open loses nothing (review
+//! WP3.A1, second round, H1). Shreds the journal recorded but a crash interrupted are completed.
 //!
 //! **Payloads (ADR-0018).** A journal opened with [`Journal::open_with_payloads`] coordinates
 //! the chunk store's durability with its own:
@@ -225,6 +227,9 @@ pub struct Journal {
     lost: Vec<LostPayload>,
     /// Losses found but not yet journaled; kept across failures until their records are written.
     unreported: Vec<(LostPayload, EventEnvelope)>,
+    /// The in-memory manifest disowns segment contents that are not yet flushed; it is stored,
+    /// and the marker may move, only after the next flush (open's carried tail).
+    manifest_unstored: bool,
 }
 
 fn storage(e: FsError) -> JournalError {
@@ -299,7 +304,16 @@ impl Journal {
             Err(e) => return Err(storage(e)),
         };
 
+        // A store whose flush failed before this journal attached is recovered first: its
+        // pending content is rewritten or set aside, and whatever it set aside is reported below
+        // (review WP3.A1, second round, L1).
+        if let Some(store) = &payloads
+            && store.is_poisoned()
+        {
+            store.recover_pending().map_err(JournalError::Payload)?;
+        }
         let mut lost_in_tail = Vec::new();
+        let mut shreds_to_complete = Vec::new();
         let mut carried = None;
         let (mut manifest, next_seq, head, last_flushed) = if manifest_exists {
             let (records, report) = read_verified(fs.as_ref(), &dir)?;
@@ -310,6 +324,7 @@ impl Journal {
             // ADR-0018 §3: the payloads of records after the last durable point must be durable
             // (or reported lost) before those records are made durable below.
             if let Some(store) = &payloads {
+                shreds_to_complete = journaled_shreds(&records);
                 lost_in_tail = recover_tail_payloads(&records, durable, store)?;
             }
             // The previous process may have acknowledged records the OS holds but never
@@ -323,36 +338,16 @@ impl Journal {
             };
             (manifest, report.next_seq, report.head, last)
         } else {
-            if fs
-                .list_dir(&dir)
-                .map_err(storage)?
-                .iter()
-                .any(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(is_segment_file_name))
-            {
-                return Err(JournalError::Corrupt(
-                    "segment files exist but the manifest is missing; refusing to start a new history over them"
-                        .to_owned(),
-                ));
+            // No record exists yet, so no loss the store set aside can be referenced by one.
+            if let Some(store) = &payloads {
+                let _unreferenced = store.take_lost();
             }
-            let mut id = [0u8; 16];
-            rng.fill(&mut id).map_err(JournalError::Platform)?;
-            let journal_id = id.iter().fold(String::with_capacity(32), |mut acc, b| {
-                use std::fmt::Write as _;
-                // Writing to a String cannot fail.
-                let _infallible = write!(acc, "{b:02x}");
-                acc
-            });
-            let head = genesis_hash(&journal_id);
-            let manifest = Manifest {
-                schema: ManifestSchema::V1,
-                journal_id,
-                min_reader_version: READER_VERSION,
-                generation: 0,
-                segments: Vec::new(),
-            };
+            let manifest = new_manifest(fs.as_ref(), &dir, rng.as_ref())?;
+            let head = genesis_hash(&manifest.journal_id);
             (manifest, 0, head, None)
         };
 
+        let carried_tail = carried.is_some();
         let (active, active_bytes, unflushed, unflushed_first) = match carried {
             Some(tail) => (tail.file, tail.bytes, tail.lines, tail.first),
             None => (
@@ -384,16 +379,38 @@ impl Journal {
             last_marker_mono: last_flush_mono,
             lost: Vec::new(),
             unreported: lost_in_tail,
+            manifest_unstored: carried_tail,
         };
         // Losses are journaled first, then one flush makes the previous run's records durable
-        // together with them; only then may the marker name the previous run's last record
-        // (review WP3.A1 H1). If either fails, open fails and the next open checks the same
-        // tail again. The marker must exist before any record is accepted: it is also what
-        // makes the journal refuse to open without its store (WP3.A1 L3).
+        // together with them; then the manifest that stops naming the old copies is stored;
+        // only then may the marker name the previous run's last record (review WP3.A1 H1, and
+        // H1 of the second round). If any step fails, open fails, the durable manifest still
+        // names the old copies, and the next open checks the same tail again. The marker must
+        // exist before any record is accepted: it is also what makes the journal refuse to open
+        // without its store (WP3.A1 L3).
         journal.report_lost()?;
         journal.sync()?;
+        journal.store_manifest_if_unstored()?;
+        // Only now are the shred records durable: completing a shred whose record a power loss
+        // could still take away would leave references to removed content unexplained.
+        if let Some(store) = &journal.payloads {
+            for (pocket, chunk) in shreds_to_complete {
+                if store.has_pair(pocket, chunk).map_err(JournalError::Payload)? {
+                    store.shred(pocket, chunk).map_err(JournalError::Payload)?;
+                }
+            }
+        }
         journal.update_marker(true).map_err(storage)?;
         Ok(journal)
+    }
+
+    /// Stores the in-memory manifest if it disowned contents that were not yet flushed.
+    fn store_manifest_if_unstored(&mut self) -> Result<(), JournalError> {
+        if self.manifest_unstored {
+            self.manifest.store(self.fs.as_ref(), &self.dir)?;
+            self.manifest_unstored = false;
+        }
+        Ok(())
     }
 
     /// Payloads reported lost since this journal was opened (each also journaled as a
@@ -659,7 +676,7 @@ impl Journal {
         let Some(store) = &self.payloads else {
             return Ok(());
         };
-        if !self.unreported.is_empty() || store.has_untaken_losses() || store.is_poisoned() {
+        if !self.unreported.is_empty() || store.has_untaken_losses() || store.is_poisoned() || self.manifest_unstored {
             return Ok(());
         }
         let now = self.clock.mono().0;
@@ -745,11 +762,22 @@ impl Journal {
         self.sync()
     }
 
-    /// The unflushed records that reference any of `lost`.
+    /// The unflushed records that reference any of `lost`, except records an unflushed
+    /// `chunk.lost` record already names (review WP3.A1, second round, L4).
     fn unflushed_referencing(&self, lost: &[LostChunk]) -> Vec<(LostPayload, EventEnvelope)> {
-        self.unflushed
+        let envelopes: Vec<EventEnvelope> = self
+            .unflushed
             .iter()
             .filter_map(|line| serde_json::from_slice::<EventEnvelope>(line).ok())
+            .collect();
+        let reported: BTreeSet<u64> = envelopes
+            .iter()
+            .filter(|e| e.event_type == types::CHUNK_LOST)
+            .filter_map(|e| e.metadata.as_map().get(RECORD_SEQ_METADATA_KEY)?.parse().ok())
+            .collect();
+        envelopes
+            .into_iter()
+            .filter(|e| !reported.contains(&e.seq.0))
             .filter_map(|e| {
                 let (pocket, chunk) = (e.pocket_id?, e.payload_ref?);
                 let found = lost.iter().find(|l| l.pocket == pocket && l.chunk == chunk)?;
@@ -784,6 +812,7 @@ impl Journal {
             Ok(file) => {
                 self.active = file;
                 self.active_bytes = 0;
+                self.manifest_unstored = false;
                 Ok(())
             }
             Err(e) => {
@@ -852,6 +881,7 @@ impl Journal {
             Ok((fresh, bytes)) => {
                 self.active = fresh;
                 self.active_bytes = bytes;
+                self.manifest_unstored = false;
                 if flush {
                     self.mark_flushed();
                 }
@@ -904,13 +934,43 @@ struct CarriedTail {
     durable: Option<(u64, Sha256Digest)>,
 }
 
+/// The manifest of a journal that does not exist yet, with a fresh random identifier. Refuses
+/// to start a new history over segment files whose manifest is missing.
+fn new_manifest(fs: &dyn Fs, dir: &Path, rng: &dyn Rng) -> Result<Manifest, JournalError> {
+    if fs
+        .list_dir(dir)
+        .map_err(storage)?
+        .iter()
+        .any(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(is_segment_file_name))
+    {
+        return Err(JournalError::Corrupt(
+            "segment files exist but the manifest is missing; refusing to start a new history over them".to_owned(),
+        ));
+    }
+    let mut id = [0u8; 16];
+    rng.fill(&mut id).map_err(JournalError::Platform)?;
+    let journal_id = id.iter().fold(String::with_capacity(32), |mut acc, b| {
+        use std::fmt::Write as _;
+        // Writing to a String cannot fail.
+        let _infallible = write!(acc, "{b:02x}");
+        acc
+    });
+    Ok(Manifest {
+        schema: ManifestSchema::V1,
+        journal_id,
+        min_reader_version: READER_VERSION,
+        generation: 0,
+        segments: Vec::new(),
+    })
+}
+
 /// Seals the previous run's active segment without flushing it again (see the module docs).
 ///
 /// If every record in it is durable already (or it has none), it is sealed in place and `None`
 /// is returned; the caller starts a new segment. Otherwise the records up to `durable` stay in
 /// the old file, recorded as suspect up to them, and the records after it are copied, unflushed,
-/// to a fresh segment that becomes the active one. The manifest is stored before this returns;
-/// it claims none of the copied records.
+/// to a fresh segment that becomes the active one. The manifest is **not** stored here: it
+/// disowns the old copies, so the caller stores it only after the copied records are flushed.
 fn carry_previous_tail(
     fs: &dyn Fs,
     dir: &Path,
@@ -952,7 +1012,6 @@ fn carry_previous_tail(
     }
     let mut file = start_segment_file(fs, dir, manifest, proven_end)?;
     file.append(tail).map_err(storage)?;
-    manifest.store(fs, dir)?;
     let lines = tail.split_inclusive(|b| *b == b'\n').map(<[u8]>::to_vec).collect();
     let durable = proven_end
         .checked_sub(1)
@@ -1043,8 +1102,34 @@ fn read_marker(fs: &dyn Fs, dir: &Path, records: &[VerifiedRecord]) -> Option<u6
         .then_some(seq)
 }
 
+/// The shreds the journal recorded (write-ahead, see [`ChunkStore::shred`]) that open must make
+/// sure are complete: one per `chunk.shredded` record not followed by a record that references
+/// the chunk again. Open shreds any of them whose pair is still on disk, once the records are
+/// durable. Without this, the store's own startup would re-wrap a leftover key under the new
+/// KEK and the content would stay readable (pre-existing, found by the second WP3.A1 review).
+fn journaled_shreds(records: &[VerifiedRecord]) -> Vec<(PocketId, ChunkRef)> {
+    let mut last_shred: BTreeMap<(PocketId, String), Seq> = BTreeMap::new();
+    let mut last_use: BTreeMap<(PocketId, String), Seq> = BTreeMap::new();
+    for e in records.iter().map(|r| &r.envelope) {
+        if e.event_type == types::CHUNK_SHREDDED
+            && let (Some(pocket), Some(chunk)) = (e.pocket_id, e.metadata.as_map().get(CHUNK_METADATA_KEY))
+        {
+            last_shred.insert((pocket, chunk.clone()), e.seq);
+        } else if let (Some(pocket), Some(chunk)) = (e.pocket_id, e.payload_ref) {
+            last_use.insert((pocket, chunk.to_string()), e.seq);
+        }
+    }
+    last_shred
+        .into_iter()
+        .filter(|((pocket, name), shred)| last_use.get(&(*pocket, name.clone())).is_none_or(|used| *used < *shred))
+        .filter_map(|((pocket, name), _)| Some((pocket, name.parse::<ChunkRef>().ok()?)))
+        .collect()
+}
+
 /// ADR-0018 §3 at startup: reads back, rewrites and flushes the payloads of every record after
-/// the durable point, and returns the records whose payload is unreadable.
+/// the durable point, and returns the records whose payload is unreadable. Losses the store set
+/// aside before (a recovery at open, an earlier failed open in this process) are included, and
+/// every record in the journal that references a lost chunk is reported, not only the tail's.
 ///
 /// The durable point is the marker (`durable`) if it is valid. Without one (a store attached
 /// for the first time, or a removed marker) the whole journal is checked: a narrower fallback could skip a
@@ -1089,8 +1174,23 @@ fn recover_tail_payloads(
         .map(|(pocket, chunk, _, e)| (*pocket, *chunk, *e))
         .collect();
     let refs: Vec<(PocketId, ChunkRef)> = referencing.iter().map(|(p, c, _)| (*p, *c)).collect();
-    let lost = store.verify_and_sync(&refs).map_err(JournalError::Payload)?;
-    Ok(referencing
+    store.verify_and_sync(&refs).map_err(JournalError::Payload)?;
+    let lost = store.take_lost();
+    if lost.is_empty() {
+        return Ok(Vec::new());
+    }
+    let every: Vec<(PocketId, ChunkRef, &EventEnvelope)> = records
+        .iter()
+        .map(|r| &r.envelope)
+        .filter(|e| !reported.contains(&e.seq.0))
+        .filter_map(|e| Some((e.pocket_id?, e.payload_ref?, e)))
+        .filter(|(pocket, chunk, e)| {
+            last_shred
+                .get(&(*pocket, chunk.to_string().as_str()))
+                .is_none_or(|shred| *shred < e.seq)
+        })
+        .collect();
+    Ok(every
         .into_iter()
         .filter_map(|(pocket, chunk, e)| {
             let found = lost.iter().find(|l| l.pocket == pocket && l.chunk == chunk)?;

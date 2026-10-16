@@ -328,14 +328,15 @@ impl Fs for SimFs {
         }
         let id = s.live.remove(from).ok_or(FsError::NotFound { op: "rename" })?;
         s.live.insert(to.to_path_buf(), id);
-        s.collect_garbage();
+        // A displaced node is unreachable by path; it is collected at the next directory flush
+        // or power loss. Collecting here made every rename linear in the number of files.
         Ok(())
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), FsError> {
         let mut s = lock(&self.state);
         s.live.remove(path).ok_or(FsError::NotFound { op: "remove_file" })?;
-        s.collect_garbage();
+        // Collected later, as for `rename`.
         Ok(())
     }
 
