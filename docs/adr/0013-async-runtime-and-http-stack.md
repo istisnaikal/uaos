@@ -166,7 +166,9 @@ on the PR-5 branch.
   at pinned local addresses and is never resolved.
 - **`Door::send`.**
   - **Refusals before any contact:** a request bound to another Operation, an undeclared
-    upstream, an oversized body, a path that does not start with `/`, any of the listed
+    upstream, an oversized body, a path that does not start with `/`, a method other than GET,
+    HEAD, POST, PUT, PATCH, DELETE and OPTIONS (TRACE would echo the request, the credential
+    included, back to the caller; CONNECT would open a tunnel), any of the listed
     credential-bearing headers from the caller (`CREDENTIAL_HEADERS`: `authorization`,
     `cookie`, provider key headers and others; checked before anything is stripped; credentials
     elsewhere, such as in the query string, are not caught here), an open circuit,
@@ -215,8 +217,11 @@ on the PR-5 branch.
     `symlink`, `chown`, `lchown`, `chroot`), outside `uaos-platform`, which owns file access.
     On Windows a UNC path (`\\host\share`) resolves its host and opens SMB to it, so these are
     network entry points that need no dependency. The platform's own `OsFs` refuses UNC and
-    device paths (`PermissionDenied`) before any call, whoever builds it, in every spelling std
-    hands to the system, the NT one (`\??\UNC\...`) included;
+    device paths (`PermissionDenied`) before any call, whoever builds it, in every prefix
+    spelling std hands to the system, the NT one (`\??\UNC\...`) included. DOS device names in
+    a last component (`C:\data\NUL`) pass the check; every file UAOS opens has a name UAOS
+    chooses, and the data directory, which configuration names, is owed with the residuals
+    below;
   - randomness: `getrandom`'s `fill`, `fill_uninit`, `u32`, `u64` and `SysRng`, outside the
     platform;
   - listening: `TcpListener::bind` (std and tokio), `TcpSocket::listen`, Unix listeners (std's
@@ -249,13 +254,16 @@ on the PR-5 branch.
   `#[path]` modules and `include!` outside the owners, scans nested folders named like the
   root's skipped ones (but not folders Cargo marks as build output), reads `.rs` files and
   matches `clippy.toml` and `.cargo/config` names in any case, allows only `[alias]` in Cargo
-  configuration, refuses build scripts naming clippy's variables, takes the member list from
+  configuration, refuses build scripts that set clippy's variables for the compiler (every
+  build script `cargo metadata` lists, wherever `build = "..."` puts it), takes the member list from
   `cargo metadata`, refuses a workspace lint table that allows a group holding a guarded lint,
-  and checks that each canary calls its own banned item (as a whole word) under a single
+  and checks that each canary calls its own banned item (its name, and its type or module, as
+  whole words in code) under a single
   `#[expect]`, compiled under `cfg(unix)` or `cfg(windows)` only. `cargo xtask clippy` runs
   clippy with its environment neutralised: an empty `CARGO_ENCODED_RUSTFLAGS` overrides every
-  other source of compiler flags, an empty `RUSTC_WRAPPER` any wrapper, and `CLIPPY_ARGS` and
-  `CLIPPY_CONF_DIR` are removed, whatever their case. CI jobs other than clippy may set compiler
+  other source of compiler flags, an empty `RUSTC_WRAPPER` any wrapper, `CLIPPY_ARGS` is
+  removed, and `CLIPPY_CONF_DIR` names the workspace root, whatever their case, so a machine's
+  Cargo `[env]` without `force` cannot point clippy elsewhere either. CI jobs other than clippy may set compiler
   flags (a sanitizer job needs them); they do not judge lints.
 
   A dependency that opens sockets itself is kept out by `arch.toml` and supply-chain review.
@@ -289,8 +297,8 @@ on the PR-5 branch.
 - **Seeded violations:**
   - for the door's behaviour: `egress-dials-private-range`, `egress-numeric-host`,
     `egress-private-reaches-link-local`, `egress-plaintext-resolved`,
-    `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel` and
-    `egress-embedded-local`;
+    `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel`,
+    `egress-embedded-local` and `egress-sends-trace`;
   - for the clippy bans: `egress-ctor-outside-root`, `net-dns-outside-egress`,
     `net-resolver-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
     `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor`,
@@ -300,7 +308,8 @@ on the PR-5 branch.
     `cargo-config-clippy-override`, `clippy-ban-without-canary`, `allow-audit-lint-group`,
     `allow-audit-macro-attribute`, `allow-audit-path-module`, `allow-audit-nested-target`,
     `workspace-lints-group-allowed`, `clippy-config-case`, `cargo-config-not-alias`,
-    `build-script-clippy-env`, `canary-malformed`;
+    `build-script-clippy-env`, `build-script-declared-path`, `canary-malformed`,
+    `canary-calls-another-item`;
   - besides the canaries, which cover every `allow-invalid` ban on its own system, these run
     there too: `net-unix-connect-outside-egress`, `net-unix-connect-addr-outside-egress`,
     `net-tokio-unix-connect-outside-egress` and `net-unix-socket-connect-outside-egress` (Unix),
@@ -320,7 +329,7 @@ on the PR-5 branch.
   - nothing the standard library calls special is ever allowed.
 - **The ban canaries** (`tests/bans.rs`), one per `clippy.toml` entry; the Unix ones were
   also cross-checked with clippy for a Linux target (all fulfilled; a removed ban fails).
-- **21 integration tests** against loopback mocks. They read what the mock received and the
+- **22 integration tests** against loopback mocks. They read what the mock received and the
   door's own counters, and cover:
   - the header policy;
   - op binding and replay;
@@ -337,6 +346,8 @@ on the PR-5 branch.
   - an oversized body refused with no connection;
   - a caller's `content-length` dropped;
   - a path without a leading `/` refused without consuming the Operation;
+  - TRACE, CONNECT and an extension method refused before contact, without consuming the
+    Operation;
   - the address cap;
   - the credential never printed;
   - **a certificate naming issuer, OCSP and CRL URLs on a local listener: the handshake fails

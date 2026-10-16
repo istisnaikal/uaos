@@ -242,7 +242,8 @@ fn path_attribute_lines(code: &str) -> Vec<usize> {
 /// * a `clippy.toml` below the root, or one named in another case (Windows and macOS match
 ///   names regardless of case);
 /// * Cargo configuration holding anything but `[alias]`, in any `.cargo` folder, in any case;
-/// * a build script naming clippy's environment;
+/// * a build script, wherever `build = "..."` puts it, setting clippy's environment for the
+///   compiler;
 /// * CI workflows setting compiler flags, a compiler wrapper or clippy's configuration;
 /// * a workspace member (as Cargo sees them, path dependencies included) whose `[lints]` is not
 ///   exactly `workspace = true`;
@@ -277,12 +278,6 @@ fn config_overrides(root: &Path, files: &[PathBuf]) -> Result<Vec<String>, Strin
                 }
             }
         }
-        if name == "build.rs" {
-            let text = std::fs::read_to_string(path).map_err(|e| format!("{relative}: {e}"))?;
-            if names_clippy(&text) {
-                problems.push(format!("{relative}: a build script names clippy's environment"));
-            }
-        }
     }
     let metadata = MetadataCommand::new()
         .manifest_path(root.join("Cargo.toml"))
@@ -290,6 +285,18 @@ fn config_overrides(root: &Path, files: &[PathBuf]) -> Result<Vec<String>, Strin
         .exec()
         .map_err(|e| format!("cargo metadata: {e}"))?;
     for package in &metadata.packages {
+        // Cargo's own list of build scripts: `build.rs`, or the file `build = "..."` names
+        // (review WP3.A5, round 9).
+        for script in package.targets.iter().filter(|t| t.is_custom_build()) {
+            let path = script.src_path.as_std_path();
+            let relative = rel(root, path);
+            let text = std::fs::read_to_string(path).map_err(|e| format!("{relative}: {e}"))?;
+            if sets_clippy_env(&text) {
+                problems.push(format!(
+                    "{relative}: a build script sets clippy's environment for the compiler"
+                ));
+            }
+        }
         let manifest = package.manifest_path.as_std_path();
         let doc = read_toml(root, manifest)?;
         let inherits = doc
@@ -331,10 +338,11 @@ fn config_overrides(root: &Path, files: &[PathBuf]) -> Result<Vec<String>, Strin
     Ok(problems)
 }
 
-/// Whether a build script names clippy's environment (in any case: Windows matches variable
-/// names regardless of case), which it could set for the compiler (`cargo:rustc-env`).
-fn names_clippy(build_script: &str) -> bool {
-    build_script.to_ascii_uppercase().contains("CLIPPY")
+/// Whether a build script sets one of clippy's variables for the compiler (`cargo:rustc-env=`
+/// or `cargo::rustc-env=`, in any case: Windows matches variable names regardless of case). A
+/// comment or a lint attribute naming clippy is not one (review WP3.A5, round 9).
+fn sets_clippy_env(build_script: &str) -> bool {
+    build_script.to_ascii_uppercase().contains("RUSTC-ENV=CLIPPY")
 }
 
 fn read_toml(root: &Path, path: &Path) -> Result<toml::Value, String> {
@@ -358,9 +366,10 @@ fn canary_gaps(root: &Path) -> Result<Vec<String>, String> {
 }
 
 /// Every ban needs a canary: a `// canary:` marker naming it, at the top of a function whose
-/// only `#[expect]` names a disallowed lint, followed by the banned item within three lines.
-/// Canary files compile only under `cfg(unix)` or `cfg(windows)`, which CI's systems cover
-/// (review WP3.A5, rounds 6 and 7).
+/// only `#[expect]` names a disallowed lint, followed by the banned item within three lines:
+/// its name there, and its type or module there or in the function's signature, both in code,
+/// so a call of another ban with the same name does not count. Canary files compile only under
+/// `cfg(unix)` or `cfg(windows)`, which CI's systems cover (review WP3.A5, rounds 6, 7 and 9).
 fn canary_problems(clippy_toml: &str, files: &[(&str, String)]) -> Result<Vec<String>, String> {
     let config: ClippyFile = toml::from_str(clippy_toml).map_err(|e| format!("clippy.toml: {e}"))?;
     let mut problems = Vec::new();
@@ -392,10 +401,9 @@ fn canary_problems(clippy_toml: &str, files: &[(&str, String)]) -> Result<Vec<St
                 CANARY_FILES.join(" or ")
             )),
             Some((file, lines, at)) => {
-                let segment = path.rsplit("::").next().unwrap_or(path);
-                if !well_formed(&lines, at, segment) {
+                if !well_formed(&lines, at, path) {
                     problems.push(format!(
-                        "{file}:{}: the canary for `{path}` is not one banned call in a function whose only `#[expect]` names a disallowed lint",
+                        "{file}:{}: the canary for `{path}` is not one banned call (its name, with its type or module) in a function whose only `#[expect]` names a disallowed lint",
                         at + 1
                     ));
                 }
@@ -405,7 +413,9 @@ fn canary_problems(clippy_toml: &str, files: &[(&str, String)]) -> Result<Vec<St
     Ok(problems)
 }
 
-fn well_formed(lines: &[&str], marker: usize, segment: &str) -> bool {
+fn well_formed(lines: &[&str], marker: usize, path: &str) -> bool {
+    let mut segments = path.rsplit("::");
+    let name = segments.next().unwrap_or(path);
     let Some(function) = (marker.saturating_sub(2)..marker)
         .rev()
         .find(|&k| lines.get(k).is_some_and(|l| l.trim_start().starts_with("fn ")))
@@ -422,12 +432,18 @@ fn well_formed(lines: &[&str], marker: usize, segment: &str) -> bool {
         .collect();
     let expects: Vec<&&str> = attributes.iter().filter(|l| l.contains("#[expect(")).collect();
     let names_disallowed = expects.iter().all(|l| l.contains("clippy::disallowed_"));
-    let calls = lines
-        .get(marker + 1..(marker + 4).min(lines.len()))
-        .unwrap_or_default()
-        .iter()
-        .any(|l| !word_lines(l, segment).is_empty());
-    expects.len() == 1 && names_disallowed && calls
+    // The signature and the three lines after the marker, comments and strings masked, so
+    // neither the marker nor a comment names the item.
+    let code = masked(
+        &lines
+            .get(function..(marker + 4).min(lines.len()))
+            .unwrap_or_default()
+            .join("\n"),
+    );
+    let after: Vec<&str> = code.lines().skip(marker + 1 - function).collect();
+    let calls = !word_lines(&after.join("\n"), name).is_empty();
+    let owner_named = segments.next().is_none_or(|owner| !word_lines(&code, owner).is_empty());
+    expects.len() == 1 && names_disallowed && calls && owner_named
 }
 
 /// `clippy::disallowed_methods` → `disallowed_methods`; `unsafe_code` stays as is.
@@ -633,17 +649,40 @@ mod tests {
             .replace("`c::d`", "`a::send_to`");
         assert_eq!(canary_problems(config, &[("bans.rs", other)]).unwrap().len(), 1);
         let own = CANARY
+            .replace("fn c_d()", "fn c_d(x: &a)")
             .replace("c::d()", "x.send_to()")
             .replace("`c::d`", "`a::send_to`");
         assert!(canary_problems(config, &[("bans.rs", own)]).unwrap().is_empty());
     }
 
-    /// Round 8, L5: a build script naming clippy's environment, in any case.
+    /// Round 9, L2: a canary that calls another ban with the same name does not count: its
+    /// type or module must be named too, in code (not in the marker or a comment).
     #[test]
-    fn a_build_script_naming_clippy_is_found() {
-        assert!(names_clippy("println!(\"cargo:rustc-env=CLIPPY_CONF_DIR=x\");"));
-        assert!(names_clippy("println!(\"cargo:rustc-env=clippy_args=x\");"));
-        assert!(!names_clippy("println!(\"cargo:rustc-env=GIT_HASH=x\");"));
+    fn a_canary_must_name_its_type_or_module() {
+        let config = "disallowed-methods = [\"a::Server::create\"]\n";
+        let canary = |call: &str| CANARY.replace("`c::d`", "`a::Server::create`").replace("c::d()", call);
+        let check = |call: &str| canary_problems(config, &[("bans.rs", canary(call))]).unwrap().len();
+        assert_eq!(check("Server::new().create()"), 0);
+        assert_eq!(check("std::fs::File::create()"), 1);
+        assert_eq!(check("File::create() // Server"), 1);
+        let in_signature = canary("s.create()").replace("fn c_d()", "fn c_d(s: &Server)");
+        assert!(
+            canary_problems(config, &[("bans.rs", in_signature)])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Rounds 8 and 9 (L5, L3): a build script setting clippy's environment, in any case and
+    /// either syntax; a comment or a lint attribute naming clippy is not one.
+    #[test]
+    fn a_build_script_setting_clippy_env_is_found() {
+        assert!(sets_clippy_env("println!(\"cargo:rustc-env=CLIPPY_CONF_DIR=x\");"));
+        assert!(sets_clippy_env("println!(\"cargo::rustc-env=clippy_args=x\");"));
+        assert!(!sets_clippy_env("println!(\"cargo:rustc-env=GIT_HASH=x\");"));
+        assert!(!sets_clippy_env(
+            "//! Linted by `cargo xtask clippy`.\n#[allow(clippy::print_stdout)]\nfn main() {}\n"
+        ));
     }
 
     /// Round 7, L1: a marker outside a single-`#[expect]` canary, or a canary under another
