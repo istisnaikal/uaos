@@ -246,6 +246,19 @@ fn storage(e: FsError) -> JournalError {
     }
 }
 
+/// Who appends a record. With a store attached, `chunk.shredded` comes only from
+/// [`Journal::shred`] and `chunk.lost` only from the journal's own loss reporting (review WP3.A1,
+/// ninth round, L1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// [`Journal::append`].
+    Caller,
+    /// [`Journal::shred`].
+    Shred,
+    /// [`Journal::report_lost`].
+    Report,
+}
+
 impl Journal {
     /// Opens (or creates) the journal in `data_dir`, taking the data-directory lock and
     /// recovering from any previous crash.
@@ -490,7 +503,7 @@ impl Journal {
         // `recover` later completes, nothing vouches for the content (fifth round, L1).
         let marked = store.begin_shred(pocket, chunk).map_err(JournalError::Payload)?;
         let before = self.next_seq;
-        if let Err(e) = self.append(record) {
+        if let Err(e) = self.append_inner(record, Origin::Shred) {
             if self.next_seq > before {
                 // The record was written and only the flush inside `append` failed: `recover`
                 // can still make it durable, so the content stays refused (seventh round, M1).
@@ -569,7 +582,7 @@ impl Journal {
                     config_version: referencing.config_version,
                     metadata,
                 },
-                true,
+                Origin::Report,
             );
             if self.next_seq > before {
                 self.unreported.remove(0);
@@ -606,23 +619,27 @@ impl Journal {
     ///
     /// # Errors
     /// `DiskFull`, `Stopped`, `PayloadFlushFailed`, `Write`, `LineTooLarge`, `Platform`,
-    /// `Encoding`, `PayloadNotStored`, `Payload`, `InvalidRecord`.
+    /// `Encoding`, `PayloadNotStored`, `Payload`, `InvalidRecord` (also, with a store attached,
+    /// for `chunk.shredded`, which goes through [`Journal::shred`], and `chunk.lost`, which only
+    /// the journal writes).
     pub fn append(&mut self, draft: EventDraft) -> Result<Appended, JournalError> {
-        self.append_inner(draft, false)
+        self.append_inner(draft, Origin::Caller)
     }
 
-    /// Appends one record. `reporting` is set only by [`Journal::report_lost`]: its records are
-    /// accepted while losses are unreported, and never rotate or flush on their own, so the one
-    /// flush after them covers them together with the records whose payloads they report.
-    fn append_inner(&mut self, draft: EventDraft, reporting: bool) -> Result<Appended, JournalError> {
-        match self.health {
-            JournalHealth::Healthy => {}
-            JournalHealth::DiskFull => return Err(JournalError::DiskFull),
-            JournalHealth::PayloadFlushFailed => return Err(JournalError::PayloadFlushFailed),
-            JournalHealth::WriteFailed | JournalHealth::FlushFailed => return Err(JournalError::Stopped),
-        }
-        if !reporting && !self.unreported.is_empty() {
-            return Err(self.unreported_error());
+    /// Whether `draft` may be appended at all, before anything is written: kernel records only
+    /// from the kernel, chunk records naming their chunk in metadata, payloads already stored.
+    fn admit(&self, draft: &EventDraft, origin: Origin) -> Result<(), JournalError> {
+        // The kernel's own records on a coordinated journal. A `chunk.shredded` appended
+        // directly would record a shred that never marked or removed the content (the next open
+        // would shred it, and a record after it would need no put); a `chunk.lost` from a caller
+        // would exclude a healthy record from every later payload check (ninth round, L1).
+        if origin == Origin::Caller
+            && self.payloads.is_some()
+            && (draft.event_type == types::CHUNK_SHREDDED || draft.event_type == types::CHUNK_LOST)
+        {
+            return Err(JournalError::InvalidRecord(
+                "with a store attached, chunk.shredded goes through Journal::shred and only the journal writes chunk.lost",
+            ));
         }
         // A record about a chunk that is gone names it in metadata, never as its payload: the
         // payload check below would refuse it, and recovery would report it lost (WP3.A1 L5).
@@ -641,6 +658,24 @@ impl Journal {
                 return Err(JournalError::PayloadNotStored);
             }
         }
+        Ok(())
+    }
+
+    /// Appends one record. Records from [`Journal::report_lost`] are accepted while losses are
+    /// unreported, and never rotate or flush on their own, so the one flush after them covers
+    /// them together with the records whose payloads they report.
+    fn append_inner(&mut self, draft: EventDraft, origin: Origin) -> Result<Appended, JournalError> {
+        let reporting = origin == Origin::Report;
+        match self.health {
+            JournalHealth::Healthy => {}
+            JournalHealth::DiskFull => return Err(JournalError::DiskFull),
+            JournalHealth::PayloadFlushFailed => return Err(JournalError::PayloadFlushFailed),
+            JournalHealth::WriteFailed | JournalHealth::FlushFailed => return Err(JournalError::Stopped),
+        }
+        if !reporting && !self.unreported.is_empty() {
+            return Err(self.unreported_error());
+        }
+        self.admit(&draft, origin)?;
         let wall = self.clock.wall().map_err(JournalError::Platform)?;
         let mut random = [0u8; 10];
         self.rng.fill(&mut random).map_err(JournalError::Platform)?;

@@ -180,7 +180,11 @@ record. What follows describes the code after those fixes.
     unfinished while a file of the pair or an older KEK version remains; the store's own startup
     would otherwise re-wrap the leftover key and leave the content readable. Both `chunk.lost` and
     `chunk.shredded` name the chunk in metadata, never as `payload_ref`, and `append` enforces
-    it.
+    it. With a store attached, `append` refuses both from callers: `chunk.shredded` goes through
+    `Journal::shred`, and only the journal's own loss reporting writes `chunk.lost`. A shred
+    record appended directly would record a shred that never marked or removed the content, and
+    a forged `chunk.lost` would exempt a healthy record from every later payload check (ninth
+    review, L1).
 - **Added beyond the decision (I-02, S-6).**
   - **Payload before record.** With a store attached, the journal refuses a record whose
     `payload_ref` is not stored (`JournalError::PayloadNotStored`).
@@ -213,7 +217,7 @@ record. What follows describes the code after those fixes.
   flush either drops the unflushed bytes, or keeps serving them without ever making them durable.
   - **Flush-ordering scenario.** A flush fails at every possible step, then the power goes. A
     record at or before `flushed_through` must have a readable payload.
-  - **Regression tests.** One for each finding of the eight review rounds fixed in code, and
+  - **Regression tests.** One for each finding of the nine review rounds fixed in code, and
     one for each defect the extended schedules found afterwards. Each round-four test was
     checked to fail with its fix reverted. These are fixed by construction, with no test that
     fails when they are reverted: second round L3 (losses set aside before quarantine) and L4 (a
@@ -227,8 +231,11 @@ record. What follows describes the code after those fixes.
     repeated payloads, write-ahead shreds (their re-wraps
     left pending across later operations, finished later, or lost to a crash), flushes, failed
     flushes, failed appends, clock advances, process crashes, power losses and recoveries, with
-    faults still armed during the next open, followed by a crash or a power loss. 64 cases per
-    merge; 12,000 run locally on the final code. Every acknowledged record survives a process crash (except records that existed only
+    faults still armed during the next open, followed by a crash or a power loss. The merge
+    lane runs 64 cases of this property and of the next one: enough for a regression most
+    schedules reach, not for one only rare schedules reach. The nightly lane runs 20,000 of each
+    on all three operating systems (about a minute each in release on the reference machine).
+    52,000 of each ran locally on the final code. Every acknowledged record survives a process crash (except records that existed only
     in memory after a flush and its rewrite both failed, ADR-0003). Every flushed record's
     payload survives a power loss unless its loss was journaled first. No surviving record's
     payload is unreadable without a `chunk.lost` record.
@@ -239,17 +246,20 @@ record. What follows describes the code after those fixes.
     record uses leaves the content unreadable and one KEK version alive. The first schedule
     could not see the seventh review's M1; this one fails within seconds with it reverted.
 
-- **Gate self-test.** The `journal-durability` gate lists thirty seeded violations in
-  `gates.toml`: twenty-nine for this ADR, one per silent-loss class the seven reviews and the
-  schedules found (one of them, `chunk-put-shared-temp`, checks temporary naming only), and P1's
-  `journal-ack-without-write`.
+- **Gate self-test.** The `journal-durability` gate lists thirty-one seeded violations in
+  `gates.toml`: thirty for this ADR and P1's `journal-ack-without-write`. Of the thirty, four
+  come from this ADR's own verification plan (`chunk-flushed-before-sync`,
+  `intent-before-chunk-write`, `chunk-put-pair-race`, and `chunk-put-shared-temp`, which checks
+  temporary naming only), and twenty-six from the classes the review rounds and the crash
+  schedules found: every round but the eighth, which added a property test instead.
 - **Not modelled, stated plainly.** `SimFs` cannot model a failed directory flush that drops
   entries, so the poisoning that rule triggers is tested only for being triggered. Open reads
   every `chunk.shredded` record in the journal to find unfinished shreds: the cost grows with
   history until compaction (P4). It asks the keychain once per pocket, not once per record.
 - **Bench: the target is not met on the reference machine.** The details are in
   [the appendix](appendix/0018-chunk-put-2026-10-15.md).
-  - Balanced chunk put, 4 KiB, after the fixes: p99 is 1.55 ms on Windows 10 (solid-state drive)
+  - Balanced chunk put, 4 KiB, after the first review's fixes (`fc4b5a8`; not re-measured
+    after later rounds): p99 is 1.55 ms on Windows 10 (solid-state drive)
     against the 0.5 ms target. The fixes did not make this path slower in the one A/B session
     (`2cf78f8`, run once, measured 1.93 ms p99).
   - Without the flush, the cost is the creation of two files per chunk.
