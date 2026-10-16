@@ -204,14 +204,21 @@ on the PR-5 branch.
 - **Errors say whether the request may have reached the provider** (review WP3.A5, round 16,
   M1), because the runtime settles a reservation by it (ADR-0002, T6) and a retry is a new billed
   call:
-  - nothing sent: `Unreachable` (resolution, connection or TLS failed, or the connection closed
-    with the request handed back unsent) and `Timeout` (resolution, connect or handshake timed
-    out), both retryable;
+  - nothing sent: `Unreachable` (resolution, every connect or TLS failed; the connection
+    failed while hyper set it up, before it took the request, as when the upstream speaks first
+    or closes at once; or hyper handed the request back unsent) and `Timeout` (resolution or the
+    TLS handshake timed out), both retryable;
   - possibly received: `Interrupted` (`EGRESS_INTERRUPTED`), when the connection failed or no
-    answer came within the response timeout after the request was sent; not retryable;
-  - answered but not passed on: `Unusable` (`EGRESS_UNUSABLE_RESPONSE`), for a `101` or a
-    transfer coding the door does not decode; not retryable, since the same request gets the
-    same answer.
+    answer came within the response timeout after the request was sent; not retryable.
+    `Door::new` refuses a response timeout that does not exceed the whole connect phase
+    (resolution, `MAX_ADDRESSES_TRIED` connects and the handshake), so that timeout always means
+    the request was handed over;
+  - answered but not passed on: `Unusable` (`EGRESS_UNUSABLE_RESPONSE`), for a `101`, a transfer
+    coding the door does not decode, or an answer hyper could not parse; not retryable, since
+    the same request gets the same answer, and counted by the breaker as answered;
+  - after `send` returns a response, the provider received the request and answered: a body
+    that fails mid-stream is an answer cut short. A `send` the caller drops after the request
+    was handed over may have been delivered (round 17).
 - **The credential's value** is marked sensitive when the `Credential` is built and never
   appears in its `Debug` output.
 - **Connection tasks.** They run on an executor the caller passes in. The runtime passes its
@@ -332,7 +339,8 @@ on the PR-5 branch.
     `egress-embedded-local`, `egress-sends-trace`, `egress-forwards-switching-protocols` and
     `egress-forwards-contradicting-length`, `egress-forwards-unknown-transfer-coding` and
     `egress-forwards-repeated-length`, `egress-forwards-bodiless-length` and
-    `egress-delivered-reported-unsent`, and
+    `egress-delivered-reported-unsent`, `egress-timeout-reported-unsent` and
+    `egress-unsent-reported-delivered`, and
     `osfs-doubled-separator-unc` and `osfs-bare-volume` (Windows) for the platform's file
     system;
   - for the clippy bans: `egress-ctor-outside-root`, `net-dns-outside-egress`,
@@ -367,7 +375,7 @@ on the PR-5 branch.
   - nothing the standard library calls special is ever allowed.
 - **The ban canaries** (`tests/bans.rs`), one per `clippy.toml` entry; the Unix ones were
   also cross-checked with clippy for a Linux target (all fulfilled; a removed ban fails).
-- **28 integration tests** against loopback mocks. They read what the mock received and the
+- **32 integration tests** against loopback mocks. They read what the mock received and the
   door's own counters, and cover:
   - the header policy;
   - op binding and replay;
@@ -390,9 +398,10 @@ on the PR-5 branch.
     returned as errors (four spellings); a `content-length` beside `transfer-encoding`
     dropped, a repeated one forwarded once, none kept on a `204`, and an unchecked one on a
     HEAD answer or a `304` forwarded only as one length in digits;
-  - errors that say whether the request may have reached the provider: an unusable answer and
-    a connection cut after the request was sent are not retryable, a connection that never
-    opened is;
+  - errors that say whether the request may have reached the provider: an unusable or
+    unparsable answer, a connection cut after the request was sent and no answer within the
+    response timeout are not retryable; a connection that never opened, or failed before hyper
+    took the request, is; a response timeout inside the connect phase is refused;
   - the address cap;
   - the credential never printed;
   - **a certificate naming issuer, OCSP and CRL URLs on a local listener: the handshake fails

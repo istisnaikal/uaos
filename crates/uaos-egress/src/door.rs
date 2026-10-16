@@ -22,7 +22,7 @@ use uaos_contracts::id::OperationId;
 use uaos_platform::Clock;
 
 use crate::EgressError;
-use crate::connect::{Connector, CounterSnapshot, Counters, Target, bump};
+use crate::connect::{Connector, CounterSnapshot, Counters, MAX_ADDRESSES_TRIED, Target, bump};
 use crate::resolve::Resolve;
 use crate::upstream::{Scheme, Trust, Upstream, UpstreamError, UpstreamId};
 
@@ -43,11 +43,12 @@ pub const PROBE_RECHECK: Duration = Duration::from_secs(1);
 pub struct DoorLimits {
     /// Name resolution, the TCP connect to each address, and the TLS handshake, each.
     pub connect_timeout: Duration,
-    /// From sending the request to receiving the response headers. Streaming bodies are timed
+    /// From handing the request to the client to receiving the response headers; it includes
+    /// the connect phase, which [`Door::new`] requires it to exceed. Streaming bodies are timed
     /// by the runtime's idle watchdog, never here.
     pub response_timeout: Duration,
-    /// Consecutive transport failures (unreachable or timed out) that open an upstream's
-    /// circuit.
+    /// Consecutive transport failures (unreachable, timed out, or cut off after the request was
+    /// sent) that open an upstream's circuit.
     pub breaker_threshold: u32,
     /// How long an open circuit refuses attempts. After it, exactly one probe is let through;
     /// the rest are refused until the probe settles.
@@ -137,6 +138,10 @@ impl fmt::Debug for Credential {
 }
 
 /// The upstream's response; the body streams frame by frame.
+///
+/// It means the provider received the request and answered. A body that fails after this
+/// (the connection drops mid-stream) is an answer cut short, not a request that may not have
+/// arrived; the caller settles it as delivered (review WP3.A5, round 17, L5).
 #[derive(Debug)]
 pub struct EgressResponse {
     /// Status.
@@ -278,7 +283,8 @@ enum Ticket {
 enum Outcome {
     /// A response arrived (any status).
     Answered,
-    /// Unreachable or timed out: evidence the upstream is down.
+    /// Unreachable, timed out, or cut off after the request was sent: evidence the upstream is
+    /// down.
     TransportFailure,
     /// Refused or blocked by the door's own rules: no evidence about the upstream.
     NotAttempted,
@@ -288,6 +294,9 @@ impl Outcome {
     fn of(error: &EgressError) -> Self {
         match error {
             EgressError::Unreachable(_) | EgressError::Timeout | EgressError::Interrupted(_) => Self::TransportFailure,
+            // An answer that could not be parsed is still an answer, as for one the door refuses
+            // after the headers (round 17, L4).
+            EgressError::Unusable(_) => Self::Answered,
             _ => Self::NotAttempted,
         }
     }
@@ -354,7 +363,9 @@ impl Door {
     /// # Errors
     /// [`EgressError::Upstream`] for an invalid or duplicate declaration;
     /// [`EgressError::Tls`] if the TLS configuration cannot be built or no system root can be
-    /// read.
+    /// read; [`EgressError::Limits`] if the response timeout does not exceed the whole connect
+    /// phase (resolution, [`MAX_ADDRESSES_TRIED`] connects and the handshake), which would
+    /// report a request that never left as possibly received (round 17, L2).
     pub fn new<E>(
         upstreams: Vec<Upstream>,
         resolver: Arc<dyn Resolve>,
@@ -365,6 +376,14 @@ impl Door {
     where
         E: Executor<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> + Send + Sync + Clone + 'static,
     {
+        let connect_phase = limits
+            .connect_timeout
+            .saturating_mul(u32::try_from(MAX_ADDRESSES_TRIED + 2).unwrap_or(u32::MAX));
+        if limits.response_timeout <= connect_phase {
+            return Err(EgressError::Limits(
+                "the response timeout must exceed the connect phase, (MAX_ADDRESSES_TRIED + 2) connect timeouts",
+            ));
+        }
         let mut system_roots = None;
         let mut by_id = BTreeMap::new();
         let mut targets = BTreeMap::new();
@@ -510,9 +529,9 @@ impl Door {
         let result = tokio::time::timeout(self.limits.response_timeout, self.client.request(outbound)).await;
         let response = match result {
             Err(_) => {
-                // The connector's own timeouts (resolution, connect, handshake) are shorter and
-                // come back as `Timeout`; this one ran out while waiting for an answer to a
-                // request that may have been sent (round 16, M1).
+                // The connect phase fits inside this timeout (`Door::new` checks), and its own
+                // timeouts come back as `Timeout` or `Unreachable`; this one ran out while waiting
+                // for an answer to a request that may have been sent (rounds 16 and 17).
                 admitted.settle(Outcome::TransportFailure);
                 return Err(EgressError::Interrupted("no answer within the response timeout"));
             }
@@ -712,7 +731,8 @@ mod tests {
     use super::*;
     use crate::addr::Blocked;
 
-    /// Only an unreachable upstream or a timeout counts against it (round 2, L5).
+    /// Only an unreachable upstream, a timeout or a request cut off after it was sent counts
+    /// against it (round 2, L5); an answer counts as one, parsable or not (round 17, L4).
     #[test]
     fn only_transport_failures_count_against_an_upstream() {
         assert_eq!(Outcome::of(&EgressError::Unreachable("x")), Outcome::TransportFailure);
@@ -725,10 +745,11 @@ mod tests {
                 retry_after: Duration::ZERO,
             },
             EgressError::Tls("x"),
-            EgressError::Unusable("x"),
+            EgressError::Limits("x"),
         ] {
             assert_eq!(Outcome::of(&e), Outcome::NotAttempted, "{e:?}");
         }
+        assert_eq!(Outcome::of(&EgressError::Unusable("x")), Outcome::Answered);
     }
 
     fn ordinary(admitted: Result<Ticket, Duration>) -> bool {

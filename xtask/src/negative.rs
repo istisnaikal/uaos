@@ -610,6 +610,40 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "a request the provider received was reported as never sent",
         },
         Case {
+            id: "egress-timeout-reported-unsent",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 17, L3: no answer within the response timeout reported as
+            // nothing sent, retryable.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "                return Err(EgressError::Interrupted(\"no answer within the response timeout\"));",
+                "                return Err(EgressError::Timeout);",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "no_answer_within_the_response_timeout_is_interrupted"],
+            },
+            expect: "an unanswered request was reported as never sent",
+        },
+        Case {
+            id: "egress-unsent-reported-delivered",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 17, L1: a connection lost before hyper took the request reported
+            // as possibly received.
+            seed: replace(
+                "crates/uaos-egress/src/lib.rs",
+                "        let mut unsent = e.is_connect() || e.connect_info().is_none();",
+                "        let mut unsent = e.is_connect();",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_connection_lost_before_the_request_left_is_unreachable"],
+            },
+            expect: "nothing was sent, but the door reported",
+        },
+        Case {
             id: "osfs-bare-volume",
             gate: "test",
             tool: Some(WINDOWS_ONLY),
