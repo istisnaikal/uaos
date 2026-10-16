@@ -315,11 +315,12 @@ fn config_overrides(root: &Path, files: &[PathBuf]) -> Result<Vec<String>, Strin
                     "{relative}: a build script names one of clippy's variables, so it could set them for the compiler"
                 ));
             }
-            // The check reads this file only, so a build script stays one file (review WP3.A5,
-            // round 11, L2); `#[path]` and `include!` are refused above.
-            if declares_file_module(&text) {
+            // The check reads this file only, so a build script stays one file, in owner crates
+            // too, where `#[path]` and `include!` are otherwise allowed (review WP3.A5, rounds 11
+            // and 12, L2 and L1).
+            if uses_another_file(&text) {
                 problems.push(format!(
-                    "{relative}: a build script declares a module in another file, which this check does not read; keep it to one file"
+                    "{relative}: a build script uses another file (a `mod` in another file, `#[path]` or an `include` macro), which this check does not read; keep it to one file"
                 ));
             }
         }
@@ -383,16 +384,27 @@ fn names_clippy_variable(build_script: &str) -> bool {
     blanked(build_script, false).to_ascii_uppercase().contains("CLIPPY_")
 }
 
-/// Whether `source` declares a module in another file (`mod name;`), in code.
-fn declares_file_module(source: &str) -> bool {
+/// Whether `source` uses code or text from another file, in code: a module in another file
+/// (`mod name;`), a `#[path = ...]` attribute, or `include!`, `include_str!` or
+/// `include_bytes!`.
+fn uses_another_file(source: &str) -> bool {
     let code = masked(source);
-    word_positions(&code, "mod").into_iter().any(|(_, at)| {
+    let file_module = word_positions(&code, "mod").into_iter().any(|(_, at)| {
         let rest = code.get(at + "mod".len()..).unwrap_or_default().trim_start();
         let ident_len = rest
             .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .unwrap_or(rest.len());
         ident_len > 0 && rest.get(ident_len..).unwrap_or_default().trim_start().starts_with(';')
-    })
+    });
+    let include = ["include", "include_str", "include_bytes"].iter().any(|name| {
+        word_positions(&code, name).into_iter().any(|(_, at)| {
+            code.get(at + name.len()..)
+                .unwrap_or_default()
+                .trim_start()
+                .starts_with('!')
+        })
+    });
+    file_module || include || !path_attribute_lines(&code).is_empty()
 }
 
 fn read_toml(root: &Path, path: &Path) -> Result<toml::Value, String> {
@@ -849,13 +861,20 @@ mod tests {
         );
     }
 
-    /// Round 11, L2: a build script that keeps code in another file.
+    /// Rounds 11 and 12 (L2, L1): a build script that uses another file.
     #[test]
-    fn a_build_script_module_in_another_file_is_found() {
-        assert!(declares_file_module("mod build_env;\nfn main() {}\n"));
-        assert!(declares_file_module("pub mod emit ;\n"));
-        assert!(!declares_file_module("mod inline {\n    pub fn f() {}\n}\n"));
-        assert!(!declares_file_module(
+    fn a_build_script_using_another_file_is_found() {
+        assert!(uses_another_file("mod build_env;\nfn main() {}\n"));
+        assert!(uses_another_file("pub mod emit ;\n"));
+        assert!(uses_another_file("include!(\"build_env.rs\");\nfn main() {}\n"));
+        assert!(uses_another_file(
+            "fn main() {\n    let s = include_str !(\"env.txt\");\n}\n"
+        ));
+        assert!(uses_another_file("#[path = \"env.rs\"]\nmod env;\n"));
+        assert!(!uses_another_file(
+            "mod inline {\n    pub fn f() {}\n}\nfn include_all() {}\n"
+        ));
+        assert!(!uses_another_file(
             "// mod build_env;\nlet s = \"mod x;\";\nfn modx() {}\n"
         ));
     }
