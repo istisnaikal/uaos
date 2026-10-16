@@ -1677,6 +1677,23 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "a payload failure hid the torn segment",
         },
         Case {
+            id: "lost-content-reads-as-unavailable",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 twelfth round L3: content whose loss was journaled reads back as never stored
+            // or shredded.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "if self.quarantined(pocket, chunk) =>",
+                "if self.quarantined(pocket, chunk) && false =>",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r12_l3_lost_content_reads_back_as_lost"],
+            },
+            expect: "lost content read back as never stored or shredded",
+        },
+        Case {
             id: "shred-incomplete-key-only",
             gate: "journal-durability",
             tool: None,

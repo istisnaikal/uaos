@@ -147,6 +147,10 @@ pub enum ChunkError {
     /// which reports each loss before it flushes the records that reference it.
     #[error("this store is coordinated by a journal; recover through the journal")]
     LossesThroughJournal,
+    /// The content was found unreadable and its files set aside in the pocket's quarantine; a
+    /// `chunk.lost` record reports it. Not the same as never stored or shredded.
+    #[error("the content was lost and set aside; a chunk.lost record reports it")]
+    Lost,
     /// [`MAX_UNFINISHED_SHREDS`] shreds failed and were neither retried nor followed by a put
     /// of their content; retry them first.
     #[error("too many shreds left unfinished by failures; retry them first")]
@@ -166,6 +170,7 @@ impl ChunkError {
             Self::PendingFull | Self::ShredBacklog => codes::RUNTIME_OVERLOAD,
             Self::InstanceLocked => codes::JOURNAL_INSTANCE_LOCKED,
             Self::ShredThroughJournal | Self::LossesThroughJournal => codes::CONFIG_INVALID,
+            Self::Lost => codes::STORE_PAYLOAD_LOST,
             Self::TooLarge | Self::Storage(_) | Self::Platform(_) => codes::JOURNAL_WRITE_FAILED,
         }
     }
@@ -855,6 +860,20 @@ impl ChunkStore {
         )
     }
 
+    /// Whether a file of the chunk's pair sits in the pocket's quarantine, set aside as lost.
+    fn quarantined(&self, pocket: PocketId, chunk: ChunkRef) -> bool {
+        let prefix = format!("{}.", hex(chunk.as_bytes()));
+        self.fs
+            .list_dir(&self.pocket_dir(pocket).join(QUARANTINE_DIR))
+            .is_ok_and(|files| {
+                files.iter().any(|f| {
+                    f.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(&prefix))
+                })
+            })
+    }
+
     /// Moves a chunk's files into the pocket's quarantine folder. Unreadable content is kept
     /// for inspection, never deleted (review WP3.A1 M5); the chunk's name is then free for a
     /// fresh write.
@@ -1189,9 +1208,10 @@ impl ChunkStore {
     /// Reads and authenticates a chunk.
     ///
     /// # Errors
-    /// `Unavailable` if never stored, shredded, or a shred of it has begun; `Corrupt` if
-    /// anything fails authentication, including the end-to-end check that the content still
-    /// matches its reference.
+    /// `Unavailable` if never stored, shredded, or a shred of it has begun; `Lost` if its files
+    /// were set aside as lost (a `chunk.lost` record reports it); `Corrupt` if anything fails
+    /// authentication, including the end-to-end check that the content still matches its
+    /// reference.
     pub fn get(&self, pocket: PocketId, chunk: ChunkRef) -> Result<Vec<u8>, ChunkError> {
         if locked(&self.shredding).contains(&(pocket, chunk)) {
             return Err(ChunkError::Unavailable);
@@ -1199,7 +1219,12 @@ impl ChunkStore {
         // Held shared, so a rotation cannot destroy the KEK between reading the key file and
         // unwrapping it, which would report existing content as unavailable.
         let _shared = self.rotation_shared(pocket);
-        let (data_key, _) = self.data_key(pocket, chunk)?;
+        let (data_key, _) = match self.data_key(pocket, chunk) {
+            // Lost content reads back as lost, not as never stored or shredded (review WP3.A1,
+            // twelfth round, L3).
+            Err(ChunkError::Unavailable) if self.quarantined(pocket, chunk) => return Err(ChunkError::Lost),
+            other => other?,
+        };
         let bytes = match self.fs.read(&self.chunk_path(pocket, chunk)) {
             Ok(b) => b,
             Err(FsError::NotFound { .. }) => return Err(ChunkError::Corrupt),

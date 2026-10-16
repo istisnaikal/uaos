@@ -1,6 +1,6 @@
 # ADR-0018: Chunk durability joins the journal's durability classes
 
-**Status:** Accepted by the maintainer on 2026-10-15, at the end of its 48 h window (opened 2026-10-13) · **Plan refs:** v2 PD-18, I-02, §2.4 per-stage budget, B-06 · **Amends:** ADR-0003 §5 (chunked payloads) · **Evidence:** [ack-latency appendix](appendix/0003-ack-latency-2026-10-13.md)
+**Status:** Accepted by the maintainer on 2026-10-15, at the end of its 48 h window (opened 2026-10-13) · **Plan refs:** v2 PD-18, I-02, §2.4 per-stage budget, B-06 · **Amends:** ADR-0003 §3 (recovery at open) and §5 (chunked payloads) · **Evidence:** [ack-latency appendix](appendix/0003-ack-latency-2026-10-13.md)
 
 ## Context
 
@@ -128,6 +128,9 @@ record. What follows describes the code after those fixes.
   - **The flush still runs inline.** When the window is due, the `append` that finds it due pays
     for the flush. Moving it to its own thread is runtime work (WP3.3, the state actor).
 - **Decision 3.**
+  - **Lost content reads back as lost.** `ChunkStore::get` returns `ChunkError::Lost`
+    (`STORE_PAYLOAD_LOST`) for content whose files were set aside in the pocket's quarantine,
+    not `Unavailable`, whose message says never stored or shredded (twelfth review, L3).
   - **Losses are journaled before their records are durable.** The `chunk.lost` records are
     appended before the flush that makes the records they report durable, so one flush covers
     both. While a found loss is not yet journaled, the writer refuses records and flushes, and
@@ -228,7 +231,7 @@ record. What follows describes the code after those fixes.
   flush either drops the unflushed bytes, or keeps serving them without ever making them durable.
   - **Flush-ordering scenario.** A flush fails at every possible step, then the power goes. A
     record at or before `flushed_through` must have a readable payload.
-  - **Regression tests.** One for each finding of the eleven review rounds fixed in code, and
+  - **Regression tests.** One for each finding of the twelve review rounds fixed in code, and
     one for each defect the extended schedules found afterwards. Each round-four test was
     checked to fail with its fix reverted. These are fixed by construction, with no test that
     fails when they are reverted: first round M1 (a chunk is enrolled in `pending` before its
@@ -261,7 +264,9 @@ record. What follows describes the code after those fixes.
     that itself survived the power loss names it. No surviving record's payload is unreadable
     without a `chunk.lost` record. A recovery with no fault armed succeeds, leaves neither the
     journal nor the store refusing work, and leaves a journal that takes a new record, flushes
-    it and still reads back whole. Before the tenth review the oracles accepted a store that
+    it and still reads back whole; an open with no fault armed succeeds; and a record an open
+    verified (its payload reads back and no `chunk.lost` names it) no longer counts as exposed
+    to a later failed flush. Before the tenth review the oracles accepted a store that
     never wrote a payload, as long as every loss was reported; before the eleventh, one that
     discarded readable content after any failed flush, and a failed append wrote nothing, so
     no schedule tore a segment. Both properties now fail on each of these, and they found round
@@ -274,11 +279,11 @@ record. What follows describes the code after those fixes.
     record uses leaves the content unreadable and one KEK version alive. The first schedule
     could not see the seventh review's M1; this one fails within seconds with it reverted.
 
-- **Gate self-test.** The `journal-durability` gate lists thirty-four seeded violations in
-  `gates.toml`: thirty-three for this ADR and P1's `journal-ack-without-write`. Of the
-  thirty-three, four come from this ADR's own verification plan (`chunk-flushed-before-sync`,
+- **Gate self-test.** The `journal-durability` gate lists thirty-five seeded violations in
+  `gates.toml`: thirty-four for this ADR and P1's `journal-ack-without-write`. Of the
+  thirty-four, four come from this ADR's own verification plan (`chunk-flushed-before-sync`,
   `intent-before-chunk-write`, `chunk-put-pair-race`, and `chunk-put-shared-temp`, which checks
-  temporary naming only), and twenty-nine from the classes the review rounds and the crash
+  temporary naming only), and thirty from the classes the review rounds and the crash
   schedules found: every round but the eighth, which added a property test instead.
 - **Not modelled, stated plainly.** `SimFs` cannot model a failed directory flush that drops
   entries, so the poisoning that rule triggers is tested only for being triggered. Open reads
@@ -286,7 +291,10 @@ record. What follows describes the code after those fixes.
   history until compaction (P4). It asks the keychain once per pocket, not once per record.
   A lost chunk gets one `chunk.lost` record per record that references it, written at open
   without rotating the segment, so a chunk shared by many records can grow that segment past
-  its target size.
+  its target size. `SimFs` models a failed flush as the file falling back to its durable
+  prefix; Linux can drop only the pages whose writeback failed, leaving a zero-filled hole
+  before pages still cached, so after `FlushFailed` and a crash a real open could fail on the
+  hole instead of only losing the in-memory records (pre-existing since P1).
 - **Bench: the target is not met on the reference machine.** The details are in
   [the appendix](appendix/0018-chunk-put-2026-10-15.md).
   - Balanced chunk put, 4 KiB, after the first review's fixes (`fc4b5a8`; not re-measured
