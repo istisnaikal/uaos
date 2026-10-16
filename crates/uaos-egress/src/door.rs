@@ -222,7 +222,7 @@ fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The egress door. Exactly one exists per daemon and only the runtime holds it (ADR-0010).
-/// Where it is built is settled by ADR-0013's proposed amendment (review WP3.A5 M1).
+/// The runtime builds it in one private module (ADR-0013 Amendment 1B; review WP3.A5 M1).
 #[derive(Debug)]
 pub struct Door {
     client: Client<Connector, Full<Bytes>>,

@@ -7,8 +7,8 @@ probing a scratchpad export of the branch on Windows 10. **Reviewed:** `b69e23b`
 own documentation said were closed. They blocked merge.
 **Resolution:** every High and Medium finding fixed with a regression test or a seeded violation;
 Low findings fixed or accepted with a reason. Two fixes change accepted decisions and are written
-as ADR-0013 Amendment 1, **proposed**: the maintainer decides before merge. A second V1 review of
-the fixes is pending; the PR stays a draft until it is clean.
+as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
+fixes is pending; the PR stays a draft until it is clean.
 
 ## Findings as reported
 
@@ -68,9 +68,9 @@ Tests are in `crates/uaos-egress/tests/door.rs` and the `addr` unit tests. Negat
 
 | Finding | What changed | Proof |
 |---|---|---|
-| H1 | **Proposed in ADR-0013 Amendment 1A.** The default trust is `Trust::System`: the OS root store read locally when the door is built (`rustls-native-certs`), chains verified by rustls itself, so a handshake fetches nothing. `rustls-platform-verifier` and 11 crates leave the lockfile. Revocation is not checked; that residual, and Windows' on-demand roots, are written into the amendment | `the_system_trust_fetches_nothing_a_certificate_names`: a leaf naming issuer, OCSP and CRL URLs on a local listener; the handshake fails and the listener receives nothing, on every CI OS. No negative: the fetching verifier is gone from the dependency graph |
+| H1 | **ADR-0013 Amendment 1A (accepted 2026-10-16).** The default trust is `Trust::System`: the OS root store read locally when the door is built (`rustls-native-certs`), chains verified by rustls itself, so a handshake fetches nothing. `rustls-platform-verifier` and 11 crates leave the lockfile. Revocation is not checked; that residual, and Windows' on-demand roots, are written into the amendment | `the_system_trust_fetches_nothing_a_certificate_names`: a leaf naming issuer, OCSP and CRL URLs on a local listener; the handshake fails and the listener receives nothing, on every CI OS. No negative: the fetching verifier is gone from the dependency graph |
 | H2 | Plain HTTP requires pinned addresses, all loopback, private or unique-local, and is never resolved. `allow_private` admits only those three ranges, pinned or resolved; link-local (metadata), unspecified, multicast and the rest stay refused. Defence in depth: the dial path refuses a public address for plain HTTP even if validation were bypassed | `plain_http_is_declared_only_toward_pinned_local_addresses`, `a_private_upstream_never_reaches_link_local_or_special_ranges`, `plain_http_reaches_a_pinned_local_server_without_resolving`; negatives `egress-private-reaches-link-local`, `egress-plaintext-resolved` **PROVEN** |
-| M1 | **Proposed in ADR-0013 Amendment 1B.** The bin's allow list leaves `uaos-egress` out, the transitive ban is gone, and the runtime builds the door in one private module from declarations the bin passes in runtime types. That module becomes the `Door::new` owner in PR-6 | `cargo xtask arch-check` passes; `arch-bin-depends-on-egress` waits for the bin crate (M3) |
+| M1 | **ADR-0013 Amendment 1B (accepted 2026-10-16).** The bin's allow list leaves `uaos-egress` out, the transitive ban is gone, and the runtime builds the door in one private module from declarations the bin passes in runtime types. That module becomes the `Door::new` owner in PR-6 | `cargo xtask arch-check` passes; `arch-bin-depends-on-egress` waits for the bin crate (M3) |
 | M2 | Banned outside their owners: `ToSocketAddrs::to_socket_addrs`, `TcpSocket::connect`, tokio `UdpSocket::bind`, hyper-util `HttpConnector::new` and `build_http`, `spawn_local`, `JoinSet::spawn`, `Handle`/`Runtime` spawns, `std::thread::Builder::spawn`. The new ban found three real uses in the policy tests, now allowed at file level with a reason inside an owner path. The crate docs now say the bans cover the listed entry points | negatives `net-dns-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`, `spawn-outside-supervisor` **PROVEN** |
 | M3 | `Credential` fields are private; `Credential::new` marks the value sensitive; `Debug` prints only the header name | `the_credential_is_never_printed` |
 | M4 | A three-state breaker: closed, open until a monotonic instant, probing. After the cooldown exactly one probe goes; the rest get `CircuitOpen`. Only unreachable and timed-out attempts count; a probe that never reached the upstream lets the next attempt probe | `after_the_cooldown_exactly_one_probe_goes_through` (one connect for four concurrent sends, three refusals counted, reopened after the failed probe); negative `egress-breaker-admits-after-cooldown` **PROVEN** |
@@ -84,7 +84,7 @@ Tests are in `crates/uaos-egress/tests/door.rs` and the `addr` unit tests. Negat
 | L8 | `deny.toml` bans `ring`. The vet notes of the 21 lockfile-only crates now say they compile for no target; the 9 exemptions for crates that left the lockfile are removed (vet-ratchet 290 → 281, notes-less baseline unchanged) | `cargo deny check bans`, `cargo vet --locked` |
 | L9 | Tests added for the oversized body, a wrong name from the trusted authority, the breaker, plain HTTP toward public addresses and IPv6 classification. ADR-0013's "before any byte" now reads "no request received". **Deferred, tracked:** the T5 row of the threat model and the privacy data flow live in #24 (threat model v1, data-flow v1); their updates land when this PR is rebased onto it | `an_oversized_body_and_a_wrong_name_are_refused`, the `addr` property tests |
 
-## Open for the maintainer
+## Maintainer decision
 
-- **ADR-0013 Amendment 1** (A: trust and revocation; B: where the door is built). Accepting it
-  is the condition for merging this PR.
+- **ADR-0013 Amendment 1** (A: trust and revocation; B: where the door is built) was accepted by
+  the maintainer on 2026-10-16. Merging still waits for a clean second review and for #24.

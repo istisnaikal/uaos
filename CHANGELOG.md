@@ -163,7 +163,7 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **TLS.** On aws-lc-rs, HTTP/1.1, against the system's root certificates read locally and
     verified by rustls: a handshake fetches nothing, so a server's certificate cannot make UAOS
     contact an address of its choosing. Revocation is not checked (ADR-0013 Amendment 1,
-    proposed).
+    accepted 2026-10-16).
   - **Requests.**
     - Redirects are returned, never followed, and nothing is retried.
     - The URI comes from the upstream's declaration; the path must start with `/`.
@@ -193,7 +193,7 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `net-dns-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
     `spawn-outside-supervisor`, `arch-ring1-depends-on-hyper`.
   - **Review:** `docs/reviews/WP3.A5-egress.md` (2 High, 4 Medium, 9 Low, all resolved; two
-    fixes are proposed as ADR-0013 Amendment 1).
+    fixes rest on ADR-0013 Amendment 1, accepted by the maintainer on 2026-10-16).
 - Dependencies for the ADR-0013 stack: tokio, hyper 1, hyper-util, http, rustls 0.23
   (aws-lc-rs only), tokio-rustls, rustls-native-certs, and rcgen for tests only.
   - 48 cargo-vet exemptions, each with a written reason (the unnoted baseline is unchanged);
