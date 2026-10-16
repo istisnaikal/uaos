@@ -37,9 +37,18 @@ overhead p95 ≤ 25 ms. Two stores (journal + SQLite) written independently drif
      OS (acknowledged, not yet flushed) are flushed *before* the manifest seals the segment
      around them; a durable manifest never claims records a power loss could still remove.
      (Found by the deterministic simulation in WP1.2.)
+     *Amended 2026-10-16 by ADR-0018:* open no longer flushes the previous run's segment in
+     place, since a second flush of a file whose flush may have failed proves nothing. It copies
+     the records after the durable point (the `journal/FLUSHED` marker) to a fresh segment,
+     unflushed, journals any payload loss among them, and one flush then covers both; the
+     manifest stops naming the old copies only after that flush. The rule above still holds: a
+     durable manifest never claims records a power loss could still remove (WP3.A1 N4, H1).
 4. **One combined `reserve+intent` record per Operation** before egress.
 5. **Chunked, content-addressed payloads** (`hmac-sha256:` refs with a per-pocket key). A long
-   session stores each message once (linear, not quadratic, growth).
+   session stores each message once (linear, not quadratic, growth). *Amended 2026-10-16 by
+   ADR-0018:* payloads join the durability classes; a record's payload is stored before the
+   record and made durable before it, and a payload found unreadable is journaled as
+   `chunk.lost`.
 6. **Crypto-shredding**: random per-chunk data keys wrapped by the pocket key; shredding deletes
    the wrapped key and rotates the pocket key. The chain stays verifiable through tombstones.
 7. **Pending gates (deviation from CLAUDE.md §4 wording).** CLAUDE.md lists all merge blockers

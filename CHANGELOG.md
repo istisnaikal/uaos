@@ -8,6 +8,63 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Security
 
+- P3 Move 1, PR-1: chunk durability joins the journal's durability classes (ADR-0018), and a
+  latent chunk race (S-6) in P1 code is fixed.
+  - **Race (S-6).** Two concurrent puts of the same content could tear one shared temporary file
+    or pair one writer's data file with the other's key, which reads back as `Corrupt`. It was
+    harmless while single-threaded, but parallel subagents sharing `system` and `tools` content
+    would make it the common case.
+  - **The fix:**
+    - every atomic write now uses its own temporary;
+    - every operation on a chunk (put, flush, recovery, shred) holds that chunk's slot;
+    - a shred cannot destroy the key a concurrent put is wrapping under;
+    - a chunk left by an earlier process is read back and rewritten, flushed, before it is
+      trusted, and a rewrite keeps the chunk's data key.
+  - **Proof:** deterministic interleaving tests and seeded violations.
+- Payload before record (I-02). A journal opened with its chunk store refuses a record whose
+  `payload_ref` is not stored (`JournalError::PayloadNotStored`, new code
+  `JOURNAL_PAYLOAD_NOT_STORED`).
+- Payload losses are journaled before the records they affect become durable, in simulation
+  (`docs/claims.md` gives the exact conditions).
+  - **On open:** the journal reads back the payloads of every record after its durable point
+    (the whole journal if the marker is missing), rewrites the readable ones, and journals each
+    unreadable one as `chunk.lost` before the durable point moves. Unreadable chunks are
+    quarantined, never deleted. A keychain that lost the pocket's keys fails closed instead.
+  - **After a failed payload flush,** anywhere in the store: the store refuses work and the
+    writer stops until `recover` has rewritten what it can read and journaled the rest. Nothing
+    is flushed in place a second time, because after a writeback error a second flush can report
+    success without writing anything.
+  - **A journal that coordinates a store cannot be opened without it.**
+  - **Open no longer flushes the previous run's journal segment again.** It moves the records
+    after the durable point to a fresh segment, and one flush covers them together with any loss
+    records open appends for them. This also closes a latent P1 gap: a failed flush during open
+    could drop records the OS still held.
+  - **A shred the journal recorded but a crash interrupted is completed when the journal
+    opens**; before, the store's startup re-wrapped the leftover key and the content stayed
+    readable (pre-existing).
+  - **`Journal::shred`** records a shred, flushes the record, rotates the KEK and removes the
+    chunk while no other record can be appended, and returns a `PendingRewrap` that re-wraps the
+    pocket's other keys once the writer is free (or when dropped); a store a journal coordinates
+    refuses a direct shred. The store marks the chunk before the record is appended and neither
+    vouches for it nor serves it until a put of the content succeeds or the shred completes; at
+    most 4,096 failed shreds stay marked (`ChunkError::ShredBacklog` beyond).
+  - **A journal flush is not acknowledged across a poisoning** of the store while it ran, and the
+    first open with a store invalidates a plain journal's marker before it records the store.
+  - **A KEK rotation writes every readable key file again before destroying old versions**, so a
+    re-wrap whose directory flush failed cannot leave a key file only a destroyed KEK opens
+    (found by the extended crash schedules; it predates this PR).
+  - **Every journal keeps a durable-point marker**, so restarts copy only the records after it;
+    a `PAYLOADS` flag file now records that a journal coordinates a store.
+  - **Review:** `docs/reviews/WP3.A1-chunk-durability.md` (4 High, 7 Medium, 7 Low, four defects
+    found by the extended property test after the fixes, a second round: 1 High, 1 Medium,
+    6 Low, a third: 1 High, 3 Medium, 5 Low, a fourth: 2 Medium, 4 Low, a fifth: 2 Medium,
+    3 Low, a sixth: 4 Low, a seventh: 1 Medium, 2 Low, an eighth: 1 Low, a ninth: 4 Low, a
+    tenth: 4 Low, an eleventh: 1 High, 3 Low, a twelfth: 3 Low, and a thirteenth: 4 Low).
+    New codes `STORE_PAYLOAD_LOST` (lost content reads back as lost, `ChunkError::Lost`, through
+    a marker every loss leaves in the pocket's quarantine and a shred removes) and
+    `STORE_PAYLOAD_FLUSH_FAILED`. ADR-0003 §3 and §5 carry amendment
+    notes pointing to ADR-0018.
+
 - `uaos-policy` hardening after the retroactive review (`docs/reviews/WP2.1-policy.md`; ADR-0008
   Amendment 1):
   - **Crafted policy text aborted the process** (about 80 nested parentheses overflowed Cedar's
@@ -151,6 +208,50 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       - replayed edits are their own class;
       - the selector set is closed;
       - numbers are grammar-only.
+- ADR-0018 balanced chunk durability (P3 Move 1, PR-1).
+  - `ChunkStore::open_with(…, ChunkDurability::Balanced)`: puts hand chunks to the OS, unflushed.
+  - `Journal::open_with_payloads`: every journal flush makes the pending chunks durable before
+    the segment, and records the durable point in `journal/FLUSHED`.
+  - `Journal::lost_payloads()`.
+  - Kernel event type `chunk.lost`: a `chunk.lost` or `chunk.shredded` record names its chunk
+    in metadata key `chunk`.
+  - `Fs::write_unsynced` and `Fs::sync_file` on both filesystems.
+- **Tests and harness:**
+  - `uaos-state/tests/durability.rs`: flush ordering under every injected flush fault, random
+    crash and power-loss schedules, rotation durability, torn-chunk rewrite and the S-6
+    interleaving.
+  - **Kill harness:** the writer now stores a payload before each intent, and the harness
+    reads every acknowledged record's payload back.
+  - **New seeded violations for `journal-durability`:** `chunk-flushed-before-sync`,
+    `intent-before-chunk-write`, `chunk-put-pair-race`, `chunk-put-shared-temp`.
+- `journal-ack-bench` gains `chunk-put-balanced` and `group-flush-chunks`. The reference-machine
+  numbers are in `docs/adr/appendix/0018-chunk-put-2026-10-15.md`: ADR-0018's p99 ≤ 0.5 ms
+  balanced-put target is **not met** on Windows (1.55 ms after the first review's fixes,
+  `fc4b5a8`; not re-measured after later rounds), where file
+  creation dominates. Until the state actor (WP3.3), the request whose append finds the flush
+  window due pays for the flush.
+- Gate `journal-durability` gains thirty-four more seeded violations, one per class found by
+  the WP3.A1 review rounds (every round but the eighth, which added a property test) and the
+  extended property tests (thirty-eight for ADR-0018 with the four above, thirty-nine in the
+  gate). The nightly lane runs both chunk-durability properties at 20,000 schedules each per
+  OS; merges run 64. Their oracles require, after a process crash, the payload of every
+  acknowledged record no failed flush could have dropped, and a clean recovery to leave
+  nothing refusing work and a journal that reads back whole; their failed appends tear the
+  segment, as a full disk does, and the simulated OS writes back on its own, so a record can
+  survive a power loss without its payload.
+- A payload flush failure no longer replaces the writer's out-of-space or write failure, so
+  `recover` always leaves a segment that may end in a torn line; before, it could return `Ok`
+  and append after the torn bytes, and the journal then failed to open (WP3.A1 eleventh round,
+  H1, present since the first round's fixes). A loss already waiting to be journaled is not
+  queued twice.
+- A chunk store that a journal coordinates refuses `recover_pending`, `take_lost` and
+  `verify_and_sync` from callers (`ChunkError::LossesThroughJournal`; `take_lost` now returns a
+  `Result`), and `Journal::recover` recovers a poisoned store whatever state the writer is in.
+- `cargo xtask negative` refuses a seed anchor that occurs more than once in its file: the
+  first match could be another site, and the case would then prove nothing.
+- `uaos-state`'s `tampering_is_detected` flips the last byte of the tag instead of writing 0:
+  the nonce is OS-random, so the byte was already 0 one run in 256 and the test then failed
+  (a flake since P1, found while verifying the ninth WP3.A1 review).
 - Gate `policy-semantics` (active), proven by three seeded violations: slicing that drops
   unconstrained policies, an engine that skips an erroring policy, and a grant that overrides a
   forbid.

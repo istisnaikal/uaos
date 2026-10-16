@@ -1,6 +1,6 @@
 # ADR-0018: Chunk durability joins the journal's durability classes
 
-**Status:** Accepted by the maintainer on 2026-10-15, at the end of its 48 h window (opened 2026-10-13) · **Plan refs:** v2 PD-18, I-02, §2.4 per-stage budget, B-06 · **Amends:** ADR-0003 §5 (chunked payloads) · **Evidence:** [ack-latency appendix](appendix/0003-ack-latency-2026-10-13.md)
+**Status:** Accepted by the maintainer on 2026-10-15, at the end of its 48 h window (opened 2026-10-13) · **Plan refs:** v2 PD-18, I-02, §2.4 per-stage budget, B-06 · **Amends:** ADR-0003 §3 (recovery at open) and §5 (chunked payloads) · **Evidence:** [ack-latency appendix](appendix/0003-ack-latency-2026-10-13.md)
 
 ## Context
 
@@ -88,3 +88,236 @@ loss is detected and reported. Chunk authenticity (AEAD) is unchanged, and shred
   ≤ 0.5 ms in balanced mode.
 - **Negative case for the gate self-test:** a coordinator that advances `flushed_through` before
   syncing chunks must fail the simulation.
+
+## Implementation and evidence (P3 Move 1, PR-1, 2026-10-15; revised 2026-10-16 after review)
+
+The V1 review of the first implementation ([WP3.A1](../reviews/WP3.A1-chunk-durability.md))
+found four High findings, each a payload loss ending with a durable record and no `chunk.lost`
+record. What follows describes the code after those fixes.
+
+**How each decision is built.**
+- **Decision 1.** `ChunkStore::open_with(…, ChunkDurability::Balanced)` hands both chunk files to
+  the OS through a uniquely named temporary and a rename, with no flush. Strict mode is unchanged.
+  A pair already on disk from an earlier process is replaced only by a flushed write that keeps
+  its data key. To know which names those are without a file-system call per put, the store
+  indexes the key files present when it opens (one store per data directory, enforced by its own
+  lock).
+- **Decision 2.** There is no separate `DurabilityCoordinator` type: `Journal::open_with_payloads`
+  plays that role.
+  - `Journal::sync` first flushes the store's pending chunks (files, then pocket directories),
+    then the segment, and only then advances `flushed_through`.
+  - **A failed flush is sticky.** A failed flush of pending content, inside or outside
+    `Journal::sync`, poisons the store, and in balanced mode so does any failed flushed write or
+    chunk-directory flush (a directory flush also covers pending chunks' entries). Then `put`,
+    `is_stored` and `sync_pending` refuse, and the writer stops
+    (`JournalHealth::PayloadFlushFailed`). A store poisoned before the journal attached is
+    recovered when the journal opens, and `Journal::recover` recovers a store poisoned while the
+    writer stayed healthy. Recovery clears only the failures it saw when it began, so a flush
+    that fails while it runs keeps the store poisoned. A put that joins the pending set while
+    the store is poisoned is refused, and so is a put whose write overlapped a failed flush,
+    which poisons the store again so that the next recovery rewrites it even if one already
+    ran. A journal flush is not acknowledged if the store was poisoned while it ran: every
+    flushed write or directory flush that can poison, the store's own flush of pending chunks
+    included, holds a flush window until it has, and the flush takes that window before it
+    acknowledges its batch.
+  - **Recovery rewrites; it never re-flushes.** `recover` reads each pending chunk back. A
+    readable one is rewritten to new files and flushed, because after a writeback error a second
+    flush of the same file can report success without writing anything. An unreadable one is
+    quarantined (kept, not deleted) and journaled as `chunk.lost` with its cause (`missing`,
+    `short`, `unauthentic`).
+  - **The flush still runs inline.** When the window is due, the `append` that finds it due pays
+    for the flush. Moving it to its own thread is runtime work (WP3.3, the state actor).
+- **Decision 3.**
+  - **Lost content reads back as lost.** Every loss the store sets aside leaves a marker under
+    a fixed name in the pocket's quarantine (`<reference>.lost`), also when no file reached the
+    disk, flushed with the quarantine before the loss is reported; `ChunkStore::get` reads it
+    directly and returns `ChunkError::Lost` (`STORE_PAYLOAD_LOST`), not `Unavailable`, whose
+    message says never stored or shredded. A shred removes the marker, so content lost, stored
+    again and shredded reads back as shredded (reviews twelve and thirteen).
+  - **Losses are journaled before their records are durable.** The `chunk.lost` records are
+    appended before the flush that makes the records they report durable, so one flush covers
+    both. While a found loss is not yet journaled, the writer refuses records and flushes, and
+    a flush also refuses while the store holds a loss the journal has not taken (defence in
+    depth: no public path leaves one untaken with a live journal). A loss already queued is not
+    queued again. A payload flush failure never replaces the writer's own out-of-space or write
+    failure: the active segment may then end in a torn line, which only `recover`'s rotation or
+    rewrite leaves behind, and replacing it let `recover` return `Ok` and append after the torn
+    bytes, so the journal no longer opened (eleventh review, H1). A coordinated
+    store's recovery and losses belong to its journal: `ChunkStore::recover_pending`,
+    `take_lost` and `verify_and_sync` refuse callers (`LossesThroughJournal`), since a loss a
+    caller took would never get its record, and `Journal::recover` recovers a poisoned store
+    first, whatever state the writer is in (tenth review, L1, and a defect its stronger
+    schedules found).
+  - **Durable point.** A one-line marker (`journal/FLUSHED`), written atomically at open and
+    then at most once per second, names the last flushed record. Every journal keeps one, with
+    or without a store. A separate flag file (`journal/PAYLOADS`) records that the journal
+    coordinates a store, so it cannot be opened without one (`JournalError::PayloadsRequired`).
+    For a journal that coordinates a store, every payload up to the marker is durable or its
+    loss journaled, and the marker never moves while a loss is unreported or the store is
+    poisoned. A plain journal's marker says nothing about payloads, so the first open with a
+    store invalidates it before writing the flag; no later open, even after that one fails, reads
+    it as vouching for payloads.
+  - **Recovery on open.** `open_with_payloads` reads back, rewrites and flushes the payloads of
+    every record after the marker. Without a valid marker (a store attached for the first time,
+    whose plain marker was invalidated, or a removed marker) it checks the **whole journal**, not
+    the last segment, so the work is bounded by the marker's lag (about a second of records)
+    only when a marker exists. Losses found here, and losses the store set aside earlier, are
+    reported for every record in the journal that references them. The records after the
+    durable point are then **copied**, unflushed, to a fresh active segment, the `chunk.lost`
+    records for them are appended after them, and one flush makes both durable. Only then is the
+    manifest stored that stops naming the old copies, so a failed or interrupted open loses
+    nothing the previous run had flushed. When the copy replaces the old segment whole, the old
+    file is removed once that manifest is durable, so restarts do not grow the journal. Open
+    never flushes the previous run's segment file again, for the same reason recovery never
+    re-flushes a chunk.
+  - **The event exists; the operation state does not yet.** Each loss is a `chunk.lost` record
+    and is listed by `Journal::lost_payloads`. The operation-state projection that Decision 3
+    names arrives with the runtime (WP3.3).
+  - **Keys that are gone are not a loss.** A keychain that no longer holds a pocket's KEKs (a
+    reset, a moved data directory) makes recovery fail closed and touches no chunk. A put in
+    such a pocket fails closed too: it never creates a fresh KEK version under which the existing
+    key files would look tampered with.
+  - **Shredded chunks.** A chunk shredded after the record that references it is not a loss when
+    a `chunk.shredded` record for it follows. A coordinated store shreds only through
+    `Journal::shred`, which appends that record, flushes it, rotates the KEK and removes the
+    chunk while no other record can be appended. The re-wrap of the pocket's other keys runs
+    after the writer is free, through the returned `PendingRewrap` (finished explicitly or when
+    dropped); until then the old KEK lives. The store marks the chunk before the record is
+    appended, and until a put of the content succeeds or the shred completes, it neither vouches
+    for the chunk nor serves it: a record appended afterwards that references it is refused,
+    whichever step of the shred failed, its own flush included. If `append` refuses the record or
+    fails to write it, no record exists (a line it did not write whole is never read back) and
+    the mark is lifted; if the record was written and a flush failed, inside `append` (a window
+    that fell due, or strict mode) or after it, the chunk is marked again, even if a put lifted
+    the mark meanwhile, since `recover` can still make the record durable. At most
+    `MAX_UNFINISHED_SHREDS` (4,096) failed shreds stay marked; past that, a shred is refused
+    before its record until earlier ones are retried. A direct `ChunkStore::shred` on a
+    coordinated store is refused. A shred whose record is durable but which a crash interrupted is completed when the
+    journal opens, once its record is durable again after the open's flush, and it counts as
+    unfinished while a file of the pair or an older KEK version remains; the store's own startup
+    would otherwise re-wrap the leftover key and leave the content readable. Both `chunk.lost` and
+    `chunk.shredded` name the chunk in metadata, never as `payload_ref`, and `append` enforces
+    it. With a store attached, `append` refuses both from callers: `chunk.shredded` goes through
+    `Journal::shred`, and only the journal's own loss reporting writes `chunk.lost`. A shred
+    record appended directly would record a shred that never marked or removed the content, and
+    a forged `chunk.lost` would exempt a healthy record from every later payload check (ninth
+    review, L1).
+- **Added beyond the decision (I-02, S-6).**
+  - **Payload before record.** With a store attached, the journal refuses a record whose
+    `payload_ref` is not stored (`JournalError::PayloadNotStored`).
+  - **One writer per chunk.** Every operation on a chunk (put, flush, recovery, verification,
+    shred) holds that chunk's slot, and every atomic write uses its own temporary. A rotation
+    lock per stripe of pockets (64 stripes) keeps a shred from destroying the KEK a concurrent
+    put is wrapping under or a read is unwrapping with (a put's, a check's or recovery's read-back
+    of stored content included); only puts, reads and flushes in the same
+    stripe wait while a shred re-wraps its pocket (two flushed writes per key file). The journal
+    writer is released before the re-wrap, but its flush still waits while a re-wrap holds the
+    stripe of a pocket in which a chunk is pending, and so does an append that has to read back
+    content from an earlier run in that stripe.
+  - **A pair a shred leaves on disk is never overwritten with the journal.** A shred forgets its
+    chunk before removing the files; if the removal fails, the chunk is indexed as possibly on
+    disk, so a later put of the same content rewrites the pair flushed with its own data key.
+  - **Rotation re-wraps are always flushed.** The old KEK is destroyed right after, so an
+    unflushed re-wrap lost to power would leave a key file only the destroyed KEK can open. For
+    the same reason every readable key file of the pocket is written again, as a fresh flushed
+    file, before old versions are destroyed, also one already at the current version: a re-wrap
+    whose directory flush failed leaves its new file visible but not durable.
+  - **Quarantine is durable.** The quarantine folder is flushed before any later flush of the
+    chunk folders can make the removal there durable.
+
+**Verification as built.**
+- **Kill harness.** The real-OS writer stores a distinct payload before each intent. Every
+  acknowledged record's payload must read back after the kill.
+  - Windows, local: 60 kills, 0 lost.
+  - CI: 40 kills per OS per merge, 10,000 nightly.
+- **Simulation (`uaos-state/tests/durability.rs`).** It runs under two disk models: a failed
+  flush either drops the unflushed bytes, or keeps serving them without ever making them durable.
+  - **Flush-ordering scenario.** A flush fails at every possible step, then the power goes. A
+    record at or before `flushed_through` must have a readable payload.
+  - **Regression tests.** One for each finding of the thirteen review rounds fixed in code, and
+    one for each defect the extended schedules found afterwards. Each round-four test was
+    checked to fail with its fix reverted. These are fixed by construction, with no test that
+    fails when they are reverted: first round M1 (a chunk is enrolled in `pending` before its
+    slot opens), L1 (the slot is a guard released on drop) and the part of L4 that indexes
+    shreds and earlier reports once at open; second round L3 (losses set aside before
+    quarantine), L4 (a concurrent put between two recovery steps) and the pre-existing `get`
+    race (`get` holds the rotation lock shared); third round M3 (the stripe count), the marker
+    half of M1 (restarts are also held flat by removing the replaced segment), the data-file
+    half of L3, and two parts of L4 (recovery clears only what it saw; `prepare` poisons);
+    fifth round, the flush window, which closes the microseconds between a concurrent write's
+    failure and its poisoning (the generation check it completes is tested); fourth round L2's
+    slot part (a shred marks its chunk under the chunk's slot); tenth round L2 and thirteenth
+    round L4 (losses found at open are reported in `O(R log L)` for R referencing records and L
+    lost chunks; each lost chunk still costs one flush of its pocket's quarantine directory, which
+    is slow when many are lost, for example after a data directory is restored from an older
+    backup).
+  - **Random crash schedules.** Under three flush policies (flushes only when asked, strict,
+    and a window that falls due, so appends flush on their own as in production): writes,
+    repeated payloads, write-ahead shreds (their re-wraps
+    left pending across later operations, finished later, or lost to a crash), flushes, failed
+    flushes, failed appends (which leave half a line in the segment, as `write_all` does when
+    the disk is full), the OS writing back on its own (segments, chunk files and directory
+    entries, whole or in part, in no order across files), clock advances, process crashes,
+    power losses and recoveries, with
+    faults still armed during the next open, followed by a crash or a power loss. The merge
+    lane runs 64 cases of this property and of the next one: enough for a regression most
+    schedules reach, not for one only rare schedules reach. The nightly lane runs 20,000 of each
+    on all three operating systems (about a minute each in release on the reference machine).
+    52,000 of each ran locally on the final code. Every acknowledged record survives a process
+    crash (except records that existed only in memory after a flush and its rewrite both
+    failed, ADR-0003), and so does its payload, unless a failed flush could have dropped it
+    (one armed while the record was not yet flushed, in the disk model where a failed flush
+    drops the unflushed bytes) or a later shred removed it: a reported loss alone does not
+    excuse it. Every flushed record's payload survives a power loss unless a `chunk.lost` record
+    that itself survived the power loss names it. No surviving record's payload is unreadable
+    without a `chunk.lost` record. A recovery with no fault armed succeeds, leaves neither the
+    journal nor the store refusing work, and leaves a journal that takes a new record, flushes
+    it and still reads back whole; an open with no fault armed succeeds; and a record an open
+    verified (its payload reads back and no `chunk.lost` names it) no longer counts as exposed
+    to a later failed flush. Before the tenth review the oracles accepted a store that
+    never wrote a payload, as long as every loss was reported; before the eleventh, one that
+    discarded readable content after any failed flush, and a failed append wrote nothing, so
+    no schedule tore a segment. Both properties now fail on each of these, and they found round
+    four's recovery of a poisoned store incomplete; with the eleventh review's H1 restored they
+    fail within 4,000 schedules. Before the thirteenth review the simulator never wrote anything
+    back on its own, so no record survived a power loss without its payload and no payload was
+    ever torn at a length that still parses: an open or recovery that skipped an unauthentic
+    payload passed every test. With write-backs both properties fail on it at once; after a
+    power loss, a record whose loss the open reported is not counted against later crashes.
+  - **Shred schedules.** A second property runs the same operations plus records that reference
+    earlier content without storing it again, under the same three policies, and checks two
+    more things: no record referencing content is written after a written shred record of it
+    unless the content was stored again since, and after every reopen a durable shred no later
+    record uses leaves the content unreadable and one KEK version alive. The first schedule
+    could not see the seventh review's M1; this one fails within seconds with it reverted.
+
+- **Gate self-test.** The `journal-durability` gate lists thirty-nine seeded violations in
+  `gates.toml`: thirty-eight for this ADR and P1's `journal-ack-without-write`. Of the
+  thirty-eight, four come from this ADR's own verification plan (`chunk-flushed-before-sync`,
+  `intent-before-chunk-write`, `chunk-put-pair-race`, and `chunk-put-shared-temp`, which checks
+  temporary naming only), and thirty-four from the classes the review rounds and the crash
+  schedules found: every round but the eighth, which added a property test instead.
+- **Not modelled, stated plainly.** `SimFs` cannot model a failed directory flush that drops
+  entries, so the poisoning that rule triggers is tested only for being triggered. Open reads
+  every `chunk.shredded` record in the journal to find unfinished shreds: the cost grows with
+  history until compaction (P4). It asks the keychain once per pocket, not once per record.
+  A lost chunk gets one `chunk.lost` record per record that references it, written at open
+  without rotating the segment, so a chunk shared by many records can grow that segment past
+  its target size. `SimFs` models a failed flush as the file falling back to its durable
+  prefix; Linux can drop only the pages whose writeback failed, leaving a zero-filled hole
+  before pages still cached, so after `FlushFailed` and a crash a real open could fail on the
+  hole instead of only losing the in-memory records (pre-existing since P1).
+- **Bench: the target is not met on the reference machine.** The details are in
+  [the appendix](appendix/0018-chunk-put-2026-10-15.md).
+  - Balanced chunk put, 4 KiB, after the first review's fixes (`fc4b5a8`; not re-measured
+    after later rounds): p99 is 1.55 ms on Windows 10 (solid-state drive)
+    against the 0.5 ms target. The fixes did not make this path slower in the one A/B session
+    (`2cf78f8`, run once, measured 1.93 ms p99).
+  - Without the flush, the cost is the creation of two files per chunk.
+  - Creating chunk files in place, with no temporary or rename, was also measured: it halved
+    p50 but tripled p99, so the rename stays.
+  - Linux and macOS numbers come from the nightly `ack-latency` job.
+  - This is the condition Decision 4 names for its follow-up: one key file per chunk is now the
+    measured cost. A per-pocket keystore log would halve the file count, but it changes shred
+    semantics (ADR-0007). It therefore needs its own ADR and the maintainer's decision; it does
+    not ride in with this change.

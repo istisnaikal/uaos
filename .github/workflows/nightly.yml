@@ -18,7 +18,8 @@ env:
 jobs:
   durability:
     # 10,000 real kills of the production journal per OS (the P1 bar in ADR-0003), plus the
-    # deterministic crash simulation at 20,000 scenarios per flush policy.
+    # deterministic crash simulation at 20,000 scenarios per flush policy and 20,000 schedules
+    # of each chunk-durability property (merge runs 64 of each; ADR-0018).
     strategy:
       fail-fast: false
       matrix:
@@ -37,6 +38,10 @@ jobs:
         run: cargo test -p uaos-state --release --locked --test journal simulation
         env:
           UAOS_SIM_CASES: "20000"
+      - name: Chunk durability properties (20,000 schedules each)
+        run: cargo test -p uaos-state --release --locked --test durability under_random_crash_schedules
+        env:
+          PROPTEST_CASES: "20000"
       - name: Ledger simulation (100,000 schedules)
         run: cargo test -p uaos-ledger --release --locked --test ledger simulation
         env:

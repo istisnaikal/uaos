@@ -19,6 +19,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Filesystem failure, classified for recovery decisions.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -174,6 +175,24 @@ pub trait Fs: Send + Sync + fmt::Debug {
     /// Any [`FsError`]; on failure `path` still holds its previous content.
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError>;
 
+    /// Replaces `path` with `bytes` atomically against a **process crash**, without flushing
+    /// (ADR-0018): a uniquely named sibling temporary is written and renamed over `path`. After a
+    /// process crash `path` holds its old or its new content, never a mixture. After a **power
+    /// loss** it may hold the old content, the new content, or an empty or torn file, until
+    /// [`Fs::sync_file`] on `path` and [`Fs::sync_dir`] on its parent have both succeeded.
+    ///
+    /// # Errors
+    /// Any [`FsError`]; on failure `path` still holds its previous content.
+    fn write_unsynced(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError>;
+
+    /// Makes a closed file's content durable against power loss (its directory entry still
+    /// needs [`Fs::sync_dir`]).
+    ///
+    /// # Errors
+    /// [`FsError::SyncFailed`] if the flush failed: the unflushed content must be considered
+    /// lost. [`FsError::NotFound`] if there is no such file.
+    fn sync_file(&self, path: &Path) -> Result<(), FsError>;
+
     /// Takes an exclusive lock on `path` (created if absent) without waiting.
     ///
     /// # Errors
@@ -181,11 +200,51 @@ pub trait Fs: Send + Sync + fmt::Debug {
     fn try_lock_exclusive(&self, path: &Path) -> Result<Box<dyn LockGuard>, FsError>;
 }
 
-/// Sibling temporary path used by [`Fs::write_atomic`].
+/// The marker every temporary file name carries.
+const TEMP_MARKER: &str = ".uaos-tmp-";
+
+/// Distinguishes the temporaries of concurrent writes within one process.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A sibling temporary path for [`Fs::write_atomic`] and [`Fs::write_unsynced`], unique per
+/// call. Two writers replacing the same file at the same time never share a temporary, so
+/// neither can tear the other's bytes (S-6).
 pub(crate) fn temp_sibling(path: &Path) -> PathBuf {
+    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut name = path.file_name().map(std::ffi::OsStr::to_os_string).unwrap_or_default();
-    name.push(".uaos-tmp");
+    name.push(format!("{TEMP_MARKER}{}-{n}", std::process::id()));
     path.with_file_name(name)
+}
+
+/// Whether `name` is a temporary left by an interrupted [`Fs::write_atomic`] or
+/// [`Fs::write_unsynced`], in the current form (`<name>.uaos-tmp-<pid>-<n>`) or the form used
+/// before temporaries were unique (`<name>.uaos-tmp`). Such files are never referenced and may
+/// be removed at startup.
+#[must_use]
+pub fn is_temp_file_name(name: &str) -> bool {
+    name.contains(TEMP_MARKER) || name.ends_with(".uaos-tmp")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_temp_file_name, temp_sibling};
+    use std::path::Path;
+
+    #[test]
+    fn temp_names_are_unique_per_call_and_recognisable() {
+        let target = Path::new("/data/chunks/pkt/data/abc.chunk");
+        let (a, b) = (temp_sibling(target), temp_sibling(target));
+        assert_ne!(a, b, "two concurrent writers of one file must never share a temporary");
+        for t in [&a, &b] {
+            assert_eq!(t.parent(), target.parent());
+            assert!(is_temp_file_name(t.file_name().and_then(|n| n.to_str()).unwrap()));
+        }
+        assert!(!is_temp_file_name("abc.chunk"));
+        assert!(
+            is_temp_file_name("abc.key.uaos-tmp"),
+            "the pre-S-6 temporary name is still swept"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -217,11 +276,21 @@ pub(crate) mod conformance {
         assert_eq!(fs.read(&seg).unwrap(), b"one\ntwo\nthree\n");
         drop(f);
 
-        // Atomic replace.
+        // Atomic replace, flushed and unflushed.
         let manifest = dir.join("MANIFEST");
         fs.write_atomic(&manifest, b"v1").unwrap();
         fs.write_atomic(&manifest, b"v2").unwrap();
         assert_eq!(fs.read(&manifest).unwrap(), b"v2");
+        let marker = dir.join("FLUSHED");
+        fs.write_unsynced(&marker, b"m1").unwrap();
+        fs.write_unsynced(&marker, b"m2").unwrap();
+        assert_eq!(fs.read(&marker).unwrap(), b"m2");
+        fs.sync_file(&marker).unwrap();
+        assert!(matches!(
+            fs.sync_file(&dir.join("absent")),
+            Err(FsError::NotFound { .. })
+        ));
+        fs.remove_file(&marker).unwrap();
 
         // Listing is sorted and excludes the temporary file.
         let names: Vec<String> = fs

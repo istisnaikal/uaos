@@ -28,6 +28,9 @@ type FileId = u64;
 struct Node {
     data: Vec<u8>,
     durable_len: usize,
+    /// A flush of this file failed in cache-keeping mode: its unflushed bytes stay readable but
+    /// can never become durable through this file again (Linux after a writeback error).
+    doomed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -42,6 +45,8 @@ struct State {
     capacity: Option<u64>,
     /// Number of flushes to let through before failing one (`Some(0)` = fail the next).
     sync_fault_after: Option<u32>,
+    /// A failed file flush keeps the unflushed bytes readable instead of dropping them.
+    failed_sync_keeps_cache: bool,
 }
 
 impl State {
@@ -90,12 +95,26 @@ impl State {
 
     fn take_sync_fault(&mut self, id: FileId, op: &'static str) -> Result<(), FsError> {
         if self.sync_should_fail() {
+            let keep = self.failed_sync_keeps_cache;
             if let Some(node) = self.nodes.get_mut(&id) {
-                node.data.truncate(node.durable_len);
+                if keep {
+                    node.doomed = true;
+                } else {
+                    node.data.truncate(node.durable_len);
+                }
             }
             return Err(FsError::SyncFailed { op });
         }
         Ok(())
+    }
+
+    /// A successful flush: everything written becomes durable, unless the file is doomed.
+    fn flushed(&mut self, id: FileId) {
+        if let Some(node) = self.nodes.get_mut(&id)
+            && !node.doomed
+        {
+            node.durable_len = node.data.len();
+        }
     }
 }
 
@@ -123,6 +142,14 @@ impl SimFs {
         lock(&self.state).capacity = bytes;
     }
 
+    /// Chooses what a failed file flush does to the unflushed bytes. Off (the default): they
+    /// are dropped, so a read-back sees the loss. On: they stay readable from the cache, later
+    /// flushes of the same file report success, and the bytes never become durable — Linux
+    /// after a writeback error. Only rewriting the content to a new file makes it durable.
+    pub fn set_failed_sync_keeps_cache(&self, on: bool) {
+        lock(&self.state).failed_sync_keeps_cache = on;
+    }
+
     /// Makes the next flush (`sync_data`, `sync_dir`, `write_atomic`) fail. For file flushes,
     /// the unflushed bytes are discarded.
     pub fn fail_next_sync(&self) {
@@ -132,6 +159,17 @@ impl SimFs {
     /// Lets `n` flushes succeed, then makes the next one fail (as [`SimFs::fail_next_sync`]).
     pub fn fail_sync_after(&self, n: u32) {
         lock(&self.state).sync_fault_after = Some(n);
+    }
+
+    /// Disarms a flush failure armed by [`SimFs::fail_sync_after`] that has not fired yet.
+    pub fn clear_sync_fault(&self) {
+        lock(&self.state).sync_fault_after = None;
+    }
+
+    /// Whether a flush failure armed by [`SimFs::fail_sync_after`] has not fired yet.
+    #[must_use]
+    pub fn sync_fault_pending(&self) -> bool {
+        lock(&self.state).sync_fault_after.is_some()
     }
 
     /// Simulates the process dying: handles become stale and locks are released; everything
@@ -168,6 +206,48 @@ impl SimFs {
             .and_then(|n| n.data.get_mut(offset))
             .map(|b| *b = value)
             .is_some()
+    }
+
+    /// The OS writes `path`'s cached bytes back on its own, as a real one may at any time: they
+    /// become durable without a flush (no fault is consumed).
+    pub fn write_back(&self, path: &Path) {
+        let mut s = lock(&self.state);
+        if let Some(&id) = s.live.get(path) {
+            s.flushed(id);
+        }
+    }
+
+    /// The OS writes back only the first `num`/`den` of `path`'s unflushed bytes (page by
+    /// page, from the start), so a later power loss leaves a torn file.
+    pub fn write_back_part(&self, path: &Path, num: usize, den: usize) {
+        let mut s = lock(&self.state);
+        if let Some(&id) = s.live.get(path)
+            && let Some(node) = s.nodes.get_mut(&id)
+            && !node.doomed
+            && node.data.len() > node.durable_len
+        {
+            let extra = (node.data.len() - node.durable_len) * num / den.max(1);
+            node.durable_len += extra;
+        }
+    }
+
+    /// The OS persists `dir`'s entries on its own, whatever the files' bytes: an entry can become
+    /// durable before its data.
+    pub fn write_back_dir(&self, dir: &Path) {
+        let mut s = lock(&self.state);
+        if !s.dirs.contains(dir) {
+            return;
+        }
+        let in_dir = |p: &PathBuf| p.parent() == Some(dir);
+        s.durable.retain(|p, _| !in_dir(p));
+        let live: Vec<(PathBuf, FileId)> = s
+            .live
+            .iter()
+            .filter(|(p, _)| in_dir(p))
+            .map(|(p, id)| (p.clone(), *id))
+            .collect();
+        s.durable.extend(live);
+        s.collect_garbage();
     }
 
     /// Bytes the OS currently holds for `path` (test inspection).
@@ -220,9 +300,7 @@ impl AppendFile for SimAppendFile {
         let mut s = lock(&self.state);
         self.check(&s, "sync_data")?;
         s.take_sync_fault(self.id, "sync_data")?;
-        if let Some(node) = s.nodes.get_mut(&self.id) {
-            node.durable_len = node.data.len();
-        }
+        s.flushed(self.id);
         Ok(())
     }
 
@@ -303,14 +381,15 @@ impl Fs for SimFs {
         }
         let id = s.live.remove(from).ok_or(FsError::NotFound { op: "rename" })?;
         s.live.insert(to.to_path_buf(), id);
-        s.collect_garbage();
+        // A displaced node is unreachable by path; it is collected at the next directory flush
+        // or power loss. Collecting here made every rename linear in the number of files.
         Ok(())
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), FsError> {
         let mut s = lock(&self.state);
         s.live.remove(path).ok_or(FsError::NotFound { op: "remove_file" })?;
-        s.collect_garbage();
+        // Collected later, as for `rename`.
         Ok(())
     }
 
@@ -356,6 +435,29 @@ impl Fs for SimFs {
             let _cleanup_result = self.remove_file(&tmp);
         }
         result
+    }
+
+    fn write_unsynced(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+        let tmp = temp_sibling(path);
+        let result = (|| {
+            let mut file = self.open_append(&tmp)?;
+            file.append(bytes)?;
+            drop(file);
+            self.rename(&tmp, path)
+        })();
+        if result.is_err() && self.os_view(&tmp).is_some() {
+            // Mirrors the real implementation's cleanup; failure here changes nothing reported.
+            let _cleanup_result = self.remove_file(&tmp);
+        }
+        result
+    }
+
+    fn sync_file(&self, path: &Path) -> Result<(), FsError> {
+        let mut s = lock(&self.state);
+        let id = *s.live.get(path).ok_or(FsError::NotFound { op: "sync_file" })?;
+        s.take_sync_fault(id, "sync_file")?;
+        s.flushed(id);
+        Ok(())
     }
 
     fn try_lock_exclusive(&self, path: &Path) -> Result<Box<dyn LockGuard>, FsError> {
@@ -465,6 +567,66 @@ mod tests {
         assert!(matches!(fs.try_lock_exclusive(&path), Err(FsError::Locked { .. })));
         drop(second);
         assert!(fs.try_lock_exclusive(&path).is_ok());
+    }
+
+    #[test]
+    fn unsynced_write_is_kept_by_a_crash_and_may_vanish_on_power_loss() {
+        let (fs, dir) = setup();
+        fs.sync_dir(&dir).unwrap();
+        let chunk = dir.join("c.chunk");
+        fs.write_unsynced(&chunk, b"payload").unwrap();
+        fs.crash();
+        assert_eq!(
+            fs.read(&chunk).unwrap(),
+            b"payload",
+            "a process crash keeps what the OS holds"
+        );
+        fs.power_loss();
+        assert!(fs.read(&chunk).is_err(), "neither the data nor the entry was flushed");
+
+        // The entry flushed but not the data: the file comes back empty (torn), never mixed.
+        fs.write_unsynced(&chunk, b"payload").unwrap();
+        fs.sync_dir(&dir).unwrap();
+        fs.power_loss();
+        assert_eq!(fs.read(&chunk).unwrap(), b"");
+
+        // Data and entry flushed: durable.
+        fs.write_unsynced(&chunk, b"payload").unwrap();
+        fs.sync_file(&chunk).unwrap();
+        fs.sync_dir(&dir).unwrap();
+        fs.power_loss();
+        assert_eq!(fs.read(&chunk).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn in_cache_keeping_mode_a_failed_flush_dooms_the_file_but_not_a_rewrite() {
+        let (fs, dir) = setup();
+        fs.set_failed_sync_keeps_cache(true);
+        fs.sync_dir(&dir).unwrap();
+        let chunk = dir.join("c.chunk");
+        fs.write_unsynced(&chunk, b"payload").unwrap();
+        fs.sync_dir(&dir).unwrap();
+        fs.fail_next_sync();
+        assert!(fs.sync_file(&chunk).is_err());
+        assert_eq!(fs.read(&chunk).unwrap(), b"payload", "the cache still serves the bytes");
+        fs.sync_file(&chunk).unwrap(); // reports success, as Linux does after the error
+        fs.power_loss();
+        assert_eq!(fs.read(&chunk).unwrap(), b"", "a doomed file never became durable");
+
+        // Rewriting to a new file is the only way back.
+        fs.write_atomic(&chunk, b"payload").unwrap();
+        fs.power_loss();
+        assert_eq!(fs.read(&chunk).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn failed_file_sync_discards_the_unflushed_content() {
+        let (fs, dir) = setup();
+        let chunk = dir.join("c.chunk");
+        fs.write_unsynced(&chunk, b"payload").unwrap();
+        fs.fail_next_sync();
+        assert_eq!(fs.sync_file(&chunk), Err(FsError::SyncFailed { op: "sync_file" }));
+        assert_eq!(fs.read(&chunk).unwrap(), b"", "the OS dropped the unflushed pages");
     }
 
     #[test]
