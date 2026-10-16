@@ -69,17 +69,21 @@ pub enum EgressError {
     /// sent: nothing reached the provider.
     #[error("provider unreachable: {0}")]
     Unreachable(&'static str),
-    /// Resolution, a connect or the TLS handshake timed out: nothing was sent.
+    /// Name resolution or the TLS handshake timed out: nothing was sent. (A connect that times
+    /// out moves on to the next address; when none accepts, the door reports `Unreachable`.)
     #[error("provider could not be reached in time")]
     Timeout,
     /// The connection failed, or no answer came within the response timeout, after the request
     /// was sent: the provider may have received it (review WP3.A5, round 16, M1).
     #[error("no answer after the request was sent: {0}")]
     Interrupted(&'static str),
-    /// The provider answered in a form the door does not pass on; it may have processed the
-    /// request (round 16, M1).
+    /// The provider answered in a form the door does not pass on, or that could not be parsed;
+    /// it may have processed the request (rounds 16 and 17).
     #[error("unusable answer from the provider: {0}")]
     Unusable(&'static str),
+    /// The door's limits are inconsistent (round 17, L2).
+    #[error("invalid door limits: {0}")]
+    Limits(&'static str),
     /// The upstream's circuit is open.
     #[error("recent attempts failed; retry after {retry_after:?}")]
     CircuitOpen {
@@ -110,22 +114,29 @@ impl EgressError {
             Self::Refused(_) => codes::EGRESS_REFUSED,
             Self::Interrupted(_) => codes::EGRESS_INTERRUPTED,
             Self::Unusable(_) => codes::EGRESS_UNUSABLE_RESPONSE,
-            Self::Upstream(_) | Self::Tls(_) => codes::CONFIG_INVALID,
+            Self::Upstream(_) | Self::Tls(_) | Self::Limits(_) => codes::CONFIG_INVALID,
         }
     }
 
     /// Maps a client failure, keeping a connector's own verdict (for example `Blocked`), and
-    /// telling a request that never left from one the provider may have received: hyper
-    /// reports a request it handed back unsent as canceled (round 16, M1).
+    /// telling a request that never left from one the provider may have received (rounds 16
+    /// and 17):
+    /// * hyper-util attaches connection info only to errors from sending on a connection it
+    ///   holds, so an error without it came from setting the connection up (the upstream spoke
+    ///   first, or closed at once): nothing was sent;
+    /// * hyper reports a request it handed back unsent as canceled;
+    /// * an answer hyper could not parse is an answer, not a lost connection.
     fn from_client(e: &hyper_util::client::legacy::Error) -> Self {
-        let mut unsent = e.is_connect();
+        let mut unsent = e.is_connect() || e.connect_info().is_none();
+        let mut unparsable = false;
         let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
         while let Some(s) = source {
             if let Some(own) = s.downcast_ref::<Self>() {
                 return own.clone();
             }
-            if s.downcast_ref::<hyper::Error>().is_some_and(hyper::Error::is_canceled) {
-                unsent = true;
+            if let Some(h) = s.downcast_ref::<hyper::Error>() {
+                unsent |= h.is_canceled();
+                unparsable |= h.is_parse() || h.is_parse_status() || h.is_parse_too_large();
             }
             source = s.source();
         }
@@ -133,6 +144,8 @@ impl EgressError {
             Self::Unreachable("connection failed")
         } else if unsent {
             Self::Unreachable("the connection closed before the request was sent")
+        } else if unparsable {
+            Self::Unusable("the upstream's answer could not be parsed")
         } else {
             Self::Interrupted("the connection failed after the request was sent")
         }

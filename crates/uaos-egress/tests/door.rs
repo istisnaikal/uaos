@@ -16,7 +16,10 @@
 )]
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -825,6 +828,11 @@ async fn methods_the_door_does_not_send_are_refused_before_contact() {
 /// A plain loopback upstream, pinned and declared private, that answers every request with
 /// `raw`, whatever it asked.
 async fn raw_upstream(raw: &'static [u8]) -> Door {
+    raw_upstream_with(raw, DoorLimits::default()).await
+}
+
+/// [`raw_upstream`] with the door's limits given.
+async fn raw_upstream_with(raw: &'static [u8], limits: DoorLimits) -> Door {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -847,7 +855,150 @@ async fn raw_upstream(raw: &'static [u8]) -> Door {
         allow_private: true,
         trust: Trust::System,
     };
-    door(vec![up], Table::default(), DoorLimits::default())
+    door(vec![up], Table::default(), limits)
+}
+
+/// An executor like a busy supervisor's: it runs each connection task a little later, so a
+/// connection can fail before hyper takes the request.
+#[derive(Debug, Clone)]
+struct LateExecutor(Duration);
+
+impl hyper::rt::Executor<Pin<Box<dyn Future<Output = ()> + Send>>> for LateExecutor {
+    fn execute(&self, fut: Pin<Box<dyn Future<Output = ()> + Send>>) {
+        let late = self.0;
+        tokio::spawn(async move {
+            tokio::time::sleep(late).await;
+            fut.await;
+        });
+    }
+}
+
+/// A plain loopback upstream that, on accept, writes `greet` before reading anything (and then
+/// closes at once if `close`), and counts every byte it receives afterwards.
+async fn early_upstream(greet: &'static [u8], close: bool) -> (Door, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&received);
+    tokio::spawn(async move {
+        while let Ok((mut tcp, _)) = listener.accept().await {
+            let count = Arc::clone(&count);
+            tokio::spawn(async move {
+                let _written = tcp.write_all(greet).await;
+                if close {
+                    return;
+                }
+                let mut buf = vec![0u8; 8192];
+                while let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(1), tcp.read(&mut buf)).await {
+                    if n == 0 {
+                        break;
+                    }
+                    count.fetch_add(n, Ordering::SeqCst);
+                }
+            });
+        }
+    });
+    let up = Upstream {
+        id: UpstreamId::new("local"),
+        host: HostName::parse("ollama.lan").unwrap(),
+        port,
+        scheme: Scheme::Http,
+        pinned: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        allow_private: true,
+        trust: Trust::System,
+    };
+    let door = Door::new(
+        vec![up],
+        Arc::new(Table::default()),
+        clock(),
+        LateExecutor(Duration::from_millis(200)),
+        DoorLimits::default(),
+    )
+    .unwrap();
+    (door, received)
+}
+
+/// Round 17, L1: a connection that fails while hyper sets it up, before it takes the request (the
+/// upstream speaks first, or accepts and closes at once), sent nothing: `Unreachable`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_connection_lost_before_the_request_left_is_unreachable() {
+    for (greet, close) in [
+        (&b"HTTP/1.1 503 Busy\r\ncontent-length: 0\r\n\r\n"[..], false),
+        (&b""[..], true),
+    ] {
+        let (door, received) = early_upstream(greet, close).await;
+        let e = door.send(op(1), request(op(1), "local"), None).await.unwrap_err();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(received.load(Ordering::SeqCst), 0, "the request reached the upstream");
+        assert!(
+            matches!(e, EgressError::Unreachable(_)),
+            "nothing was sent, but the door reported {e:?}"
+        );
+    }
+}
+
+/// Round 17, L3: no answer within the response timeout after the request was sent is
+/// `Interrupted`: the provider may have received it.
+#[tokio::test]
+async fn no_answer_within_the_response_timeout_is_interrupted() {
+    let limits = DoorLimits {
+        connect_timeout: Duration::from_millis(50),
+        response_timeout: Duration::from_millis(500),
+        ..DoorLimits::default()
+    };
+    // Reads the request and answers nothing for two seconds.
+    let door = raw_upstream_with(b"", limits).await;
+    assert_eq!(
+        door.send(op(1), request(op(1), "local"), None).await.unwrap_err(),
+        EgressError::Interrupted("no answer within the response timeout"),
+        "an unanswered request was reported as never sent"
+    );
+}
+
+/// Round 17, L2: a response timeout that does not exceed the connect phase is refused when the
+/// door is built: it would report a request that never left as possibly received.
+#[test]
+fn a_response_timeout_inside_the_connect_phase_is_refused() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    let build = |response_timeout: Duration| {
+        let limits = DoorLimits {
+            connect_timeout: Duration::from_secs(10),
+            response_timeout,
+            ..DoorLimits::default()
+        };
+        Door::new(
+            Vec::new(),
+            Arc::new(Table::default()),
+            clock(),
+            TokioExecutor::new(),
+            limits,
+        )
+        .map(|_| ())
+    };
+    assert!(matches!(build(Duration::from_secs(60)), Err(EgressError::Limits(_))));
+    assert!(build(Duration::from_secs(61)).is_ok());
+}
+
+/// Round 17, L4: an answer hyper cannot parse is an answer: `Unusable`, not a lost connection.
+#[tokio::test]
+async fn an_unparsable_answer_is_unusable() {
+    for raw in [
+        &b"HTTP/1.1 200 OK\r\ncontent-length: abc\r\n\r\nabc"[..],
+        &b"HTTP/1.1 2000 Odd\r\n\r\n"[..],
+        &b"NOT HTTP AT ALL\r\n\r\n"[..],
+    ] {
+        let door = raw_upstream(raw).await;
+        let e = door.send(op(1), request(op(1), "local"), None).await.unwrap_err();
+        assert!(
+            matches!(e, EgressError::Unusable(_)),
+            "an unparsable answer was reported as {e:?} for {:?}",
+            String::from_utf8_lossy(raw)
+        );
+    }
 }
 
 /// Round 13, L1: an upstream that answers `101 Switching Protocols` to a request that asked for
