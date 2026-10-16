@@ -168,10 +168,11 @@ record. What follows describes the code after those fixes.
     dropped); until then the old KEK lives. The store marks the chunk before the record is
     appended, and until a put of the content succeeds or the shred completes, it neither vouches
     for the chunk nor serves it: a record appended afterwards that references it is refused,
-    whichever step of the shred failed, its own flush included. If the record's append fails, no
-    record exists (a failed append is never acknowledged) and the mark is lifted; if its flush
-    fails, the chunk is marked again, even if a put lifted the mark meanwhile, since `recover`
-    can still make the record durable. At most
+    whichever step of the shred failed, its own flush included. If `append` refuses the record or
+    fails to write it, no record exists (a line it did not write whole is never read back) and
+    the mark is lifted; if the record was written and a flush failed, inside `append` (a window
+    that fell due, or strict mode) or after it, the chunk is marked again, even if a put lifted
+    the mark meanwhile, since `recover` can still make the record durable. At most
     `MAX_UNFINISHED_SHREDS` (4,096) failed shreds stay marked; past that, a shred is refused
     before its record until earlier ones are retried. A direct `ChunkStore::shred` on a
     coordinated store is refused. A shred whose record is durable but which a crash interrupted is completed when the
@@ -190,7 +191,8 @@ record. What follows describes the code after those fixes.
     of stored content included); only puts, reads and flushes in the same
     stripe wait while a shred re-wraps its pocket (two flushed writes per key file). The journal
     writer is released before the re-wrap, but its flush still waits while a re-wrap holds the
-    stripe of a pocket in which a chunk is pending.
+    stripe of a pocket in which a chunk is pending, and so does an append that has to read back
+    content from an earlier run in that stripe.
   - **A pair a shred leaves on disk is never overwritten with the journal.** A shred forgets its
     chunk before removing the files; if the removal fails, the chunk is indexed as possibly on
     disk, so a later put of the same content rewrites the pair flushed with its own data key.
@@ -211,7 +213,7 @@ record. What follows describes the code after those fixes.
   flush either drops the unflushed bytes, or keeps serving them without ever making them durable.
   - **Flush-ordering scenario.** A flush fails at every possible step, then the power goes. A
     record at or before `flushed_through` must have a readable payload.
-  - **Regression tests.** One for each finding of the six review rounds fixed in code, and
+  - **Regression tests.** One for each finding of the seven review rounds fixed in code, and
     one for each defect the extended schedules found afterwards. Each round-four test was
     checked to fail with its fix reverted. These are fixed by construction, with no test that
     fails when they are reverted: second round L3 (losses set aside before quarantine) and L4 (a
@@ -220,7 +222,9 @@ record. What follows describes the code after those fixes.
     half of L3, and two parts of L4 (recovery clears only what it saw; `prepare` poisons);
     fifth round, the flush window, which closes the microseconds between a concurrent write's
     failure and its poisoning (the generation check it completes is tested).
-  - **Random crash schedules.** Writes, repeated payloads, write-ahead shreds (their re-wraps
+  - **Random crash schedules.** Under three flush policies (flushes only when asked, strict,
+    and a window that falls due, so appends flush on their own as in production): writes,
+    repeated payloads, write-ahead shreds (their re-wraps
     left pending across later operations, finished later, or lost to a crash), flushes, failed
     flushes, failed appends, clock advances, process crashes, power losses and recoveries, with
     faults still armed during the next open, followed by a crash or a power loss. 64 cases per
@@ -228,8 +232,8 @@ record. What follows describes the code after those fixes.
     in memory after a flush and its rewrite both failed, ADR-0003). Every flushed record's
     payload survives a power loss unless its loss was journaled first. No surviving record's
     payload is unreadable without a `chunk.lost` record.
-- **Gate self-test.** The `journal-durability` gate lists twenty-nine seeded violations in
-  `gates.toml`: twenty-eight for this ADR, one per silent-loss class the six reviews and the
+- **Gate self-test.** The `journal-durability` gate lists thirty seeded violations in
+  `gates.toml`: twenty-nine for this ADR, one per silent-loss class the seven reviews and the
   schedules found (one of them, `chunk-put-shared-temp`, checks temporary naming only), and P1's
   `journal-ack-without-write`.
 - **Not modelled, stated plainly.** `SimFs` cannot model a failed directory flush that drops

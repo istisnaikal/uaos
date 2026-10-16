@@ -11,7 +11,7 @@ accepted with a reason. The property test, extended as M6 asked, then found four
 (N1–N4), all fixed and pinned. One item needs a maintainer decision (L7). A second V1 review of
 the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up,
 a third found 1 High, 3 Medium and 5 Low, a fourth 2 Medium and 4 Low, a fifth 2 Medium and
-3 Low, and a sixth 4 Low; all are fixed below.
+3 Low, a sixth 4 Low, and a seventh 1 Medium and 2 Low; all are fixed below.
 The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
@@ -219,9 +219,27 @@ round-five fix reversal bit.
 |---|---|---|---|
 | L1 | The store's own flush of pending chunks (`sync_pending`, public) poisoned after its failing directory flush returned, outside the flush window, so a concurrent journal flush could acknowledge its batch in between | Every file and directory flush in the batch goes through the same `flushed` helper, poisoning inside the window | `r6_l1_a_failed_direct_store_flush_is_seen_by_a_concurrent_journal_flush`; negative `store-flush-poisons-outside-window` **PROVEN** |
 | L2 | A put of the same content while `Journal::shred` ran lifted the mark; if the shred's flush then failed, `recover` made the record durable and a later record referencing the content cancelled the shred | When the record's flush fails, the chunk is marked again (beyond the bound), since the record can still become durable. Round five's negative `shred-marked-after-record` now removes both marks, since either one keeps that test passing | `r6_l2_a_put_during_a_shred_whose_flush_fails_does_not_lift_the_refusal`; negatives `shred-mark-not-restored` and the re-seeded `shred-marked-after-record` **PROVEN** |
-| L3 | A shred refused before its record was written (a malformed record, a stopped writer) still marked its chunk, and a full-disk episode could fill the backlog with shreds that never had a record | When the append fails no record exists (a failed append is never acknowledged, and recovery excludes its bytes), so the mark this attempt set is lifted; an earlier shred's mark stays | `r6_l3_a_shred_refused_before_its_record_leaves_the_content_alone`, `r6_l3_a_disk_full_episode_leaves_no_shred_backlog` |
+| L3 | A shred refused before its record was written (a malformed record, a stopped writer) still marked its chunk, and a full-disk episode could fill the backlog with shreds that never had a record | When the append fails no record exists (a failed append is never acknowledged, and recovery excludes its bytes), so the mark this attempt set is lifted; an earlier shred's mark stays. **Corrected in the seventh round:** an append can write the record and then fail in its own flush | `r6_l3_a_shred_refused_before_its_record_leaves_the_content_alone`, `r6_l3_a_disk_full_episode_leaves_no_shred_backlog` |
 | L4 | A read-back of stored content (by a put, a check or recovery) unwrapped its key file without the stripe, so a re-wrap finishing meanwhile failed it with a misleading keyring error | The read-back holds the stripe shared, in the existing lock order (slot, then stripe) | `r6_l4_a_put_reading_back_content_is_not_failed_by_a_finishing_rewrap` |
 
 Each round-six test was checked to fail with its fix reverted (five mutations, all bite). The
 reviewer noted that the crash schedules check neither old-KEK retirement nor that shredded content
 is unreadable; the deterministic tests `r3_l3`, `r4_l2`, `r4_l3` and `r4_m2` pin those.
+
+## Seventh review (2026-10-16)
+
+**Reviewed:** `63ec5fc` (on `555494b`) by a fresh-context agent, in a scratch export.
+**Result:** 0 High · 1 Medium · 2 Low. The Medium was a regression the sixth round introduced.
+No deadlock was found: the lock order slot, `prepared`, stripe, window is acyclic, and a 20 s
+stress run of puts, reads, direct and journal flushes, shreds and threaded re-wraps under
+injected faults kept progressing.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| M1 | Round six lifted a shred's mark on any `append` error, but `append` can write the record and then fail in the flush it runs itself (a window that fell due, the default; or strict mode). `recover` then made the record durable while the content was vouched for again, and a later record cancelled the shred | The journal compares the next sequence number before and after: if the record was written, the chunk is marked again; only when no record exists is the mark lifted. The claim "a failed append is never acknowledged" is corrected in the code, the ADR and this record | `r7_m1_a_shred_whose_flush_inside_append_fails_stays_refused` (default policy), `r7_m1_a_shred_whose_payload_flush_inside_append_fails_stays_refused` (strict); negative `shred-unmarked-after-written-record` **PROVEN** |
+| L1 | Every test and every crash schedule used a window that never falls due, so no append ever flushed on its own; that is how M1 survived | The crash schedules also run under the strict policy and under a one-second window that a tick makes due; the two M1 tests use the default and strict policies | the property test (12,000 schedules across the three policies) |
+| L2 | An append that reads back content from an earlier run in a stripe waits for a re-wrap of that stripe, which the docs did not say (it predates round six) | ADR-0018 and the `PendingRewrap` docs say so | review of the text |
+
+Two round-six negatives (`shred-mark-not-restored`, `shred-marked-after-record`) named the line
+the sixth-round fix added; the seventh-round fix added a second such line, so both were re-anchored
+to the flush-failure site and re-run (**PROVEN**).

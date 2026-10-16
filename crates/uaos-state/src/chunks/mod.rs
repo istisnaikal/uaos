@@ -226,7 +226,9 @@ pub struct ShredReport {
 /// KEK, which lives until [`PendingRewrap::finish`] re-wraps them and destroys it. It runs
 /// without the journal writer, so a large pocket no longer holds up every append (review WP3.A1,
 /// fourth round, M2). It still holds its stripe of the store: puts, reads and flushes there wait,
-/// and so does the journal's flush while a chunk in that stripe is pending (fifth round, L2).
+/// and so does the journal's flush while a chunk in that stripe is pending (fifth round, L2), and
+/// an append that has to read back content in that stripe from an earlier run (seventh round,
+/// L2).
 /// Dropped unfinished, it finishes on the dropping
 /// thread; if that fails, or the process dies first, the next shred in the pocket or the
 /// store's next open finishes the rotation.
@@ -727,7 +729,8 @@ impl ChunkStore {
     }
 
     /// Lifts the mark [`ChunkStore::begin_shred`] set when the shred's record was never written
-    /// (a failed append is never acknowledged): no shred covers the content (sixth round, L3).
+    /// (the journal refused it, or its write failed and the partial line is never read back): no
+    /// shred covers the content (sixth round, L3; seventh round, M1).
     pub(crate) fn abandon_shred(&self, pocket: PocketId, chunk: ChunkRef) {
         let key = (pocket, chunk);
         let _slot = self.slot(key);
