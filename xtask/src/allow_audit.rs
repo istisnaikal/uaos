@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use cargo_metadata::MetadataCommand;
+use cargo_metadata::{DependencyKind, MetadataCommand};
 use serde::Deserialize;
 
 use crate::util::{rel, walk_files};
@@ -315,6 +315,24 @@ fn config_overrides(root: &Path, files: &[PathBuf]) -> Result<Vec<String>, Strin
                     "{relative}: a build script names one of clippy's variables, so it could set them for the compiler"
                 ));
             }
+            // The check reads this file only, so a build script stays one file (review WP3.A5,
+            // round 11, L2); `#[path]` and `include!` are refused above.
+            if declares_file_module(&text) {
+                problems.push(format!(
+                    "{relative}: a build script declares a module in another file, which this check does not read; keep it to one file"
+                ));
+            }
+        }
+        // A path dependency's code runs inside the build script, where this check does not read
+        // it (round 11, L2).
+        for dep in package.dependencies.iter().filter(|d| d.kind == DependencyKind::Build) {
+            if dep.path.is_some() {
+                problems.push(format!(
+                    "{}: build dependency `{}` is a path dependency, whose code runs in the build script unchecked",
+                    rel(root, package.manifest_path.as_std_path()),
+                    dep.name
+                ));
+            }
         }
         let manifest = package.manifest_path.as_std_path();
         let doc = read_toml(root, manifest)?;
@@ -365,6 +383,18 @@ fn names_clippy_variable(build_script: &str) -> bool {
     blanked(build_script, false).to_ascii_uppercase().contains("CLIPPY_")
 }
 
+/// Whether `source` declares a module in another file (`mod name;`), in code.
+fn declares_file_module(source: &str) -> bool {
+    let code = masked(source);
+    word_positions(&code, "mod").into_iter().any(|(_, at)| {
+        let rest = code.get(at + "mod".len()..).unwrap_or_default().trim_start();
+        let ident_len = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        ident_len > 0 && rest.get(ident_len..).unwrap_or_default().trim_start().starts_with(';')
+    })
+}
+
 fn read_toml(root: &Path, path: &Path) -> Result<toml::Value, String> {
     let relative = rel(root, path);
     let text = std::fs::read_to_string(path).map_err(|e| format!("{relative}: {e}"))?;
@@ -390,8 +420,9 @@ fn canary_gaps(root: &Path) -> Result<Vec<String>, String> {
 /// spelled by its own path in code: its name after the marker, and either the full path of
 /// its type (a method) or its whole path (an item in a module) there or in the function's
 /// signature. A call of another ban with the same name or in the same module does not count,
-/// nor does an import. Canary files compile only under `cfg(unix)` or `cfg(windows)`, which
-/// CI's systems cover (review WP3.A5, rounds 6, 7, 9 and 10).
+/// nor does a module-level import, and no other ban of the same lint may appear anywhere in the
+/// function. Canary files compile only under `cfg(unix)` or `cfg(windows)`, which CI's systems
+/// cover (review WP3.A5, rounds 6, 7, 9, 10 and 11).
 fn canary_problems(clippy_toml: &str, files: &[(&str, String)]) -> Result<Vec<String>, String> {
     let config: ClippyFile = toml::from_str(clippy_toml).map_err(|e| format!("clippy.toml: {e}"))?;
     let mut problems = Vec::new();
@@ -407,7 +438,12 @@ fn canary_problems(clippy_toml: &str, files: &[(&str, String)]) -> Result<Vec<St
             }
         }
     }
-    for ban in config.methods.iter().chain(&config.types) {
+    for (ban, list) in config
+        .methods
+        .iter()
+        .map(|b| (b, &config.methods))
+        .chain(config.types.iter().map(|b| (b, &config.types)))
+    {
         let path = ban.path();
         let marker = format!("// canary: `{path}`");
         let found = files.iter().find_map(|(file, text)| {
@@ -428,6 +464,11 @@ fn canary_problems(clippy_toml: &str, files: &[(&str, String)]) -> Result<Vec<St
                         "{file}:{}: the canary for `{path}` is not one banned call spelled by its own path (a method's type path, an item's module path) in a function whose only `#[expect]` names a disallowed lint",
                         at + 1
                     ));
+                } else if let Some(other) = other_ban_in(&lines, at, path, list) {
+                    problems.push(format!(
+                        "{file}:{}: the canary for `{path}` also uses `{other}`, another ban of the same lint, which keeps its expectation fulfilled if its own ban stops firing",
+                        at + 1
+                    ));
                 }
             }
         }
@@ -435,12 +476,62 @@ fn canary_problems(clippy_toml: &str, files: &[(&str, String)]) -> Result<Vec<St
     Ok(problems)
 }
 
-fn well_formed(lines: &[&str], marker: usize, path: &str) -> bool {
-    let name = path.rsplit("::").next().unwrap_or(path);
-    let Some(function) = (marker.saturating_sub(2)..marker)
+/// The line of the `fn` a canary marker sits at the top of: one or two lines above it.
+fn function_line(lines: &[&str], marker: usize) -> Option<usize> {
+    (marker.saturating_sub(2)..marker)
         .rev()
         .find(|&k| lines.get(k).is_some_and(|l| l.trim_start().starts_with("fn ")))
-    else {
+}
+
+/// The function that starts at line `function`, up to its closing brace, comments and strings
+/// masked.
+fn function_code(lines: &[&str], function: usize) -> String {
+    let code = masked(&lines.get(function..).unwrap_or_default().join("\n"));
+    let mut depth = 0usize;
+    for (at, c) in code.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' if depth == 1 => return code.get(..=at).unwrap_or_default().to_owned(),
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    code
+}
+
+/// Whether `code` spells the banned item `path` by its own path: its name as a whole word, and
+/// a method's full type path or an item's whole module path.
+fn spells(code: &str, path: &str) -> bool {
+    let name = path.rsplit("::").next().unwrap_or(path);
+    let pinned = match path.rsplit_once("::") {
+        Some((owner, _))
+            if owner
+                .rsplit("::")
+                .next()
+                .and_then(|segment| segment.chars().next())
+                .is_some_and(char::is_uppercase) =>
+        {
+            path_occurs(code, owner)
+        }
+        _ => path_occurs(code, path),
+    };
+    pinned && !word_lines(code, name).is_empty()
+}
+
+/// Another ban of the same list that the canary function for `path` spells anywhere in its
+/// signature or body: a setup call or a second call would keep the shared `#[expect]` fulfilled
+/// when the canary's own ban stops firing (review WP3.A5, round 11, L1).
+fn other_ban_in(lines: &[&str], marker: usize, path: &str, list: &[Ban]) -> Option<String> {
+    let code = function_code(lines, function_line(lines, marker)?);
+    list.iter()
+        .map(Ban::path)
+        .find(|other| *other != path && spells(&code, other))
+        .map(str::to_owned)
+}
+
+fn well_formed(lines: &[&str], marker: usize, path: &str) -> bool {
+    let name = path.rsplit("::").next().unwrap_or(path);
+    let Some(function) = function_line(lines, marker) else {
         return false;
     };
     let attributes: Vec<&str> = lines
@@ -466,19 +557,7 @@ fn well_formed(lines: &[&str], marker: usize, path: &str) -> bool {
     // std and tokio share type and method names, and sibling canaries share modules, so the
     // owner's name alone does not pin the item (round 10, L1): a method needs its type's full
     // path, an item in a module its whole path.
-    let pinned = match path.rsplit_once("::") {
-        Some((owner, _))
-            if owner
-                .rsplit("::")
-                .next()
-                .and_then(|segment| segment.chars().next())
-                .is_some_and(char::is_uppercase) =>
-        {
-            path_occurs(&code, owner)
-        }
-        _ => path_occurs(&code, path),
-    };
-    expects.len() == 1 && names_disallowed && calls && pinned
+    expects.len() == 1 && names_disallowed && calls && spells(&code, path)
 }
 
 /// `clippy::disallowed_methods` → `disallowed_methods`; `unsafe_code` stays as is.
@@ -726,6 +805,59 @@ mod tests {
         assert_eq!(check(function, blocking("spawn_blocking(f)")), 1, "through an import");
         let sibling = blocking("set.spawn_blocking(f)").replace("fn c_d()", "fn c_d(set: &mut a::task::JoinSet)");
         assert_eq!(check(function, sibling), 1, "a sibling in the same module");
+    }
+
+    /// Round 11, L1: no other ban of the same lint anywhere in the canary function, so neither
+    /// a setup call nor a later call can keep the shared expectation fulfilled; a ban of the
+    /// other lint (a banned type in a method canary's signature) does not count.
+    #[test]
+    fn a_canary_uses_no_other_ban_of_its_lint() {
+        let config = "disallowed-methods = [\"a::S::connect\", \"a::S::unbound\"]\ndisallowed-types = [\"a::S\"]\n";
+        let unbound = "    #[expect(clippy::disallowed_methods, reason = \"canary\")]\n    fn s_unbound() {\n        // canary: `a::S::unbound`\n        let _canary = a::S::unbound();\n    }\n    #[expect(clippy::disallowed_types, reason = \"canary\")]\n    fn s_type() {\n        // canary: `a::S`\n        let _canary: Option<a::S> = None;\n    }\n";
+        let connect = |body: &str| {
+            format!(
+                "    #[expect(clippy::disallowed_methods, reason = \"canary\")]\n    fn s_connect(s: &a::S) {{\n        // canary: `a::S::connect`\n{body}    }}\n{unbound}"
+            )
+        };
+        let check = |body: &str| canary_problems(config, &[("bans.rs", connect(body))]).unwrap();
+        assert!(check("        let _canary = s.connect();\n").is_empty());
+        let setup = check("        let t = a::S::unbound();\n        let _canary = t.connect();\n");
+        assert_eq!(setup.len(), 1, "{setup:?}");
+        assert!(setup[0].contains("also uses `a::S::unbound`"), "{setup:?}");
+        let later = check("        let _canary = s.connect();\n\n\n\n\n        let _later = a::S::unbound();\n");
+        assert_eq!(later.len(), 1, "a call past the third line: {later:?}");
+        assert!(
+            check("        let _canary = s.connect(); // a::S::unbound()\n").is_empty(),
+            "a comment"
+        );
+    }
+
+    /// Round 11, L3: a path occurs whole, not inside a longer identifier or path.
+    #[test]
+    fn a_path_occurs_only_whole() {
+        assert!(path_occurs("let f = std::fs::File::open(p);", "std::fs::File"));
+        assert!(path_occurs("(std::fs::File)", "std::fs::File"));
+        assert!(
+            !path_occurs("let t: std::fs::FileType;", "std::fs::File"),
+            "a longer identifier"
+        );
+        assert!(!path_occurs("let p: std::path::PathBuf;", "std::path::Path"));
+        assert!(!path_occurs("tokio::task::spawn_blocking(f)", "tokio::task::spawn"));
+        assert!(
+            !path_occurs("a::std::fs::File::open(p)", "std::fs::File"),
+            "a longer path"
+        );
+    }
+
+    /// Round 11, L2: a build script that keeps code in another file.
+    #[test]
+    fn a_build_script_module_in_another_file_is_found() {
+        assert!(declares_file_module("mod build_env;\nfn main() {}\n"));
+        assert!(declares_file_module("pub mod emit ;\n"));
+        assert!(!declares_file_module("mod inline {\n    pub fn f() {}\n}\n"));
+        assert!(!declares_file_module(
+            "// mod build_env;\nlet s = \"mod x;\";\nfn modx() {}\n"
+        ));
     }
 
     /// Rounds 8 to 10 (L5, L3, L2): a build script naming one of clippy's variables, in any

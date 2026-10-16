@@ -85,10 +85,20 @@ fn replace(path: &'static str, old: &'static str, new: &'static str) -> Seed {
     Box::new(move |ws| {
         let p = ws.join(path);
         let s = std::fs::read_to_string(&p).map_err(|e| format!("{path}: {e}"))?;
-        if !s.contains(old) {
-            return Err(format!(
-                "seed anchor not found in {path} (update the negative case): {old:?}"
-            ));
+        // Exactly once: an anchor that also matches elsewhere would seed the first match, which
+        // may not be the site the case is about, and the case would then prove nothing.
+        match s.matches(old).count() {
+            0 => {
+                return Err(format!(
+                    "seed anchor not found in {path} (update the negative case): {old:?}"
+                ));
+            }
+            1 => {}
+            n => {
+                return Err(format!(
+                    "seed anchor occurs {n} times in {path} (make it unique to its site): {old:?}"
+                ));
+            }
         }
         std::fs::write(&p, s.replacen(old, new, 1)).map_err(|e| format!("{path}: {e}"))
     })
@@ -799,6 +809,51 @@ pub(crate) fn cases() -> Vec<Case> {
             ),
             runner: Runner::Xtask(&["allow-audit"]),
             expect: "the canary for `tokio::net::TcpStream::connect`",
+        },
+        Case {
+            id: "canary-setup-calls-another-ban",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 11, L1: a canary whose setup line calls another ban of the same
+            // lint, which keeps the expectation fulfilled when its own ban is dead.
+            seed: replace(
+                "crates/uaos-egress/tests/bans.rs",
+                "        fn std_datagram_connect(socket: &std::os::unix::net::UnixDatagram) {\n            // canary: `std::os::unix::net::UnixDatagram::connect`\n            let _canary = socket.connect(\"/canary\");",
+                "        fn std_datagram_connect() {\n            // canary: `std::os::unix::net::UnixDatagram::connect`\n            let socket = std::os::unix::net::UnixDatagram::unbound().ok();\n            let _canary = socket.map(|s| s.connect(\"/canary\"));",
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "also uses `std::os::unix::net::UnixDatagram::unbound`",
+        },
+        Case {
+            id: "build-script-module",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 11, L2: a build script that keeps its code in another file.
+            seed: both(
+                write(
+                    "crates/uaos-state/build.rs",
+                    "mod build_env;\n\nfn main() {\n    build_env::emit();\n}\n".to_owned(),
+                ),
+                write(
+                    "crates/uaos-state/build_env.rs",
+                    "pub fn emit() {\n    println!(\"cargo:rustc-env=clippy_args=-Aclippy::disallowed_methods\");\n}\n".to_owned(),
+                ),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "declares a module in another file",
+        },
+        Case {
+            id: "build-dependency-path",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 11, L2: a path build dependency, whose code runs in the build
+            // script.
+            seed: both(
+                write("crates/uaos-state/build.rs", "fn main() {}\n".to_owned()),
+                append("crates/uaos-state/Cargo.toml", "\n[build-dependencies]\nuaos-contracts = { path = \"../uaos-contracts\" }\n"),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "build dependency `uaos-contracts` is a path dependency",
         },
         Case {
             id: "canary-copied-from-sibling",
