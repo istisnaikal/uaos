@@ -200,6 +200,7 @@ negative = [
   "rotation-skips-current-key",
   "store-flush-poisons-outside-window",
   "shred-mark-not-restored",
+  "shred-unmarked-after-written-record",
 ]
 
 [[gate]]

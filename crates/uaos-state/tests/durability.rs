@@ -292,6 +292,10 @@ impl World {
     }
 
     fn open(&self, store: &Arc<ChunkStore>) -> Result<Journal, JournalError> {
+        self.open_with(store, NEVER)
+    }
+
+    fn open_with(&self, store: &Arc<ChunkStore>, flush: FlushPolicy) -> Result<Journal, JournalError> {
         let clock: Arc<dyn Clock> = self.clock.clone();
         let rng: Arc<dyn Rng> = self.rng.clone();
         Journal::open_with_payloads(
@@ -299,7 +303,7 @@ impl World {
             clock,
             rng,
             &self.data,
-            NEVER,
+            flush,
             Arc::clone(store),
         )
     }
@@ -2327,6 +2331,61 @@ fn r6_l4_a_put_reading_back_content_is_not_failed_by_a_finishing_rewrap() {
     assert!(rewrapping.join().unwrap().is_ok());
 }
 
+/// Seventh-round M1: under the default flush policy the shred record's own append runs the due
+/// flush; when that flush fails after the record was written, the chunk stays refused, since
+/// `recover` makes the record durable.
+#[test]
+fn r7_m1_a_shred_whose_flush_inside_append_fails_stays_refused() {
+    let w = World::new(7001);
+    let store = w.store();
+    let mut j = w.open_with(&store, FlushPolicy::default()).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    j.sync().unwrap();
+    w.clock.advance(100_000_000); // 100 ms: the next append finds the 50 ms window due
+    w.fs.fail_segment_append_after(1); // the shred record passes, the rewrite's copy fails
+    w.sim.fail_sync_after(0); // the segment flush inside append fails
+    assert!(j.shred(shredded_record(x, 2)).is_err());
+    w.fs.clear_append_fault();
+    w.sim.fail_sync_after(u32::MAX);
+    j.recover().unwrap();
+    assert!(
+        w.survey().2.iter().any(|(_, c, _)| *c == x.to_string()),
+        "the shred record is durable"
+    );
+    assert_eq!(
+        j.append(draft(Some(pocket()), Some(x), 3)).err(),
+        Some(JournalError::PayloadNotStored),
+        "a record referenced content whose shred record is durable"
+    );
+    j.sync().unwrap();
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    w.assert_never_silent(&store, "r7 m1");
+    assert_eq!(store.get(pocket(), x).err(), Some(ChunkError::Unavailable));
+}
+
+/// Seventh-round M1: the same through a failed payload flush inside the append (strict policy).
+#[test]
+fn r7_m1_a_shred_whose_payload_flush_inside_append_fails_stays_refused() {
+    let w = World::new(7002);
+    let store = w.store();
+    let mut j = w.open_with(&store, FlushPolicy::Strict).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    let _pending = store.put(pocket(), &content(9)).unwrap(); // no record yet
+    assert_eq!(store.pending_len(), 1);
+    w.sim.fail_sync_after(0); // the pending chunk's flush inside the append's sync fails
+    assert!(j.shred(shredded_record(x, 2)).is_err());
+    w.sim.fail_sync_after(u32::MAX);
+    j.recover().unwrap();
+    assert!(w.survey().2.iter().any(|(_, c, _)| *c == x.to_string()));
+    assert_eq!(
+        j.append(draft(Some(pocket()), Some(x), 3)).err(),
+        Some(JournalError::PayloadNotStored),
+        "a record referenced content whose shred record is durable"
+    );
+}
+
 /// Fifth-round L3: shreds left unfinished by failures are bounded; past the bound a shred is
 /// refused before its record, and retrying them clears the backlog.
 #[test]
@@ -2440,12 +2499,20 @@ proptest! {
     fn payload_durability_under_random_crash_schedules(
         seed in any::<u64>(),
         keep_cache in any::<bool>(),
+        policy in 0u8..3,
         ops in prop::collection::vec(op(), 1..80),
     ) {
         let w = World::new(seed);
         w.sim.set_failed_sync_keeps_cache(keep_cache);
+        // Appends flush on their own under the strict policy and a window that falls due (a tick
+        // passes it), as in production; the long window leaves every flush to `Op::Sync`.
+        let flush = match policy {
+            0 => NEVER,
+            1 => FlushPolicy::Strict,
+            _ => FlushPolicy::Balanced { window: Millis(1_000) },
+        };
         let mut store = w.store();
-        let mut journal = w.open(&store).unwrap();
+        let mut journal = w.open_with(&store, flush).unwrap();
         let mut contents: Vec<u64> = Vec::new();
         let mut acked: BTreeMap<u64, u64> = BTreeMap::new();
         let mut next = 0u64;
@@ -2502,7 +2569,7 @@ proptest! {
                     // by schedule); after a power loss only flushed records are owed.
                     let reopen = |w: &World| -> Option<(Arc<ChunkStore>, Journal)> {
                         let s = w.try_store(ChunkDurability::Balanced).ok()?;
-                        let j = w.open(&s).ok()?;
+                        let j = w.open_with(&s, flush).ok()?;
                         Some((s, j))
                     };
                     let mut lost_power = power;
