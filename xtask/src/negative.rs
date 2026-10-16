@@ -667,8 +667,8 @@ pub(crate) fn cases() -> Vec<Case> {
                 ),
                 replace(
                     "crates/uaos-state/src/journal/writer.rs",
-                    "            store.keep_refused(pocket, chunk);\n",
-                    "",
+                    "(sixth round, L2).\n            store.keep_refused(pocket, chunk);\n",
+                    "(sixth round, L2).\n",
                 ),
             ),
             runner: Runner::Program {
@@ -749,12 +749,29 @@ pub(crate) fn cases() -> Vec<Case> {
             // the shred record does not restore it.
             seed: replace(
                 "crates/uaos-state/src/journal/writer.rs",
-                "            store.keep_refused(pocket, chunk);\n",
-                "",
+                "(sixth round, L2).\n            store.keep_refused(pocket, chunk);\n",
+                "(sixth round, L2).\n",
             ),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-state", "--test", "durability", "r6_l2_a_put_during_a_shred_whose_flush_fails_does_not_lift_the_refusal"],
+            },
+            expect: "whose shred record is durable",
+        },
+        Case {
+            id: "shred-unmarked-after-written-record",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 seventh round M1: a shred whose record was written, and whose flush inside
+            // `append` failed, lifts its mark as if no record existed.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "            if self.next_seq > before {\n                // The record was written and only the flush inside `append` failed",
+                "            if false && self.next_seq > before {\n                // The record was written and only the flush inside `append` failed",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r7_m1_a_shred_whose_flush_inside_append_fails_stays_refused"],
             },
             expect: "whose shred record is durable",
         },
