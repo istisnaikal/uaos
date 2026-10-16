@@ -101,5 +101,7 @@ v1 was drafted on 2026-10-15 for the P2 exit (plan v2 PD-10) and the P3 entry. T
 single-signer by design (plan v2 §13.6): the maintainer plus the attached adversarial reviews
 (`docs/reviews/WP2.1-policy.md`, `WP2.2-ledger.md`, `WP2.3-redact.md`, `WP2.4.md`).
 
-**Status: not yet signed.** The maintainer signs by adding a dated line below in their own
-signed-off commit.
+**Signed:** v1 was signed by the maintainer on 2026-10-15 as the single signer. The sign-off was
+given as an explicit instruction in the working session and is recorded here by the assistant on
+the maintainer's behalf. It closes plan v2 PD-10, the P2 exit condition. The residual risks
+above are accepted as stated. Rows marked open stay open until their gates are active.

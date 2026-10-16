@@ -18,14 +18,14 @@ before their first code is merged (GOVERNANCE.md §Decisions).
 | [0007](0007-key-storage-and-shred-guarantees.md) | Where keys live, and what "shredded" honestly means | Accepted |
 | [0008](0008-authorization-semantics-over-cedar.md) | Authorization semantics over Cedar | Accepted |
 | [0009](0009-redaction-detectors-placeholders-final-scan.md) | Redaction: detector sets, placeholders and the final scan | Accepted |
-| [0010](0010-kernel-tokens-and-reachability.md) | Kernel tokens and reachability | Proposed |
-| [0011](0011-scoped-credentials-and-revocation.md) | Scoped credentials, hierarchy and revocation | Proposed |
+| [0010](0010-kernel-tokens-and-reachability.md) | Kernel tokens and reachability | Accepted |
+| [0011](0011-scoped-credentials-and-revocation.md) | Scoped credentials, hierarchy and revocation | Accepted |
 | [0012](0012-approval-presence-and-peer-credentials.md) | Approval presence and peer credentials | Proposed |
-| [0013](0013-async-runtime-and-http-stack.md) | Async runtime and HTTP stack | Proposed |
-| [0014](0014-codec-framework-structural-view-and-selectors.md) | Codec framework: a kernel-owned structural view and declarative selectors | Proposed |
+| [0013](0013-async-runtime-and-http-stack.md) | Async runtime and HTTP stack | Accepted |
+| [0014](0014-codec-framework-structural-view-and-selectors.md) | Codec framework: a kernel-owned structural view and declarative selectors | Accepted |
 | [0017](0017-rehydration-policy-and-round-trip.md) | Rehydration: a policy-gated action with a recorded round trip | Proposed |
-| [0018](0018-chunk-durability-joins-the-journal-classes.md) | Chunk durability joins the journal's durability classes | Proposed |
-| [0019](0019-merge-integrity-with-one-maintainer.md) | Merge integrity with one maintainer | Proposed |
+| [0018](0018-chunk-durability-joins-the-journal-classes.md) | Chunk durability joins the journal's durability classes | Accepted |
+| [0019](0019-merge-integrity-with-one-maintainer.md) | Merge integrity with one maintainer | Accepted |
 
 Numbers 0015 and 0016 are reserved for the remaining P3 decisions named in plan v2 §2.8:
 session inference and the pricing package. Each is written before its first code.

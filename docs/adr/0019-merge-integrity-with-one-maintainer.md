@@ -1,6 +1,6 @@
 # ADR-0019: Merge integrity with one maintainer
 
-**Status:** Proposed (opened 2026-10-13; earliest decision 2026-10-15, 48 h; governance change per GOVERNANCE.md §Changing this document) · **Plan refs:** v2 PD-17, D-20, V0, V1, B-38, T3 · **Amends:** GOVERNANCE.md §Reviews and CODEOWNERS
+**Status:** Accepted by the maintainer on 2026-10-15 with Amendment 1 (opened 2026-10-13; governance change per GOVERNANCE.md §Changing this document). Ruleset applied on 2026-10-15 at the maintainer's instruction (id 25183857) · **Plan refs:** v2 PD-17, D-20, V0, V1, B-38, T3 · **Amends:** GOVERNANCE.md §Reviews and CODEOWNERS
 
 ## Context
 
@@ -87,6 +87,18 @@ and it was not applied.
 
 ## Verification
 
+- **Applied on 2026-10-15** (ruleset id 25183857, at the maintainer's instruction).
+  `gh api repos/istisnaikal/uaos/rules/branches/main` then listed:
+  - deletion and non-fast-forward blocked;
+  - linear history;
+  - pull requests with rebase-only merges;
+  - required checks `merge-gate` and `codeql`;
+  - code scanning;
+  - no bypass actors.
+
+  The direct-push test below was **not** run that day: if the rule had failed, the test push
+  would itself have landed unreviewed content on `main`. It is run with a throwaway commit that
+  carries no content, and recorded here.
 - **After the ruleset is applied:**
   - a direct push to `main` is rejected (tested once, recorded in the PR that adopts this ADR);
   - a pull request with a failing required check cannot be merged;

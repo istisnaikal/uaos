@@ -91,6 +91,23 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- Maintainer decisions of 2026-10-15:
+  - **Accepted ADRs:** ADR-0010 (as revised), ADR-0011, ADR-0013, ADR-0014 (as revised, after
+    the WP3.0c spike), ADR-0018 and ADR-0019 (with Amendment 1). ADR-0011's code merged a day
+    before its acceptance; that is recorded as a deviation.
+  - **Ruleset:** the ADR-0019 ruleset is applied to `main` (id 25183857). It requires PRs with
+    rebase-only merges, linear history, the checks `merge-gate` and `codeql`, and code scanning,
+    with no bypass actors (PD-17).
+  - **Threat model:** v1 is signed by the maintainer as the single signer (PD-10). This closes P2.
+  - **Decision register:**
+    - D-19, D-20, D-21, D-22 and D-26 are decided;
+    - D-29 (when to ask providers for an uncompressed stream) is registered as open.
+  - **New files:**
+    - `docs/release/signing-and-identity.md`: the steps for code signing (D-19) and the
+      repository move (D-22), and who does each;
+    - `.github/workflows/live.yml`: the live-provider lane (D-21). It runs only on the schedule
+      and on dispatch from `main`, in the protected `live-providers` environment, which fork
+      PRs never reach. For now it proves its wiring at zero token cost.
 - P3 Move 1, Gate 0 records (plan v2 PD-08, PD-10, PD-17):
   - **`merge-gate` CI job.** It `needs` every other `ci.yml` job, runs even when one failed or
     was skipped, and fails unless all succeeded.

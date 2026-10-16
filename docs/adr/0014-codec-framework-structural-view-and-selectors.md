@@ -1,6 +1,6 @@
 # ADR-0014: Codec framework: a kernel-owned structural view and declarative selectors
 
-**Status:** Proposed (opened 2026-10-13; earliest decision 2026-10-15, 48 h) · **Plan refs:** v2 I-06, §2.5 beachhead facts, C-01, C-24 · **Builds on:** ADR-0005, ADR-0009 · **Amends:** ADR-0001 (adds Ring 0 crate `uaos-json`)
+**Status:** Accepted by the maintainer on 2026-10-15, as revised (Revision 1, after the WP3.0c spike passed) (opened 2026-10-13) · **Plan refs:** v2 I-06, §2.5 beachhead facts, C-01, C-24 · **Builds on:** ADR-0005, ADR-0009 · **Amends:** ADR-0001 (adds Ring 0 crate `uaos-json`)
 
 **Revision 1 (2026-10-15, before the decision).** The Claude Code capture (CAP-6,
 `docs/research/beachhead-facts.md`) shows `role: "system"` messages in the middle of

@@ -1,6 +1,6 @@
 # ADR-0011: Scoped credentials, hierarchy and revocation
 
-**Status:** Proposed (opened 2026-10-13; earliest decision 2026-10-15, 48 h) · **Plan refs:** v2 §2.8 ADR-0011, WP2.4, C-07/C-08/C-09, T2, T13 · **Builds on:** ADR-0004, ADR-0007, ADR-0008
+**Status:** Accepted by the maintainer on 2026-10-15 (opened 2026-10-13). **Recorded deviation:** the WP2.4 code that implements it merged on 2026-10-14, before this acceptance, against GOVERNANCE.md's "ADR before first code" · **Plan refs:** v2 §2.8 ADR-0011, WP2.4, C-07/C-08/C-09, T2, T13 · **Builds on:** ADR-0004, ADR-0007, ADR-0008
 
 ## Context
 
