@@ -169,6 +169,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **Requests.**
     - Redirects are returned, never followed, and nothing is retried.
     - The URI comes from the upstream's declaration; the path must start with `/`.
+    - Only GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS are sent. TRACE, which would echo
+      the credential back to the caller, CONNECT and extension methods are refused before
+      contact.
     - Hop-by-hop headers, `host` and `content-length` are stripped and no UAOS header is added.
     - A request carrying one of the listed credential-bearing headers (`authorization`,
       `cookie`, provider key headers and others) is refused, before anything is stripped.
@@ -191,8 +194,8 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     banned outside the door; listening (`TcpListener::bind`, `TcpSocket::listen`, Unix
     listeners, Windows pipe servers) outside the API crate; every std file-system, `Path`,
     link and ownership call outside `uaos-platform` (a Windows UNC path reaches the network),
-    and every `getrandom` entry point; `OsFs` refuses UNC and device paths in every spelling
-    (the NT `\??\` one included); task and thread spawning,
+    and every `getrandom` entry point; `OsFs` refuses UNC and device paths in every prefix
+    spelling (the NT `\??\` one included); task and thread spawning,
     and the `JoinSet`, `LocalSet` and hyper-util `TokioExecutor` types, outside the runtime;
     `Door::new` outside its one owner.
   - **`cargo xtask clippy`** is the clippy gate: clippy with warnings denied, in plain text,
@@ -205,19 +208,21 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     lint table not denying a guarded lint, Cargo configuration naming `CLIPPY_CONF_DIR` or lint
     flags; it reads every mention of a guarded lint in code (macro-built attributes, lint
     groups, old names), refuses `#[path]` and `include!` outside owners, allows only `[alias]`
-    in Cargo configuration (names in any case), refuses build scripts naming clippy's
-    variables, reads `.rs` files in any case, and checks each canary's shape. `cargo xtask
-    clippy` neutralises the environment of the clippy it runs (compiler flags, wrapper, clippy's
-    arguments and configuration).
+    in Cargo configuration (names in any case), refuses build scripts (every one `cargo
+    metadata` lists) that set clippy's variables, reads `.rs` files in any case, and checks each
+    canary's shape, its item's type or module included. `cargo xtask clippy` neutralises the
+    environment of the clippy it runs (compiler flags, wrapper, clippy's arguments) and pins
+    clippy's configuration to the workspace root.
   - **`arch.toml`.** The bin's allow list is now explicit and leaves out the door; the bin
     reaches it only through the runtime. `uaos-module-api` and every Ring 1 crate are banned,
     transitively, from network, TLS and async-I/O crates (new `[ring1] ban`, enforced by
     `cargo xtask arch-check`).
   - **`deny.toml`** bans `ring`.
-  - **Seeded violations (37):** `egress-dials-private-range`, `egress-numeric-host`,
+  - **Seeded violations (40):** `egress-dials-private-range`, `egress-numeric-host`,
     `egress-private-reaches-link-local`, `egress-plaintext-resolved`,
     `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel`,
-    `egress-embedded-local`, `egress-ctor-outside-root`, `net-dns-outside-egress`,
+    `egress-embedded-local`, `egress-sends-trace`, `egress-ctor-outside-root`,
+    `net-dns-outside-egress`,
     `net-resolver-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
     `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor`,
     `spawn-through-tokio-executor`, `clippy-ban-path-unresolved`, `clippy-ban-silenced`,
@@ -225,13 +230,15 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `clippy-ban-without-canary`, `allow-audit-lint-group`, `allow-audit-macro-attribute`,
     `allow-audit-path-module`, `allow-audit-nested-target`, `workspace-lints-group-allowed`,
     `clippy-config-case`, `cargo-config-not-alias`, `build-script-clippy-env`,
-    `canary-malformed`, `arch-ring1-depends-on-hyper`; on Unix only `net-unix-connect-outside-egress`,
+    `build-script-declared-path`, `canary-malformed`, `canary-calls-another-item`,
+    `arch-ring1-depends-on-hyper`; on Unix only `net-unix-connect-outside-egress`,
     `net-unix-connect-addr-outside-egress`, `net-tokio-unix-connect-outside-egress`,
     `net-unix-socket-connect-outside-egress`; on Windows only (not run in CI)
     `net-named-pipe-outside-egress`.
-  - **Review:** `docs/reviews/WP3.A5-egress.md`, eight rounds, all resolved: 2 High, 4 Medium,
+  - **Review:** `docs/reviews/WP3.A5-egress.md`, nine rounds, all resolved: 2 High, 4 Medium,
     9 Low; then 1 High, 2 Medium, 7 Low; then 1 Medium, 5 Low; then 1 Medium, 5 Low; then
-    2 Medium, 4 Low; then 2 Medium, 2 Low; then 1 High, 2 Medium, 3 Low; then 1 Medium, 7 Low. Two fixes rest on ADR-0013 Amendment 1, accepted by the maintainer on
+    2 Medium, 4 Low; then 2 Medium, 2 Low; then 1 High, 2 Medium, 3 Low; then 1 Medium, 7 Low;
+    then 4 Low. Two fixes rest on ADR-0013 Amendment 1, accepted by the maintainer on
     2026-10-16.
 - Dependencies for the ADR-0013 stack: tokio, hyper 1, hyper-util, http, rustls 0.23
   (aws-lc-rs only), tokio-rustls, rustls-native-certs, and rcgen for tests only.

@@ -488,6 +488,22 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "2002:7f00:1::1",
         },
         Case {
+            id: "egress-sends-trace",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 9, L1: TRACE echoes the request, credential included, back.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "        if !SENT_METHODS.contains(&request.method) {",
+                "        if SENT_METHODS.is_empty() {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "methods_the_door_does_not_send_are_refused_before_contact"],
+            },
+            expect: "TRACE was not refused before contact",
+        },
+        Case {
             id: "net-listen-outside-api",
             gate: "clippy",
             tool: None,
@@ -751,7 +767,7 @@ pub(crate) fn cases() -> Vec<Case> {
                 "fn main() {\n    println!(\"cargo:rustc-env=clippy_conf_dir=crates\");\n}\n".to_owned(),
             ),
             runner: Runner::Xtask(&["allow-audit"]),
-            expect: "names clippy's environment",
+            expect: "sets clippy's environment",
         },
         Case {
             id: "canary-malformed",
@@ -768,6 +784,38 @@ pub(crate) fn cases() -> Vec<Case> {
             ),
             runner: Runner::Xtask(&["allow-audit"]),
             expect: "is not one banned call",
+        },
+        Case {
+            id: "canary-calls-another-item",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 9, L2: a canary that calls another ban with the same name.
+            seed: replace(
+                "crates/uaos-egress/tests/bans.rs",
+                "let _canary = ServerOptions::new().create(\"canary\");",
+                "let _canary = std::fs::File::create(\"canary\");",
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "the canary for `tokio::net::windows::named_pipe::ServerOptions::create`",
+        },
+        Case {
+            id: "build-script-declared-path",
+            gate: "allow-audit",
+            tool: None,
+            // Review WP3.A5 round 9, L3: a build script at the path `build = "..."` names.
+            seed: both(
+                write(
+                    "crates/uaos-state/build/main.rs",
+                    "fn main() {\n    println!(\"cargo:rustc-env=CLIPPY_CONF_DIR=crates\");\n}\n".to_owned(),
+                ),
+                replace(
+                    "crates/uaos-state/Cargo.toml",
+                    "name = \"uaos-state\"\n",
+                    "name = \"uaos-state\"\nbuild = \"build/main.rs\"\n",
+                ),
+            ),
+            runner: Runner::Xtask(&["allow-audit"]),
+            expect: "main.rs: a build script sets clippy's environment",
         },
         Case {
             id: "net-unix-connect-outside-egress",

@@ -792,6 +792,36 @@ async fn a_path_without_a_leading_slash_is_refused_before_contact() {
     assert_eq!(mock.seen.lock().unwrap()[0].path, "/v1/messages");
 }
 
+/// Round 9, L1: TRACE would echo the request, the credential included, back to the caller, and
+/// CONNECT would open a tunnel; they and extension methods are refused before contact, without
+/// consuming the Operation.
+#[tokio::test]
+async fn methods_the_door_does_not_send_are_refused_before_contact() {
+    let mock = mock(StatusCode::OK).await;
+    let door = door(
+        vec![mock_upstream(mock.port, mock.authority.clone())],
+        Table::default(),
+        DoorLimits::default(),
+    );
+    for method in [Method::TRACE, Method::CONNECT, Method::from_bytes(b"PROPFIND").unwrap()] {
+        let mut sent = request(op(1), "mock");
+        sent.method = method.clone();
+        let refused = door.send(op(1), sent, Some(credential())).await;
+        assert!(
+            matches!(
+                refused,
+                Err(EgressError::Refused("request method is not one the door sends"))
+            ),
+            "{method} was not refused before contact"
+        );
+    }
+    assert_eq!(door.counters().connects, 0);
+    door.send(op(1), request(op(1), "mock"), Some(credential()))
+        .await
+        .unwrap();
+    assert_eq!(mock.seen.lock().unwrap().len(), 1);
+}
+
 /// L2: a caller's `content-length` cannot truncate the body; the door frames it.
 #[tokio::test]
 async fn a_caller_content_length_is_dropped() {

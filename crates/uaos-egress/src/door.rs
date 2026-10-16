@@ -78,7 +78,7 @@ pub struct EgressRequest {
     pub op_id: OperationId,
     /// Declared destination.
     pub upstream: UpstreamId,
-    /// Method.
+    /// Method: one of GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS; any other is refused.
     pub method: Method,
     /// Path and query on the upstream; must start with `/`.
     pub path: PathAndQuery,
@@ -89,6 +89,19 @@ pub struct EgressRequest {
     /// The scanned body, sent byte for byte.
     pub body: Bytes,
 }
+
+/// The methods the door sends. TRACE answers with the request it received, so it would echo
+/// the credential back to the caller, and CONNECT turns the connection into a tunnel; neither,
+/// nor an extension method, is a provider call (review WP3.A5, round 9, L1).
+const SENT_METHODS: [Method; 7] = [
+    Method::GET,
+    Method::HEAD,
+    Method::POST,
+    Method::PUT,
+    Method::PATCH,
+    Method::DELETE,
+    Method::OPTIONS,
+];
 
 /// The provider credential the door injects last, after the final scan (I-05).
 ///
@@ -354,8 +367,9 @@ impl Door {
     /// Sends one request for the Operation `binding`.
     ///
     /// Refused before any contact when the request belongs to another Operation, the upstream
-    /// is undeclared, the body is too large, the path does not start with `/`, the request
-    /// carries a credential-bearing header, the upstream's circuit is open, or the Operation
+    /// is undeclared, the body is too large, the path does not start with `/`, the method is
+    /// not GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS, the request carries a
+    /// credential-bearing header, the upstream's circuit is open, or the Operation
     /// already sent. Only the last consumes the Operation: once a request is handed to the
     /// client, even a failed one, a retry needs a new Operation. The URI is built from the
     /// upstream's own name and port, so nothing in the request can redirect it. The credential
@@ -384,6 +398,9 @@ impl Door {
         }
         if !request.path.as_str().starts_with('/') {
             return refuse("request path must start with /");
+        }
+        if !SENT_METHODS.contains(&request.method) {
+            return refuse("request method is not one the door sends");
         }
         let mut headers = request.headers;
         // Checked before anything is stripped, so a credential header that is also hop-by-hop

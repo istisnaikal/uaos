@@ -55,7 +55,9 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
 /// WP3.A5, rounds 7 and 8): an empty `CARGO_ENCODED_RUSTFLAGS` takes priority over every other
 /// source of compiler flags (`RUSTFLAGS` in any case on Windows, `CARGO_TARGET_*_RUSTFLAGS`, any
 /// Cargo configuration's `rustflags`), an empty `RUSTC_WRAPPER` overrides any configured
-/// wrapper, and clippy's own variables are removed (Windows matches these names in any case).
+/// wrapper, `CLIPPY_ARGS` is removed, and `CLIPPY_CONF_DIR` names the workspace root, so a
+/// machine's Cargo `[env]` without `force` cannot point clippy elsewhere either (round 9; Windows
+/// matches these names in any case).
 fn clippy_command(root: &Path) -> Command {
     let mut command = Command::new("cargo");
     command
@@ -64,7 +66,7 @@ fn clippy_command(root: &Path) -> Command {
         .env("CARGO_ENCODED_RUSTFLAGS", "")
         .env("RUSTC_WRAPPER", "")
         .env_remove("CLIPPY_ARGS")
-        .env_remove("CLIPPY_CONF_DIR");
+        .env("CLIPPY_CONF_DIR", root);
     command
 }
 
@@ -136,8 +138,9 @@ mod tests {
         );
     }
 
-    /// Rounds 7 and 8: the child runs without outside compiler flags, wrapper or clippy
-    /// configuration, whatever the caller's environment holds.
+    /// Rounds 7, 8 and 9: the child runs without outside compiler flags, wrapper or clippy
+    /// arguments, and with the root's clippy configuration, whatever the caller's environment
+    /// holds.
     #[test]
     fn the_child_environment_is_neutralised() {
         let command = clippy_command(Path::new("."));
@@ -154,7 +157,7 @@ mod tests {
             ("CARGO_ENCODED_RUSTFLAGS", Some(String::new())),
             ("RUSTC_WRAPPER", Some(String::new())),
             ("CLIPPY_ARGS", None),
-            ("CLIPPY_CONF_DIR", None),
+            ("CLIPPY_CONF_DIR", Some(".".to_owned())),
         ] {
             assert!(envs.contains(&(name.to_owned(), value.clone())), "{name}: {envs:?}");
         }

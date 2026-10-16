@@ -10,7 +10,7 @@ Low findings fixed or accepted with a reason. Two fixes change accepted decision
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
 fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
 1 Medium and 5 Low, a fifth 2 Medium and 4 Low, a sixth 2 Medium and 2 Low, a seventh
-1 High, 2 Medium and 3 Low, and an eighth 1 Medium and 7 Low, all resolved below. The PR stays a draft until a review comes back clean.
+1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, and a ninth 4 Low, all resolved below. The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
 
@@ -192,7 +192,7 @@ everything reported came from gate runs that had finished or from reading code.
 exceptions visible in review. A contributor with write access could edit the gates themselves;
 the boundary there is review, CODEOWNERS and the `main` ruleset, which is not applied yet (PD-17).
 
-## Eighth review (2026-10-17)
+## Eighth review (2026-10-16)
 
 **Reviewed:** `0cbbafd` (on `555494b`) by a fresh-context agent with the same checklist, in a
 scratch export, judged against ADR-0013's statement that these gates stop drift and careless
@@ -210,3 +210,24 @@ among the lint groups switch the bans off, and both are caught.
 | L5 | Most `OsFs` refusals and the build-script check were unpinned | A table test over every method; a unit test and a negative for build scripts (names in any case) | `network_and_device_paths_are_refused`, `a_build_script_naming_clippy_is_found`; negative `build-script-clippy-env` **PROVEN** |
 | L6 | The walker now scanned nested build output (`fuzz/target`) | Folders holding Cargo's `CACHEDIR.TAG` are skipped | by reading |
 | L7 | ADR-0013's list of negatives missed round seven's, the `allow-invalid` wording was wrong, and round seven's commit said "34 Unix canaries" where the Linux cross-check counts 32 (34 `allow-invalid` entries, two of them Windows symlinks) | Corrected here and in ADR-0013 | review of the text |
+
+## Ninth review (2026-10-16)
+
+**Reviewed:** `821b6e6` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export, judged against ADR-0013's statement that these gates stop drift and careless
+overrides, not a contributor who edits the gates. **Result:** 0 High · 0 Medium · 4 Low, and one
+overclaim in the text.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | The door sent any method. An upstream that answers `TRACE` as RFC 9110 §9.3.8 describes (Apache httpd's default) echoes the request it received, so the provider credential the door inserted came back to the caller | The door sends only GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS. TRACE, CONNECT and extension methods are refused before contact, without consuming the Operation | `methods_the_door_does_not_send_are_refused_before_contact`; negative `egress-sends-trace` **PROVEN** |
+| L2 | The canary shape check matched only the banned item's last segment: a copy-pasted canary calling another ban with the same name (`std::fs::File::create` under the marker for the named-pipe `ServerOptions::create`) passed `allow-audit`, and kept clippy green while its own ban resolved to nothing | The item's type or module must be named too, as a whole word in code (comments and strings masked, the marker included), in the function's signature or the three lines after the marker | `a_canary_must_name_its_type_or_module`; negative `canary-calls-another-item` **PROVEN**; every real canary passes |
+| L3 | The build-script check refused any build script that mentioned clippy (a comment, a lint attribute) and missed one declared as `build = "build/main.rs"` | Build scripts are taken from `cargo metadata` (targets of kind `custom-build`), and only setting a clippy variable for the compiler counts (`rustc-env=CLIPPY…`, in any case, `cargo:` or `cargo::`) | `a_build_script_setting_clippy_env_is_found`; negatives `build-script-clippy-env` and `build-script-declared-path` **PROVEN** |
+| L4 | `cargo xtask clippy` removed `CLIPPY_CONF_DIR`, so a machine's Cargo `[env]` without `force` could still set it for clippy; the eighth section's heading carried the wrong date | The clippy it runs gets `CLIPPY_CONF_DIR` set to the workspace root, which `[env]` without `force` does not override (with `force` it does; that configuration is the machine's, as ADR-0013 states). The heading carries the commit date | `the_child_environment_is_neutralised`; by reading |
+| Text | ADR-0013 said `OsFs` refused network and device paths "in every spelling", but DOS device names in a last component (`C:\data\NUL`) pass it | ADR-0013 and the test now say "every prefix spelling" and state the gap: every file UAOS opens has a name UAOS chooses, and the data directory, which configuration names, is owed with M3 | review of the text |
+
+**Verified locally (Windows, dedicated target directory):** 25 xtask tests; 24 egress unit and
+22 integration tests; 24 platform tests; `cargo xtask clippy`, `allow-audit`, `arch-check`,
+`gates`, `claims` and `headers`; all 40 egress negatives, of which 36 PROVEN here and the four
+Unix ones left to Linux CI. The ban list and canaries did not change, so the round-eight Linux
+cross-check of the Unix canaries stands.

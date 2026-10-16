@@ -39,7 +39,7 @@ source = "CLAUDE.md §4 CI merge blocker: fmt/clippy/test"
 lane = "merge"
 status = "active"
 job = "test"
-negative = ["test-failure", "identity-epoch-check-skipped", "egress-dials-private-range", "egress-numeric-host", "egress-private-reaches-link-local", "egress-plaintext-resolved", "egress-breaker-admits-after-cooldown", "egress-probe-stuck-on-cancel", "egress-embedded-local"]
+negative = ["test-failure", "identity-epoch-check-skipped", "egress-dials-private-range", "egress-numeric-host", "egress-private-reaches-link-local", "egress-plaintext-resolved", "egress-breaker-admits-after-cooldown", "egress-probe-stuck-on-cancel", "egress-embedded-local", "egress-sends-trace"]
 
 # ── supply chain and hygiene ─────────────────────────────────────────────────────────────
 [[gate]]
@@ -145,7 +145,7 @@ source = "plan v2 PD-19, §2.1 reachability: guarded lints (unsafe_code, disallo
 lane = "merge"
 status = "active"
 job = "arch"
-negative = ["allow-audit-guarded-lint-outside-owner", "allow-audit-unsafe-outside-owner", "clippy-config-nested", "lints-not-inherited", "cargo-config-clippy-override", "clippy-ban-without-canary", "allow-audit-lint-group", "allow-audit-macro-attribute", "allow-audit-path-module", "allow-audit-nested-target", "workspace-lints-group-allowed", "clippy-config-case", "cargo-config-not-alias", "build-script-clippy-env", "canary-malformed"]
+negative = ["allow-audit-guarded-lint-outside-owner", "allow-audit-unsafe-outside-owner", "clippy-config-nested", "lints-not-inherited", "cargo-config-clippy-override", "clippy-ban-without-canary", "allow-audit-lint-group", "allow-audit-macro-attribute", "allow-audit-path-module", "allow-audit-nested-target", "workspace-lints-group-allowed", "clippy-config-case", "cargo-config-not-alias", "build-script-clippy-env", "canary-malformed", "canary-calls-another-item", "build-script-declared-path"]
 
 [[gate]]
 id = "vet-ratchet"
