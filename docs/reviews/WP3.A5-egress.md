@@ -8,7 +8,8 @@ own documentation said were closed. They blocked merge.
 **Resolution:** every High and Medium finding fixed with a regression test or a seeded violation;
 Low findings fixed or accepted with a reason. Two fixes change accepted decisions and are written
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
-fixes is pending; the PR stays a draft until it is clean.
+fixes found 1 High, 2 Medium and 7 Low findings, resolved below; a third review comes next and
+the PR stays a draft until one is clean.
 
 ## Findings as reported
 
@@ -77,7 +78,7 @@ Tests are in `crates/uaos-egress/tests/door.rs` and the `addr` unit tests. Negat
 | L1 | The URI is built with `Uri::builder` from the upstream's name and port; a path must start with `/`, checked before the Operation is consumed. The authority comes only from the declaration, so the connector can only reach the request's own upstream | `a_path_without_a_leading_slash_is_refused_before_contact` |
 | L2 | `content-length` is stripped; the door frames the body | `a_caller_content_length_is_dropped` |
 | L3 | `3fff::/20` is Documentation; the local-use NAT64 prefix is refused whole instead of decoded; the residuals (network-specific NAT64 prefixes, cloud host endpoints on public unicast) are documented in `addr` and ADR-0013 | `addr` unit tests; property tests over IPv6 |
-| L4 | `retry_canceled_requests(false)` | Configuration; covered by the single-probe test's connect count |
+| L4 | `retry_canceled_requests(false)` | Configuration only; no test observes it (corrected in round 2: the single-probe test does not cover it) |
 | L5 | `CircuitOpen` and every pre-contact refusal bump `refused`; `sent` is documented as "handed to the client once every check passed" | the single-probe test counts refusals |
 | L6 | Resolution runs within the connect timeout; at most four addresses are tried per attempt (`MAX_ADDRESSES_TRIED`); `DoorLimits` states what the runtime bounds (concurrency, response bodies) | `a_connection_attempt_tries_a_bounded_number_of_addresses` |
 | L7 | A request carrying `authorization`, `proxy-authorization`, `cookie`, `x-api-key`, `api-key`, `x-goog-api-key` or `openai-organization` is refused, whatever credential is injected | `credential_bearing_headers_from_the_caller_are_refused` |
@@ -88,3 +89,22 @@ Tests are in `crates/uaos-egress/tests/door.rs` and the `addr` unit tests. Negat
 
 - **ADR-0013 Amendment 1** (A: trust and revocation; B: where the door is built) was accepted by
   the maintainer on 2026-10-16. Merging still waits for a clean second review and for #24.
+
+## Second review (2026-10-16)
+
+**Reviewed:** `ec45bb4..586114d` (rebased onto `e5b0ec8`) by a fresh-context agent with the same
+checklist, in a scratch export. **Result:** 1 High · 2 Medium · 7 Low. The round-1 fixes for
+H1, H2, M1 and M3 held; the M4 fix introduced the High.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| H1 | A probe whose caller dropped the future (client disconnect, deadline, `select!`) left the circuit `Probing` forever: every later send was refused, with no further attempt | Every admitted attempt is an `Admitted` guard, settled exactly once; on drop it is settled as not attempted, so the next attempt probes. The breaker is its own type (`Breakers`) with a unit-tested state machine | `a_cancelled_probe_lets_the_next_attempt_probe`, `the_breaker_lets_one_probe_through_and_settles_it`; negative `egress-probe-stuck-on-cancel` **PROVEN** |
+| M1 | IPv6 forms that only embed a local IPv4 address (6to4, NAT64, IPv4-compatible) counted as the local network, so plain HTTP pinned at them passed validation while its traffic left the machine | "Local" is decided on the address (`addr::is_local_network`): embedding forms are never local, IPv4-mapped forms follow their IPv4 address; `classify` still reports the inner range | `plaintext_is_refused_toward_embedded_forms_and_ipv6_metadata`, the property test `embedding_forms_are_never_local`; negative `egress-embedded-local` **PROVEN** |
+| M2 | `TcpListener::bind` (std and tokio) was not banned; `bind` with a name resolves it, a DNS leak with no dependency, and it opens a network handle | Both are banned, owner the API crate | negative `net-listen-outside-api` **PROVEN** |
+| L1 | Other entry points were unbanned (`HttpConnector::new_with_resolver`, `std::thread::scope`, `JoinSet::{spawn_blocking, spawn_on, spawn_local}`, `LocalSet::spawn_local`, Unix-socket connects); allow-audit is per lint | All banned (Unix paths marked valid only where they exist). The ledger's contention test now allows `thread::scope` with a reason. The per-lint granularity is written into `clippy.toml` and ADR-0013 | workspace clippy `-D warnings` |
+| L2 | The IPv6 metadata endpoints `fd00:ec2::254` and `fd20:ce::254` sit in `fc00::/7` and were admitted as unique-local | Refused as `CloudMetadata` and never local | `cloud_metadata_on_ipv6_is_refused_and_never_local` |
+| L3 | The system root store can be replaced by `SSL_CERT_FILE`/`SSL_CERT_DIR`, load errors were dropped, Windows' Disallowed store is not consulted, and an empty `Roots` was accepted | An empty `Roots` is refused at build time. The rest is written into ADR-0013 Amendment 1A as residuals, with `uaos doctor` (M3) to show the override | `an_upstream_with_no_root_to_trust_is_refused` |
+| L4 | `lookup_host` runs `getaddrinfo` on tokio's blocking pool, outside the supervisor | **Accepted, stated:** written into ADR-0013 as the known exception; moving it onto the supervisor's pool is PR-6 work | — |
+| L5 | Five fixes were pinned by no test (the dial path's own plain-HTTP refusal, two credential headers, a not-attempted probe, the outcome mapping, the retry switch) | Unit tests for the dial path (`the_dial_path_refuses_public_addresses_over_plaintext`), every listed credential header, the outcome mapping and the breaker states. **Accepted:** the retry switch has no observable test; the round-1 proof text is corrected | `credential_bearing_headers_from_the_caller_are_refused` (all nine), `only_transport_failures_count_against_an_upstream` |
+| L6 | The credential list misses other headers and the query string | `x-amz-security-token` and `ocp-apim-subscription-key` added; the check runs before stripping, so `proxy-authorization` is refused, not dropped. The claim now says "the listed headers"; query-string credentials are a stated residual | the credential-header test |
+| L7 | cargo-vet notes still described the platform verifier | Rewritten | `cargo vet --locked` |
