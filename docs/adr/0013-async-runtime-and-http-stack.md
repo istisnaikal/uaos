@@ -203,11 +203,15 @@ on the PR-5 branch.
   - UDP: `UdpSocket::bind` (std and tokio);
   - another HTTP client: hyper-util's `HttpConnector::new`, `new_with_resolver` and
     `build_http`;
-  - local IPC connects: Unix sockets (std's `UnixStream::connect` and `connect_addr`, tokio's
-    `UnixStream::connect` and `UnixSocket::connect`; these paths exist only on Unix) and
-    Windows named pipes (`ClientOptions::open`);
-  - listening: `TcpListener::bind` (std and tokio) and `TcpSocket::listen`, whose owner will be
-    the API crate, because binding opens a network handle and `bind` with a name resolves it.
+  - local IPC: Unix stream connects (std's and tokio's `UnixStream::connect` and
+    `connect_addr`, tokio's `UnixSocket::connect`), Unix datagram sockets (std's and tokio's
+    `UnixDatagram` `bind`, `unbound`, `connect` and `send_to`, std's `bind_addr`, `connect_addr`
+    and `send_to_addr`, tokio's `UnixSocket::datagram`; these paths exist only on Unix, and
+    std's need no dependency at all) and Windows named-pipe clients (`ClientOptions::open`);
+  - listening: `TcpListener::bind` (std and tokio), `TcpSocket::listen`, Unix listeners (std's
+    and tokio's `UnixListener::bind` and `bind_addr`, tokio's `UnixSocket::listen`) and Windows
+    pipe servers (`ServerOptions::create`), whose owner will be the API crate, because binding
+    opens a handle others can reach and `bind` with a name resolves it.
 
   Spawning (`tokio::task::{spawn, spawn_blocking, spawn_local}`, every `JoinSet` and `LocalSet`
   spawn method, the `JoinSet` and `LocalSet` types themselves, because `collect` and `extend`
@@ -216,10 +220,14 @@ on the PR-5 branch.
   `Door::new` everywhere but its one owner. These bans cover the listed entry points.
 
   Clippy only warns about a ban whose path resolves to nothing, and `-D warnings` does not make
-  that fatal, so the gate runs as `cargo xtask clippy`, which fails on it. Entries marked
-  `allow-invalid` exist only on some systems and are reported nowhere; each has a seeded
-  violation on its system. The Unix ones run in the CI negative job, which runs on Linux; the
-  named-pipe one runs only when the negatives run on Windows, not in CI. A dependency that opens sockets itself is kept out by `arch.toml` and
+  that fatal, so the gate runs as `cargo xtask clippy`, which fails on that warning (in plain
+  text: CI colours output, and a coloured header would not match). Some broken paths draw no
+  warning at all: a first segment that names no crate, or an entry marked `allow-invalid`,
+  which exists only on some systems. So every ban also has a canary in
+  `crates/uaos-egress/tests/bans.rs` (or `uaos-platform`'s, for `getrandom`): a call of the
+  banned item under `#[expect(...)]`, compiled only on the systems where the item exists. A
+  ban that stops firing leaves its expectation unfulfilled, which fails clippy in the CI clippy
+  job on Linux, macOS and Windows; a test fails if a ban has no canary. A dependency that opens sockets itself is kept out by `arch.toml` and
   supply-chain review. `cargo xtask allow-audit` checks owners per lint, not per method, so a
   file that owns one disallowed method could allow another; review of each `allow` covers that.
   **Known exception:** the system resolver (`tokio::net::lookup_host`) runs `getaddrinfo` on
@@ -238,7 +246,8 @@ on the PR-5 branch.
   - for the clippy bans: `egress-ctor-outside-root`, `net-dns-outside-egress`,
     `net-resolver-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
     `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor`,
-    `spawn-through-tokio-executor`, and `clippy-ban-path-unresolved` for the gate itself;
+    `spawn-through-tokio-executor`, and `clippy-ban-path-unresolved` and
+    `clippy-ban-silenced` for the gate itself and its canaries;
   - for each `allow-invalid` ban, on its own system: `net-unix-connect-outside-egress`,
     `net-unix-connect-addr-outside-egress`, `net-tokio-unix-connect-outside-egress` and
     `net-unix-socket-connect-outside-egress` (Unix), `net-named-pipe-outside-egress`
@@ -246,15 +255,18 @@ on the PR-5 branch.
   - for the arch rules: `arch-ring1-depends-on-hyper`.
 
 **Verified.**
-- **22 unit tests**, including seven property tests, the breaker's state machine (a stale
-  probe giving up or failing, a late probe settlement, failures sent during an outage) and the
-  dial path's own refusals:
+- **24 unit tests**, including seven property tests, the breaker's state machine (a stale
+  probe giving up or failing, a late probe settlement, failures sent during an outage, a close
+  by a late answer beginning a new epoch, an answer keeping the epoch) and the dial path's own
+  refusals:
   - IPv4-mapped and NAT64 well-known addresses follow their IPv4 verdict;
   - apart from those two forms, nothing outside 2000::/3 is public;
   - every other embedding form is refused whatever its inner address;
   - the local network is exactly loopback, private and unique-local, and no embedding form
     is ever local;
   - nothing the standard library calls special is ever allowed.
+- **The ban canaries** (`tests/bans.rs`), one per `clippy.toml` entry, and the test that
+  every entry has one.
 - **21 integration tests** against loopback mocks. They read what the mock received and the
   door's own counters, and cover:
   - the header policy;
