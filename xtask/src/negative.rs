@@ -1315,7 +1315,7 @@ pub(crate) fn cases() -> Vec<Case> {
             // WP3.A1 second round M1: a flush that treats a vanished pending file as flushed.
             seed: replace(
                 "crates/uaos-state/src/chunks/mod.rs",
-                "                self.fs.sync_file(&path).map_err(storage)?;",
+                "                self.flushed(|| self.fs.sync_file(&path))?;",
                 "                match self.fs.sync_file(&path) {\n                    Ok(()) | Err(FsError::NotFound { .. }) => {}\n                    Err(e) => return Err(storage(e)),\n                }",
             ),
             runner: Runner::Program {
@@ -1490,10 +1490,19 @@ pub(crate) fn cases() -> Vec<Case> {
             tool: None,
             // WP3.A1 fifth round L1: a shred whose own flush fails leaves its chunk unmarked, so
             // once the record is durable a later record cancels the shred.
-            seed: replace(
-                "crates/uaos-state/src/journal/writer.rs",
-                "        store.begin_shred(pocket, chunk).map_err(JournalError::Payload)?;\n",
-                "",
+            // Since the sixth round a failed flush also marks the chunk again, so the seed removes
+            // both marks.
+            seed: both(
+                replace(
+                    "crates/uaos-state/src/journal/writer.rs",
+                    "        let marked = store.begin_shred(pocket, chunk).map_err(JournalError::Payload)?;\n",
+                    "        let marked = false;\n",
+                ),
+                replace(
+                    "crates/uaos-state/src/journal/writer.rs",
+                    "            store.keep_refused(pocket, chunk);\n",
+                    "",
+                ),
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -1547,6 +1556,40 @@ pub(crate) fn cases() -> Vec<Case> {
                 args: &["test", "-p", "uaos-state", "--test", "durability", "r5_a_failed_rewrap_never_leaves_a_key_only_a_retired_kek_opens"],
             },
             expect: "retired a KEK a durable key file still needed",
+        },
+        Case {
+            id: "store-flush-poisons-outside-window",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 sixth round L1: a store flush whose own directory flush fails poisons after
+            // the window, so a concurrent journal flush acknowledges its batch in between.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "            self.flushed(|| self.fs.sync_dir(&self.data_dir(pocket)))?;",
+                "            self.fs.sync_dir(&self.data_dir(pocket)).map_err(storage)?;",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r6_l1_a_failed_direct_store_flush_is_seen_by_a_concurrent_journal_flush"],
+            },
+            expect: "acknowledged across a failed flush",
+        },
+        Case {
+            id: "shred-mark-not-restored",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 sixth round L2: a put during a shred lifts the mark, and a failed flush of
+            // the shred record does not restore it.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "            store.keep_refused(pocket, chunk);\n",
+                "",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r6_l2_a_put_during_a_shred_whose_flush_fails_does_not_lift_the_refusal"],
+            },
+            expect: "whose shred record is durable",
         },
         Case {
             id: "shred-incomplete-key-only",
