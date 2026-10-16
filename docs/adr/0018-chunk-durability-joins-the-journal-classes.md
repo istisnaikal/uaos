@@ -131,7 +131,12 @@ record. What follows describes the code after those fixes.
   - **Losses are journaled before their records are durable.** The `chunk.lost` records are
     appended before the flush that makes the records they report durable, so one flush covers
     both. While a found loss is not yet journaled, the writer refuses records and flushes, and
-    a flush also refuses while the store holds a loss the journal has not taken. A coordinated
+    a flush also refuses while the store holds a loss the journal has not taken (defence in
+    depth: no public path leaves one untaken with a live journal). A loss already queued is not
+    queued again. A payload flush failure never replaces the writer's own out-of-space or write
+    failure: the active segment may then end in a torn line, which only `recover`'s rotation or
+    rewrite leaves behind, and replacing it let `recover` return `Ok` and append after the torn
+    bytes, so the journal no longer opened (eleventh review, H1). A coordinated
     store's recovery and losses belong to its journal: `ChunkStore::recover_pending`,
     `take_lost` and `verify_and_sync` refuse callers (`LossesThroughJournal`), since a loss a
     caller took would never get its record, and `Journal::recover` recovers a poisoned store
@@ -223,7 +228,7 @@ record. What follows describes the code after those fixes.
   flush either drops the unflushed bytes, or keeps serving them without ever making them durable.
   - **Flush-ordering scenario.** A flush fails at every possible step, then the power goes. A
     record at or before `flushed_through` must have a readable payload.
-  - **Regression tests.** One for each finding of the ten review rounds fixed in code, and
+  - **Regression tests.** One for each finding of the eleven review rounds fixed in code, and
     one for each defect the extended schedules found afterwards. Each round-four test was
     checked to fail with its fix reverted. These are fixed by construction, with no test that
     fails when they are reverted: first round M1 (a chunk is enrolled in `pending` before its
@@ -241,21 +246,27 @@ record. What follows describes the code after those fixes.
     and a window that falls due, so appends flush on their own as in production): writes,
     repeated payloads, write-ahead shreds (their re-wraps
     left pending across later operations, finished later, or lost to a crash), flushes, failed
-    flushes, failed appends, clock advances, process crashes, power losses and recoveries, with
+    flushes, failed appends (which leave half a line in the segment, as `write_all` does when
+    the disk is full), clock advances, process crashes, power losses and recoveries, with
     faults still armed during the next open, followed by a crash or a power loss. The merge
     lane runs 64 cases of this property and of the next one: enough for a regression most
     schedules reach, not for one only rare schedules reach. The nightly lane runs 20,000 of each
     on all three operating systems (about a minute each in release on the reference machine).
     52,000 of each ran locally on the final code. Every acknowledged record survives a process
     crash (except records that existed only in memory after a flush and its rewrite both
-    failed, ADR-0003), and so does its payload, unless a flush failure was armed after the
-    record was acknowledged or a later shred removed it: a reported loss alone does not excuse
-    it. Every flushed record's payload survives a power loss unless a `chunk.lost` record that
-    itself survived the power loss names it. No surviving record's payload is unreadable
-    without a `chunk.lost` record. A recovery with no fault armed succeeds and leaves neither
-    the journal nor the store refusing work. Before the tenth review the oracles accepted a
-    store that never wrote a payload, as long as every loss was reported; now both properties
-    fail on it, and they found round four's recovery of a poisoned store incomplete.
+    failed, ADR-0003), and so does its payload, unless a failed flush could have dropped it
+    (one armed while the record was not yet flushed, in the disk model where a failed flush
+    drops the unflushed bytes) or a later shred removed it: a reported loss alone does not
+    excuse it. Every flushed record's payload survives a power loss unless a `chunk.lost` record
+    that itself survived the power loss names it. No surviving record's payload is unreadable
+    without a `chunk.lost` record. A recovery with no fault armed succeeds, leaves neither the
+    journal nor the store refusing work, and leaves a journal that takes a new record, flushes
+    it and still reads back whole. Before the tenth review the oracles accepted a store that
+    never wrote a payload, as long as every loss was reported; before the eleventh, one that
+    discarded readable content after any failed flush, and a failed append wrote nothing, so
+    no schedule tore a segment. Both properties now fail on each of these, and they found round
+    four's recovery of a poisoned store incomplete; with the eleventh review's H1 restored they
+    fail within 4,000 schedules.
   - **Shred schedules.** A second property runs the same operations plus records that reference
     earlier content without storing it again, under the same three policies, and checks two
     more things: no record referencing content is written after a written shred record of it
@@ -263,11 +274,11 @@ record. What follows describes the code after those fixes.
     record uses leaves the content unreadable and one KEK version alive. The first schedule
     could not see the seventh review's M1; this one fails within seconds with it reverted.
 
-- **Gate self-test.** The `journal-durability` gate lists thirty-three seeded violations in
-  `gates.toml`: thirty-two for this ADR and P1's `journal-ack-without-write`. Of the
-  thirty-two, four come from this ADR's own verification plan (`chunk-flushed-before-sync`,
+- **Gate self-test.** The `journal-durability` gate lists thirty-four seeded violations in
+  `gates.toml`: thirty-three for this ADR and P1's `journal-ack-without-write`. Of the
+  thirty-three, four come from this ADR's own verification plan (`chunk-flushed-before-sync`,
   `intent-before-chunk-write`, `chunk-put-pair-race`, and `chunk-put-shared-temp`, which checks
-  temporary naming only), and twenty-eight from the classes the review rounds and the crash
+  temporary naming only), and twenty-nine from the classes the review rounds and the crash
   schedules found: every round but the eighth, which added a property test instead.
 - **Not modelled, stated plainly.** `SimFs` cannot model a failed directory flush that drops
   entries, so the poisoning that rule triggers is tested only for being triggered. Open reads
