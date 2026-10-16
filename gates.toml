@@ -206,6 +206,10 @@ negative = [
   "recovery-leaves-store-poisoned",
   "payload-failure-hides-torn-segment",
   "lost-content-reads-as-unavailable",
+  "unauthentic-loss-skipped-at-open",
+  "unauthentic-loss-skipped-in-recovery",
+  "missing-loss-reads-as-unavailable",
+  "shredded-content-reads-as-lost",
 ]
 
 [[gate]]

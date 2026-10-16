@@ -147,9 +147,10 @@ pub enum ChunkError {
     /// which reports each loss before it flushes the records that reference it.
     #[error("this store is coordinated by a journal; recover through the journal")]
     LossesThroughJournal,
-    /// The content was found unreadable and its files set aside in the pocket's quarantine; a
-    /// `chunk.lost` record reports it. Not the same as never stored or shredded.
-    #[error("the content was lost and set aside; a chunk.lost record reports it")]
+    /// The content was found unreadable after a failed flush or a crash and set aside as lost
+    /// (the journal reports it with a `chunk.lost` record for every record that referenced it).
+    /// Not the same as never stored or shredded.
+    #[error("the content was found unreadable after a failed flush or a crash and set aside as lost")]
     Lost,
     /// [`MAX_UNFINISHED_SHREDS`] shreds failed and were neither retried nor followed by a put
     /// of their content; retry them first.
@@ -860,18 +861,12 @@ impl ChunkStore {
         )
     }
 
-    /// Whether a file of the chunk's pair sits in the pocket's quarantine, set aside as lost.
-    fn quarantined(&self, pocket: PocketId, chunk: ChunkRef) -> bool {
-        let prefix = format!("{}.", hex(chunk.as_bytes()));
-        self.fs
-            .list_dir(&self.pocket_dir(pocket).join(QUARANTINE_DIR))
-            .is_ok_and(|files| {
-                files.iter().any(|f| {
-                    f.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.starts_with(&prefix))
-                })
-            })
+    /// The marker a loss of `chunk` leaves in the pocket's quarantine, under a fixed name: `get`
+    /// reads it to tell lost content from content never stored or shredded.
+    fn lost_marker(&self, pocket: PocketId, chunk: ChunkRef) -> PathBuf {
+        self.pocket_dir(pocket)
+            .join(QUARANTINE_DIR)
+            .join(format!("{}.lost", hex(chunk.as_bytes())))
     }
 
     /// Moves a chunk's files into the pocket's quarantine folder. Unreadable content is kept
@@ -894,6 +889,11 @@ impl ChunkStore {
                 Err(e) => return Err(storage(e)),
             }
         }
+        // Every loss leaves its marker, also when no file was left to set aside (the pair never
+        // reached the disk), so `get` reports the content as lost (thirteenth round, L2).
+        self.fs
+            .write_unsynced(&self.lost_marker(pocket, chunk), b"")
+            .map_err(storage)?;
         // The new entries are made durable now, before any later flush of `data/` or `keys/`
         // can make their removal there durable (third round, L1).
         self.flushed(|| self.fs.sync_dir(&dir))
@@ -1220,9 +1220,16 @@ impl ChunkStore {
         // unwrapping it, which would report existing content as unavailable.
         let _shared = self.rotation_shared(pocket);
         let (data_key, _) = match self.data_key(pocket, chunk) {
-            // Lost content reads back as lost, not as never stored or shredded (review WP3.A1,
-            // twelfth round, L3).
-            Err(ChunkError::Unavailable) if self.quarantined(pocket, chunk) => return Err(ChunkError::Lost),
+            // Lost content reads back as lost, not as never stored or shredded: every loss leaves
+            // a marker under a fixed name, read directly (review WP3.A1, rounds 12 and 13, L3,
+            // L2 and L3).
+            Err(ChunkError::Unavailable) => {
+                return match self.fs.read(&self.lost_marker(pocket, chunk)) {
+                    Ok(_) => Err(ChunkError::Lost),
+                    Err(FsError::NotFound { .. }) => Err(ChunkError::Unavailable),
+                    Err(e) => Err(storage(e)),
+                };
+            }
             other => other?,
         };
         let bytes = match self.fs.read(&self.chunk_path(pocket, chunk)) {
@@ -1325,7 +1332,15 @@ impl ChunkStore {
                 Err(e) => return Err(storage(e)),
             }
         }
-        for dir in [self.key_dir(pocket), self.data_dir(pocket)] {
+        // A shred is not a loss: content lost once and stored again reads back as shredded
+        // (thirteenth round, L3).
+        let mut dirs = vec![self.key_dir(pocket), self.data_dir(pocket)];
+        match self.fs.remove_file(&self.lost_marker(pocket, chunk)) {
+            Ok(()) => dirs.push(self.pocket_dir(pocket).join(QUARANTINE_DIR)),
+            Err(FsError::NotFound { .. }) => {}
+            Err(e) => return Err(storage(e)),
+        }
+        for dir in dirs {
             self.flushed(|| self.fs.sync_dir(&dir))?;
         }
         locked(&self.shredding).remove(&key);

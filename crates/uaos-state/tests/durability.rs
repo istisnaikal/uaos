@@ -44,7 +44,7 @@ use uaos_platform::sim::{SimClock, SimRng};
 use uaos_platform::{Clock, Rng};
 use uaos_state::chunks::keyring::{KekVersion, KeyringError, MemoryKeyring, PocketKeyring};
 use uaos_state::chunks::{
-    CHUNKS_DIR, ChunkDurability, ChunkError, ChunkStore, MAX_PENDING, MAX_UNFINISHED_SHREDS, QUARANTINE_DIR,
+    CHUNKS_DIR, ChunkDurability, ChunkError, ChunkStore, LossCause, MAX_PENDING, MAX_UNFINISHED_SHREDS, QUARANTINE_DIR,
 };
 use uaos_state::journal::{
     CHUNK_METADATA_KEY, EventDraft, FlushPolicy, JOURNAL_DIR, Journal, JournalError, JournalHealth, MAX_LOST_LISTED,
@@ -373,7 +373,11 @@ impl World {
                     .join(pocket().to_string())
                     .join(QUARANTINE_DIR),
             )
-            .map_or(0, |v| v.len())
+            .map_or(0, |v| {
+                v.iter()
+                    .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("chunk" | "key")))
+                    .count()
+            })
     }
 }
 
@@ -2712,6 +2716,189 @@ fn r10_l2_every_loss_at_open_is_journaled_and_the_list_is_bounded() {
     );
 }
 
+// ── Thirteenth review (WP3.A1, thirteenth round) ───────────────────────────────────────────
+
+/// Files with extension `ext` in `dir`.
+fn files_in(w: &World, dir: &Path, ext: &str) -> Vec<PathBuf> {
+    w.sim
+        .list_dir(dir)
+        .map(|v| {
+            v.into_iter()
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(ext))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The OS writes something back on its own, in no order across files (review WP3.A1, thirteenth
+/// round, L1): 0, the segments and their directory; 1, the chunk directories' entries only; 2,
+/// segments and key files; 3, segments and data files; 4, part of the segments; 5, the segments
+/// and part of the chunk files with their entries; 6, part of both.
+fn write_back(w: &World, kind: u8) {
+    let journal = w.data.join(JOURNAL_DIR);
+    let pocket_dir = w.data.join(CHUNKS_DIR).join(pocket().to_string());
+    if kind >= 4 {
+        let (num, den) = (1 + usize::from(kind) % 3, 4);
+        for p in files_in(w, &journal, "jsonl") {
+            if kind == 5 {
+                w.sim.write_back(&p);
+            } else {
+                w.sim.write_back_part(&p, num, den);
+            }
+        }
+        w.sim.write_back_dir(&journal);
+        if kind >= 5 {
+            for (dir, ext) in [("data", "chunk"), ("keys", "key")] {
+                for p in files_in(w, &pocket_dir.join(dir), ext) {
+                    w.sim.write_back_part(&p, num, den);
+                }
+                w.sim.write_back_dir(&pocket_dir.join(dir));
+            }
+        }
+        return;
+    }
+    if kind != 1 {
+        for p in files_in(w, &journal, "jsonl") {
+            w.sim.write_back(&p);
+        }
+        w.sim.write_back_dir(&journal);
+    }
+    if kind >= 1 {
+        for dir in ["data", "keys", QUARANTINE_DIR] {
+            w.sim.write_back_dir(&pocket_dir.join(dir));
+        }
+        w.sim.write_back_dir(&pocket_dir);
+    }
+    let files = match kind {
+        2 => files_in(w, &pocket_dir.join("keys"), "key"),
+        3 => files_in(w, &pocket_dir.join("data"), "chunk"),
+        _ => Vec::new(),
+    };
+    for p in files {
+        w.sim.write_back(&p);
+    }
+}
+
+/// The OS wrote back the record, the key file whole and three quarters of the data file, then the
+/// power went: the payload is unauthentic.
+fn torn_payload_on_disk(w: &World) {
+    let pocket_dir = w.data.join(CHUNKS_DIR).join(pocket().to_string());
+    write_back(w, 0);
+    for p in files_in(w, &pocket_dir.join("keys"), "key") {
+        w.sim.write_back(&p);
+    }
+    for p in files_in(w, &pocket_dir.join("data"), "chunk") {
+        w.sim.write_back_part(&p, 3, 4);
+    }
+    for dir in ["data", "keys"] {
+        w.sim.write_back_dir(&pocket_dir.join(dir));
+    }
+    w.sim.write_back_dir(&pocket_dir);
+}
+
+/// Thirteenth-round L1: a record the OS wrote back without its whole payload is found at open,
+/// its payload unauthentic, and journaled as lost. Skipping that cause lost the payload silently,
+/// and no schedule could see it: the simulator never wrote anything back on its own.
+#[test]
+fn r13_l1_an_unauthentic_payload_found_at_open_is_journaled() {
+    let w = World::new(1304);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, _x) = write(&store, &mut j, 1); // record and payload with the OS, nothing flushed
+    torn_payload_on_disk(&w);
+    drop(j);
+    drop(store);
+    let (store, j) = w.restart(true);
+    assert!(
+        w.survey().1.contains(&seq),
+        "record {seq} survived without its payload and with no chunk.lost record"
+    );
+    assert_eq!(j.lost_payloads().first().map(|l| l.cause), Some(LossCause::Unauthentic));
+    w.assert_never_silent(&store, "r13 l1, open");
+}
+
+/// Thirteenth-round L1: a payload whose flush failed after the OS wrote part of it back is found
+/// unauthentic by recovery and journaled as lost.
+#[test]
+fn r13_l1_an_unauthentic_payload_found_in_recovery_is_journaled() {
+    let w = World::new(1305);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, _x) = write(&store, &mut j, 1); // its payload pending
+    let pocket_dir = w.data.join(CHUNKS_DIR).join(pocket().to_string());
+    for p in files_in(&w, &pocket_dir.join("data"), "chunk") {
+        w.sim.write_back_part(&p, 3, 4);
+    }
+    w.sim.fail_next_sync(); // the data file's flush fails, dropping what was not written back
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    j.recover().unwrap();
+    assert!(
+        w.survey().1.contains(&seq),
+        "record {seq} became durable without its payload and with no chunk.lost record"
+    );
+    assert_eq!(j.lost_payloads().first().map(|l| l.cause), Some(LossCause::Unauthentic));
+}
+
+/// Thirteenth-round L2: the most likely power-loss loss, a record the OS wrote back whose payload
+/// never reached the disk, left no file to set aside and read back as never stored or shredded.
+#[test]
+fn r13_l2_a_missing_payload_reads_back_as_lost() {
+    let w = World::new(1301);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, x) = write(&store, &mut j, 1);
+    write_back(&w, 0); // the segment only
+    drop(j);
+    drop(store);
+    let (store, j) = w.restart(true);
+    assert!(w.survey().1.contains(&seq), "the loss was not journaled");
+    assert_eq!(j.lost_payloads().first().map(|l| l.cause), Some(LossCause::Missing));
+    assert_eq!(
+        store.get(pocket(), x),
+        Err(ChunkError::Lost),
+        "a journaled loss reads back as never stored or shredded"
+    );
+}
+
+/// Thirteenth-round L3: content lost once, stored again and then shredded on purpose reads back
+/// as shredded, not lost; content lost before any record referenced it reads back as lost with a
+/// message that claims no `chunk.lost` record.
+#[test]
+fn r13_l3_lost_then_shredded_reads_back_as_shredded() {
+    let w = World::new(1302);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    w.sim.fail_next_sync();
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    j.recover().unwrap();
+    assert_eq!(store.get(pocket(), x), Err(ChunkError::Lost));
+    store.put(pocket(), &content(1)).unwrap();
+    j.append(draft(Some(pocket()), Some(x), 2)).unwrap();
+    j.sync().unwrap();
+    j.shred(shredded_record(x, 3)).unwrap().finish().unwrap();
+    assert_eq!(
+        store.get(pocket(), x),
+        Err(ChunkError::Unavailable),
+        "deliberately shredded content reads back as lost"
+    );
+
+    let w = World::new(1303);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let y = store.put(pocket(), &content(2)).unwrap(); // no record references it
+    j.append(draft(Some(pocket()), None, 1)).unwrap();
+    w.sim.fail_next_sync();
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    j.recover().unwrap();
+    assert_eq!(store.get(pocket(), y), Err(ChunkError::Lost));
+    assert!(w.survey().1.is_empty());
+    assert!(
+        !ChunkError::Lost.to_string().contains("chunk.lost record"),
+        "the message claims a loss record that does not exist"
+    );
+}
+
 // ── Random crash schedules ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -2846,6 +3033,7 @@ proptest! {
         keep_cache in any::<bool>(),
         policy in 0u8..3,
         ops in prop::collection::vec(op(), 1..80),
+        writebacks in prop::collection::vec((0usize..80, 0u8..7), 0..6),
     ) {
         let w = World::new(seed);
         w.sim.set_failed_sync_keeps_cache(keep_cache);
@@ -2865,7 +3053,12 @@ proptest! {
         // Acknowledged records whose payload a flush failure armed since their acknowledgement
         // may have dropped: only these may lose it to a process crash (round 10, L3).
         let mut exposed: BTreeSet<u64> = BTreeSet::new();
-        for op in ops {
+        for (idx, op) in ops.into_iter().enumerate() {
+            for &(at, kind) in &writebacks {
+                if at == idx {
+                    write_back(&w, kind);
+                }
+            }
             match op {
                 Op::Write | Op::Repeat(_) => {
                     let n = match op {
@@ -2971,6 +3164,13 @@ proptest! {
                     let present: BTreeSet<u64> = records.iter().map(|(s, _, _)| *s).collect();
                     acked.retain(|s, _| present.contains(s));
                     exposed.retain(|s| acked.contains_key(s));
+                    // After a power loss the OS may have written a record back without its
+                    // payload; the open reports that loss, and later crashes must not count it
+                    // against the store (round 13).
+                    if lost_power {
+                        let (_, reported, _) = w.survey();
+                        exposed.extend(reported.into_iter().filter(|s| acked.contains_key(s)));
+                    }
                     // An open verifies every surviving record's payload and makes it durable, so a
                     // record whose payload reads back and no `chunk.lost` names is safe from any
                     // later failed flush (round 12).
@@ -3058,6 +3258,7 @@ proptest! {
         keep_cache in any::<bool>(),
         policy in 0u8..3,
         ops in prop::collection::vec(shred_op(), 1..100),
+        writebacks in prop::collection::vec((0usize..100, 0u8..7), 0..6),
     ) {
         let w = World::new(seed);
         w.sim.set_failed_sync_keeps_cache(keep_cache);
@@ -3081,6 +3282,11 @@ proptest! {
         let mut shred_written: BTreeMap<u64, usize> = BTreeMap::new();
         let mut last_put: BTreeMap<u64, usize> = BTreeMap::new();
         for (idx, op) in ops.into_iter().enumerate() {
+            for &(at, kind) in &writebacks {
+                if at == idx {
+                    write_back(&w, kind);
+                }
+            }
             match op {
                 ShredOp::Write | ShredOp::Repeat(_) => {
                     let n = match op {
@@ -3203,6 +3409,13 @@ proptest! {
                     let present: BTreeSet<u64> = records.iter().map(|(s, _, _)| *s).collect();
                     acked.retain(|s, _| present.contains(s));
                     exposed.retain(|s| acked.contains_key(s));
+                    // After a power loss the OS may have written a record back without its
+                    // payload; the open reports that loss, and later crashes must not count it
+                    // against the store (round 13).
+                    if lost_power {
+                        let (_, reported, _) = w.survey();
+                        exposed.extend(reported.into_iter().filter(|s| acked.contains_key(s)));
+                    }
                     // An open verifies every surviving record's payload and makes it durable, so a
                     // record whose payload reads back and no `chunk.lost` names is safe from any
                     // later failed flush (round 12).
