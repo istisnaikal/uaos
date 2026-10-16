@@ -539,6 +539,10 @@ fn replay_refuses_an_inconsistent_history() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "contended threads on real OS threads are the point of this test (std::thread::scope)"
+)]
 fn threads_contending_for_one_pool_never_overspend() {
     const THREADS: u64 = 8;
     const ROUNDS: u64 = 200;

@@ -31,7 +31,7 @@ source = "CLAUDE.md §4 CI merge blocker: fmt/clippy/test; plan §4.3 code stand
 lane = "merge"
 status = "active"
 job = "clippy"
-negative = ["clippy-unwrap", "clippy-unsafe", "clippy-ambient-clock", "clippy-nondeterministic-map", "egress-ctor-outside-root", "net-dns-outside-egress", "net-connect-outside-egress", "net-udp-outside-egress", "spawn-outside-supervisor"]
+negative = ["clippy-unwrap", "clippy-unsafe", "clippy-ambient-clock", "clippy-nondeterministic-map", "egress-ctor-outside-root", "net-dns-outside-egress", "net-connect-outside-egress", "net-udp-outside-egress", "spawn-outside-supervisor", "net-listen-outside-api"]
 
 [[gate]]
 id = "test"
@@ -39,7 +39,7 @@ source = "CLAUDE.md §4 CI merge blocker: fmt/clippy/test"
 lane = "merge"
 status = "active"
 job = "test"
-negative = ["test-failure", "identity-epoch-check-skipped", "egress-dials-private-range", "egress-numeric-host", "egress-private-reaches-link-local", "egress-plaintext-resolved", "egress-breaker-admits-after-cooldown"]
+negative = ["test-failure", "identity-epoch-check-skipped", "egress-dials-private-range", "egress-numeric-host", "egress-private-reaches-link-local", "egress-plaintext-resolved", "egress-breaker-admits-after-cooldown", "egress-probe-stuck-on-cancel", "egress-embedded-local"]
 
 # ── supply chain and hygiene ─────────────────────────────────────────────────────────────
 [[gate]]

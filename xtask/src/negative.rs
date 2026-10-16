@@ -359,7 +359,7 @@ pub(crate) fn cases() -> Vec<Case> {
             // Review WP3.A5 H2: a private upstream admitted to every special-purpose range, metadata included.
             seed: replace(
                 "crates/uaos-egress/src/upstream.rs",
-                "Reach::Blocked(why) if self.allow_private && why.is_local_network() => Ok(()),",
+                "Reach::Blocked(_) if self.allow_private && is_local_network(ip) => Ok(()),",
                 "Reach::Blocked(_) if self.allow_private => Ok(()),",
             ),
             runner: Runner::Program {
@@ -391,7 +391,7 @@ pub(crate) fn cases() -> Vec<Case> {
             // Review WP3.A5 M4: a breaker with no half-open state.
             seed: replace(
                 "crates/uaos-egress/src/door.rs",
-                "Breaker::Probing => Err(self.limits.breaker_cooldown),",
+                "Breaker::Probing => Err(cooldown),",
                 "Breaker::Probing => Ok(false),",
             ),
             runner: Runner::Program {
@@ -447,6 +447,51 @@ pub(crate) fn cases() -> Vec<Case> {
             ),
             runner: CLIPPY,
             expect: "tokio::runtime::Handle::spawn",
+        },
+        Case {
+            id: "egress-probe-stuck-on-cancel",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 2, H1: a breaker probe whose caller drops the future is never settled.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "            self.door
+                .breaker_record(self.upstream, self.probe, Outcome::NotAttempted);",
+                "            let _ = (self.door, self.upstream, self.probe);",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_cancelled_probe_lets_the_next_attempt_probe"],
+            },
+            expect: "a cancelled probe left the circuit refusing",
+        },
+        Case {
+            id: "egress-embedded-local",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 2, M1: an IPv6 form that only embeds a loopback address counted as local.
+            seed: replace(
+                "crates/uaos-egress/src/addr.rs",
+                "    if let IpAddr::V6(v6) = ip\n        && embeds_ipv4(v6)\n    {\n        return false;\n    }\n",
+                "    let _ = embeds_ipv4;\n",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--lib", "plaintext_is_refused_toward_embedded_forms"],
+            },
+            expect: "2002:7f00:1::1",
+        },
+        Case {
+            id: "net-listen-outside-api",
+            gate: "clippy",
+            tool: None,
+            // Review WP3.A5 round 2, M2: a listener, whose bind also resolves names, outside the API crate.
+            seed: append(
+                "crates/uaos-state/src/lib.rs",
+                "\n/// Seeded.\n///\n/// # Errors\n/// Never.\npub fn seeded_violation() -> std::io::Result<std::net::TcpListener> {\n    std::net::TcpListener::bind(\"localhost:0\")\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "std::net::TcpListener::bind",
         },
         Case {
             id: "arch-ring1-depends-on-hyper",

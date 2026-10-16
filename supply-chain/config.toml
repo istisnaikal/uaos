@@ -620,7 +620,7 @@ criteria = "safe-to-deploy"
 [[exemptions.openssl-probe]]
 version = "0.2.1"
 criteria = "safe-to-deploy"
-notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06). Only probes where Linux keeps its certificate directories; it does not link OpenSSL."
+notes = "ADR-0013 TLS: rustls on aws-lc-rs, verifying against the operating system's root store read locally (plan D18, ADR-0013 Amendment 1A). Import or audit before GA (PD-06). Only probes where Linux keeps its certificate directories; it does not link OpenSSL."
 
 [[exemptions.ordered-stream]]
 version = "0.2.0"
@@ -765,22 +765,22 @@ criteria = "safe-to-deploy"
 [[exemptions.rustls]]
 version = "0.23.37"
 criteria = "safe-to-deploy"
-notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
+notes = "ADR-0013 TLS: rustls on aws-lc-rs, verifying against the operating system's root store read locally (plan D18, ADR-0013 Amendment 1A). Import or audit before GA (PD-06)."
 
 [[exemptions.rustls-native-certs]]
 version = "0.8.5"
 criteria = "safe-to-deploy"
-notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
+notes = "ADR-0013 TLS: rustls on aws-lc-rs, verifying against the operating system's root store read locally (plan D18, ADR-0013 Amendment 1A). Import or audit before GA (PD-06)."
 
 [[exemptions.rustls-pki-types]]
 version = "1.15.1"
 criteria = "safe-to-deploy"
-notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
+notes = "ADR-0013 TLS: rustls on aws-lc-rs, verifying against the operating system's root store read locally (plan D18, ADR-0013 Amendment 1A). Import or audit before GA (PD-06)."
 
 [[exemptions.rustls-webpki]]
 version = "0.103.10"
 criteria = "safe-to-deploy"
-notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
+notes = "ADR-0013 TLS: rustls on aws-lc-rs, verifying against the operating system's root store read locally (plan D18, ADR-0013 Amendment 1A). Import or audit before GA (PD-06)."
 
 [[exemptions.rustversion]]
 version = "1.0.23"
@@ -797,7 +797,7 @@ criteria = "safe-to-deploy"
 [[exemptions.schannel]]
 version = "0.1.29"
 criteria = "safe-to-deploy"
-notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06). The Windows certificate store, used by the platform verifier."
+notes = "ADR-0013 TLS: rustls on aws-lc-rs, verifying against the operating system's root store read locally (plan D18, ADR-0013 Amendment 1A). Import or audit before GA (PD-06). Reads the roots in the Windows certificate store for rustls-native-certs; it fetches nothing."
 
 [[exemptions.schemars]]
 version = "0.8.12"
@@ -953,7 +953,7 @@ notes = "Test attribute macros (#[tokio::test]) for the egress tests; part of th
 [[exemptions.tokio-rustls]]
 version = "0.26.6"
 criteria = "safe-to-deploy"
-notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
+notes = "ADR-0013 TLS: rustls on aws-lc-rs, verifying against the operating system's root store read locally (plan D18, ADR-0013 Amendment 1A). Import or audit before GA (PD-06)."
 
 [[exemptions.toml]]
 version = "1.1.8+spec-1.1.0"
@@ -1015,7 +1015,7 @@ criteria = "safe-to-deploy"
 [[exemptions.untrusted]]
 version = "0.9.0"
 criteria = "safe-to-deploy"
-notes = "ADR-0013 TLS: rustls on aws-lc-rs with the operating system's verifier (plan D18). Import or audit before GA (PD-06)."
+notes = "ADR-0013 TLS: rustls on aws-lc-rs, verifying against the operating system's root store read locally (plan D18, ADR-0013 Amendment 1A). Import or audit before GA (PD-06)."
 
 [[exemptions.uuid]]
 version = "1.28.0"

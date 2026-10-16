@@ -3,6 +3,8 @@
 # Architecture is enforced here, not in review comments (plan §4.3, D2, D15).
 # Each ban names the ONE crate allowed to cross it. Inside that crate the crossing must be
 # an item-level `#[allow(clippy::disallowed_methods, reason = "...")]`.
+# `cargo xtask allow-audit` checks owners per lint, not per method: a file that owns one
+# disallowed method may allow any of them. Review of each `allow` and its reason covers the rest.
 # Paths for crates that are not dependencies yet (tokio, reqwest) are added in the phase that
 # introduces them, because clippy rejects unresolvable paths.
 
@@ -45,6 +47,13 @@ disallowed-methods = [
   { path = "tokio::net::UdpSocket::bind", reason = "UAOS sends no UDP; the egress door is the only outbound path (owner: uaos-egress)" },
   { path = "hyper_util::client::legacy::connect::HttpConnector::new", reason = "the egress door is the only HTTP client; it owns DNS and classification (owner: uaos-egress)" },
   { path = "hyper_util::client::legacy::Builder::build_http", reason = "the egress door is the only HTTP client; it owns DNS and classification (owner: uaos-egress)" },
+  { path = "hyper_util::client::legacy::connect::HttpConnector::new_with_resolver", reason = "the egress door is the only HTTP client; it owns DNS and classification (owner: uaos-egress)" },
+  { path = "std::os::unix::net::UnixStream::connect", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  { path = "tokio::net::UnixStream::connect", reason = "outbound connections go through the egress door (owner: uaos-egress)", allow-invalid = true },
+  # Review WP3.A5 round 2, M2: binding a listener opens a network handle, and `bind` with a name
+  # resolves it, a DNS leak that needs no dependency. Only the API crate listens.
+  { path = "std::net::TcpListener::bind", reason = "only the API crate listens, on loopback (owner: uaos-api)" },
+  { path = "tokio::net::TcpListener::bind", reason = "only the API crate listens, on loopback (owner: uaos-api)" },
   # Tasks: the runtime supervisor is the only spawner (ADR-0010 Decision 7).
   { path = "tokio::task::spawn", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
   { path = "tokio::task::spawn_blocking", reason = "CPU work runs on the supervisor's bounded pool (owner: uaos-runtime)" },
@@ -55,6 +64,11 @@ disallowed-methods = [
   { path = "tokio::runtime::Runtime::spawn", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
   { path = "tokio::runtime::Runtime::spawn_blocking", reason = "CPU work runs on the supervisor's bounded pool (owner: uaos-runtime)" },
   { path = "std::thread::Builder::spawn", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
+  { path = "std::thread::scope", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
+  { path = "tokio::task::JoinSet::spawn_blocking", reason = "CPU work runs on the supervisor's bounded pool (owner: uaos-runtime)" },
+  { path = "tokio::task::JoinSet::spawn_on", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
+  { path = "tokio::task::JoinSet::spawn_local", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
+  { path = "tokio::task::LocalSet::spawn_local", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
   # The door: built in one place and handed only to the runtime (ADR-0010; where, ADR-0013 amendment).
   { path = "uaos_egress::Door::new", reason = "the one door is built in one place and handed only to the runtime (ADR-0010)" },
   # Hidden inputs: configuration arrives through uaos-config snapshots, not ambient env reads.

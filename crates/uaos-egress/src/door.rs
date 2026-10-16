@@ -144,10 +144,12 @@ const HOP_BY_HOP: [&str; 9] = [
     "upgrade",
 ];
 
-/// Headers that carry credentials. A request from the runtime never carries one: the client's
-/// own key to UAOS (a `uaos_sk_` sub-key in `authorization`), cookies and provider keys would
-/// otherwise reach the provider. The door's credential is the only one it sends.
-const CREDENTIAL_HEADERS: [&str; 7] = [
+/// Headers known to carry credentials. A request from the runtime never carries one of them:
+/// the client's own key to UAOS (a `uaos_sk_` sub-key in `authorization`), cookies and provider
+/// keys would otherwise reach the provider. Credentials in other headers or in the query string
+/// are not caught here; the runtime's final scan covers the body, and the request is built from
+/// the client's own request (review WP3.A5, round 2, L6).
+pub const CREDENTIAL_HEADERS: [&str; 9] = [
     "authorization",
     "proxy-authorization",
     "cookie",
@@ -155,6 +157,8 @@ const CREDENTIAL_HEADERS: [&str; 7] = [
     "api-key",
     "x-goog-api-key",
     "openai-organization",
+    "x-amz-security-token",
+    "ocp-apim-subscription-key",
 ];
 
 fn strip_hop_by_hop(headers: &mut HeaderMap) {
@@ -210,6 +214,32 @@ impl Outcome {
     }
 }
 
+/// An attempt the breaker admitted. It is settled exactly once: by [`Admitted::settle`] or, if
+/// the caller drops the future while the request is in flight, on drop as not attempted, so a
+/// cancelled probe can never leave the circuit probing forever (review WP3.A5, round 2, H1).
+struct Admitted<'a> {
+    door: &'a Door,
+    upstream: &'a UpstreamId,
+    probe: bool,
+    settled: bool,
+}
+
+impl Admitted<'_> {
+    fn settle(mut self, outcome: Outcome) {
+        self.settled = true;
+        self.door.breaker_record(self.upstream, self.probe, outcome);
+    }
+}
+
+impl Drop for Admitted<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.door
+                .breaker_record(self.upstream, self.probe, Outcome::NotAttempted);
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Replay {
     seen: BTreeSet<OperationId>,
@@ -230,7 +260,7 @@ pub struct Door {
     counters: Arc<Counters>,
     clock: Arc<dyn Clock>,
     limits: DoorLimits,
-    breakers: Mutex<BTreeMap<UpstreamId, Breaker>>,
+    breakers: Breakers,
     replay: Mutex<Replay>,
 }
 
@@ -295,7 +325,7 @@ impl Door {
             counters,
             clock,
             limits,
-            breakers: Mutex::new(BTreeMap::new()),
+            breakers: Breakers::default(),
             replay: Mutex::new(Replay::default()),
         })
     }
@@ -341,12 +371,14 @@ impl Door {
             return refuse("request path must start with /");
         }
         let mut headers = request.headers;
-        strip_hop_by_hop(&mut headers);
-        headers.remove(header::HOST);
-        headers.remove(header::CONTENT_LENGTH);
+        // Checked before anything is stripped, so a credential header that is also hop-by-hop
+        // (`proxy-authorization`) or listed in `connection` is refused, not silently dropped.
         if CREDENTIAL_HEADERS.iter().any(|name| headers.contains_key(*name)) {
             return refuse("the request carries a credential-bearing header");
         }
+        strip_hop_by_hop(&mut headers);
+        headers.remove(header::HOST);
+        headers.remove(header::CONTENT_LENGTH);
         let Ok(authority) = Authority::try_from(format!("{}:{}", up.host, up.port)) else {
             return refuse("upstream name does not form an authority");
         };
@@ -369,15 +401,20 @@ impl Door {
             return refuse("request could not be built");
         };
         *outbound.headers_mut() = headers;
-        let probe = match self.breaker_admits(&request.upstream) {
-            Ok(probe) => probe,
+        let admitted = match self.breaker_admits(&request.upstream) {
+            Ok(probe) => Admitted {
+                door: self,
+                upstream: &request.upstream,
+                probe,
+                settled: false,
+            },
             Err(retry_after) => {
                 bump(&self.counters.refused);
                 return Err(EgressError::CircuitOpen { retry_after });
             }
         };
         if !self.first_send(binding) {
-            self.breaker_record(&request.upstream, probe, Outcome::NotAttempted);
+            admitted.settle(Outcome::NotAttempted);
             return refuse("the Operation already sent a request");
         }
         if let Some(c) = credential {
@@ -388,17 +425,17 @@ impl Door {
         let result = tokio::time::timeout(self.limits.response_timeout, self.client.request(outbound)).await;
         let response = match result {
             Err(_) => {
-                self.breaker_record(&request.upstream, probe, Outcome::TransportFailure);
+                admitted.settle(Outcome::TransportFailure);
                 return Err(EgressError::Timeout);
             }
             Ok(Err(e)) => {
                 let error = EgressError::from_client(&e);
-                self.breaker_record(&request.upstream, probe, Outcome::of(&error));
+                admitted.settle(Outcome::of(&error));
                 return Err(error);
             }
             Ok(Ok(r)) => r,
         };
-        self.breaker_record(&request.upstream, probe, Outcome::Answered);
+        admitted.settle(Outcome::Answered);
         let (parts, body) = response.into_parts();
         let mut headers = parts.headers;
         strip_hop_by_hop(&mut headers);
@@ -424,12 +461,33 @@ impl Door {
         true
     }
 
+    fn breaker_admits(&self, id: &UpstreamId) -> Result<bool, Duration> {
+        self.breakers
+            .admits(id, self.clock.mono().0, self.limits.breaker_cooldown)
+    }
+
+    fn breaker_record(&self, id: &UpstreamId, probe: bool, outcome: Outcome) {
+        self.breakers.record(
+            id,
+            probe,
+            outcome,
+            self.clock.mono().0,
+            self.limits.breaker_threshold,
+            self.limits.breaker_cooldown,
+        );
+    }
+}
+
+/// Every upstream's circuit, keyed by id (bounded by the declared upstreams).
+#[derive(Debug, Default)]
+struct Breakers(Mutex<BTreeMap<UpstreamId, Breaker>>);
+
+impl Breakers {
     /// `Ok(probe)` if the attempt may go, where `probe` says it is the single attempt let
     /// through after a cooldown; `Err(retry_after)` while the circuit is open or a probe is in
-    /// flight.
-    fn breaker_admits(&self, id: &UpstreamId) -> Result<bool, Duration> {
-        let now = self.clock.mono().0;
-        let mut breakers = locked(&self.breakers);
+    /// flight. `now` is monotonic nanoseconds.
+    fn admits(&self, id: &UpstreamId, now: u64, cooldown: Duration) -> Result<bool, Duration> {
+        let mut breakers = locked(&self.0);
         let breaker = breakers.entry(id.clone()).or_default();
         match *breaker {
             Breaker::Closed { .. } => Ok(false),
@@ -438,17 +496,17 @@ impl Door {
                 *breaker = Breaker::Probing;
                 Ok(true)
             }
-            Breaker::Probing => Err(self.limits.breaker_cooldown),
+            Breaker::Probing => Err(cooldown),
         }
     }
 
     /// Settles an admitted attempt. Only transport failures count against the upstream. A
     /// probe that fails reopens the circuit for another cooldown; a probe that never reached
-    /// the upstream (refused or blocked by the door) lets the next attempt probe instead.
-    fn breaker_record(&self, id: &UpstreamId, probe: bool, outcome: Outcome) {
-        let now = self.clock.mono().0;
-        let cooldown = u64::try_from(self.limits.breaker_cooldown.as_nanos()).unwrap_or(u64::MAX);
-        let mut breakers = locked(&self.breakers);
+    /// the upstream (refused or blocked by the door, or dropped by its caller) lets the next
+    /// attempt probe instead.
+    fn record(&self, id: &UpstreamId, probe: bool, outcome: Outcome, now: u64, threshold: u32, cooldown: Duration) {
+        let cooldown = u64::try_from(cooldown.as_nanos()).unwrap_or(u64::MAX);
+        let mut breakers = locked(&self.0);
         let breaker = breakers.entry(id.clone()).or_default();
         *breaker = match (outcome, probe, *breaker) {
             (Outcome::Answered, _, _) => Breaker::default(),
@@ -458,7 +516,7 @@ impl Door {
             (Outcome::NotAttempted, true, _) => Breaker::Open { until: now },
             (Outcome::TransportFailure, false, Breaker::Closed { failures }) => {
                 let failures = failures.saturating_add(1);
-                if failures >= self.limits.breaker_threshold {
+                if failures >= threshold {
                     Breaker::Open {
                         until: now.saturating_add(cooldown),
                     }
@@ -489,6 +547,9 @@ fn tls_config(trust: &Trust, system_roots: &mut Option<Arc<RootCertStore>>) -> R
             }
         }
         Trust::Roots(roots) => {
+            if roots.is_empty() {
+                return Err(EgressError::Tls("an upstream declares no root certificate to trust"));
+            }
             let mut store = RootCertStore::empty();
             for root in roots {
                 store
@@ -515,4 +576,73 @@ fn load_system_roots() -> Result<RootCertStore, EgressError> {
         ));
     }
     Ok(store)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "test fixtures abort on failure")]
+
+    use super::*;
+    use crate::addr::Blocked;
+
+    /// Only an unreachable upstream or a timeout counts against it (round 2, L5).
+    #[test]
+    fn only_transport_failures_count_against_an_upstream() {
+        assert_eq!(Outcome::of(&EgressError::Unreachable("x")), Outcome::TransportFailure);
+        assert_eq!(Outcome::of(&EgressError::Timeout), Outcome::TransportFailure);
+        for e in [
+            EgressError::Refused("x"),
+            EgressError::Blocked(Blocked::Loopback),
+            EgressError::CircuitOpen {
+                retry_after: Duration::ZERO,
+            },
+            EgressError::Tls("x"),
+        ] {
+            assert_eq!(Outcome::of(&e), Outcome::NotAttempted, "{e:?}");
+        }
+    }
+
+    /// The breaker's states: closed, open until its cooldown ends, one probe, and back.
+    #[test]
+    fn the_breaker_lets_one_probe_through_and_settles_it() {
+        let breakers = Breakers::default();
+        let id = UpstreamId::new("x");
+        let cooldown = Duration::from_secs(30);
+        let (threshold, mut now) = (2, 1_000_u64);
+        breakers.record(&id, false, Outcome::TransportFailure, now, threshold, cooldown);
+        assert_eq!(
+            breakers.admits(&id, now, cooldown),
+            Ok(false),
+            "one failure keeps it closed"
+        );
+        breakers.record(&id, false, Outcome::NotAttempted, now, threshold, cooldown);
+        breakers.record(&id, false, Outcome::TransportFailure, now, threshold, cooldown);
+        assert!(breakers.admits(&id, now, cooldown).is_err(), "the threshold opens it");
+        now += 31_000_000_000;
+        assert_eq!(
+            breakers.admits(&id, now, cooldown),
+            Ok(true),
+            "the first attempt after the cooldown probes"
+        );
+        assert!(breakers.admits(&id, now, cooldown).is_err(), "only one probe at a time");
+        breakers.record(&id, true, Outcome::NotAttempted, now, threshold, cooldown);
+        assert_eq!(
+            breakers.admits(&id, now, cooldown),
+            Ok(true),
+            "a probe that never reached it lets the next one probe"
+        );
+        breakers.record(&id, true, Outcome::TransportFailure, now, threshold, cooldown);
+        assert!(
+            breakers.admits(&id, now, cooldown).is_err(),
+            "a failed probe reopens it"
+        );
+        now += 31_000_000_000;
+        assert_eq!(breakers.admits(&id, now, cooldown), Ok(true));
+        breakers.record(&id, true, Outcome::Answered, now, threshold, cooldown);
+        assert_eq!(
+            breakers.admits(&id, now, cooldown),
+            Ok(false),
+            "an answered probe closes it"
+        );
+    }
 }
