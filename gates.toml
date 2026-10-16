@@ -188,6 +188,9 @@ negative = [
   "flush-skips-missing-pending-file",
   "loss-set-aside-after-quarantine",
   "shred-not-completed-at-open",
+  "shred-bypasses-journal",
+  "shreds-before-manifest-at-open",
+  "shred-incomplete-key-only",
 ]
 
 [[gate]]

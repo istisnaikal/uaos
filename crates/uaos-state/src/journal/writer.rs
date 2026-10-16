@@ -35,8 +35,11 @@
 //!   read the pending chunks back, rewritten the readable ones and journaled the rest;
 //! * a marker (`FLUSHED`), written atomically at open and then at most once per second, records
 //!   a durable point up to which every payload is durable or its loss journaled. It **never
-//!   moves while a loss is unreported**. Its presence also records that the journal coordinates
-//!   a store, so it cannot be opened without one ([`JournalError::PayloadsRequired`]);
+//!   moves while a loss is unreported**. Every journal keeps it, so an open copies only the
+//!   records after it. A separate flag file records that the journal coordinates a store, so it
+//!   cannot be opened without one ([`JournalError::PayloadsRequired`]);
+//! * a chunk is shredded through [`Journal::shred`], which records the shred, flushes it and
+//!   shreds while no other record can be appended;
 //! * while a loss is found but not yet journaled, the writer refuses records and flushes: no
 //!   record may become durable before the record that reports its payload lost. On open, the payloads of every record after it are read back, rewritten
 //!   and flushed before the previous run's records are made durable; an unreadable one is
@@ -64,7 +67,7 @@ use super::manifest::{
     Manifest, ManifestSchema, READER_VERSION, SegmentEntry, SegmentStatus, is_segment_file_name, segment_file_name,
 };
 use super::scan::{VerifiedRecord, genesis_hash, read_verified};
-use crate::chunks::{ChunkStore, LossCause, LostChunk};
+use crate::chunks::{ChunkStore, LossCause, LostChunk, ShredReport};
 
 /// Name of the data-directory lock file.
 pub const LOCK_FILE: &str = "uaos.lock";
@@ -77,6 +80,10 @@ pub const FLUSH_MARKER: &str = "FLUSHED";
 const MARKER_PREFIX: &str = "uaos.flushed/1";
 /// Second word of the marker while no record is durable.
 const MARKER_NONE: &str = "none";
+/// A file whose presence records that the journal coordinates a chunk store, so it cannot be
+/// opened without one ([`JournalError::PayloadsRequired`]). Separate from the marker, which every
+/// journal now keeps (review WP3.A1, third round, M1).
+pub const PAYLOADS_FLAG: &str = "PAYLOADS";
 /// How often the marker is rewritten. It bounds how much of the tail recovery reads back,
 /// never what recovery reports.
 const MARKER_INTERVAL: limits::Millis = limits::Millis(1_000);
@@ -290,11 +297,21 @@ impl Journal {
         })?;
         // A journal that has coordinated a chunk store must not be opened without it: the
         // previous run's tail would be made durable over payloads nobody checked (WP3.A1 L3).
-        if payloads.is_none() {
-            match fs.read(&dir.join(FLUSH_MARKER)) {
-                Ok(_) => return Err(JournalError::PayloadsRequired),
-                Err(FsError::NotFound { .. }) => {}
-                Err(e) => return Err(storage(e)),
+        let flagged = match fs.read(&dir.join(PAYLOADS_FLAG)) {
+            Ok(_) => true,
+            Err(FsError::NotFound { .. }) => false,
+            Err(e) => return Err(storage(e)),
+        };
+        match &payloads {
+            None if flagged => return Err(JournalError::PayloadsRequired),
+            None => {}
+            Some(store) => {
+                // Recorded before anything else: from now on this journal never opens without it.
+                if !flagged {
+                    fs.write_atomic(&dir.join(PAYLOADS_FLAG), b"uaos.payloads/1\n")
+                        .map_err(storage)?;
+                }
+                store.attach();
             }
         }
 
@@ -348,6 +365,7 @@ impl Journal {
         };
 
         let carried_tail = carried.is_some();
+        let obsolete = carried.as_ref().and_then(|tail| tail.obsolete.clone());
         let (active, active_bytes, unflushed, unflushed_first) = match carried {
             Some(tail) => (tail.file, tail.bytes, tail.lines, tail.first),
             None => (
@@ -388,20 +406,74 @@ impl Journal {
         // names the old copies, and the next open checks the same tail again. The marker must
         // exist before any record is accepted: it is also what makes the journal refuse to open
         // without its store (WP3.A1 L3).
-        journal.report_lost()?;
-        journal.sync()?;
-        journal.store_manifest_if_unstored()?;
+        journal.finish_open(obsolete, shreds_to_complete)?;
+        Ok(journal)
+    }
+
+    /// The steps that end an open, in an order that loses nothing whichever fails (see
+    /// `open_inner`): report losses, flush, store the manifest, tidy, complete shreds, mark.
+    fn finish_open(
+        &mut self,
+        obsolete: Option<String>,
+        shreds_to_complete: Vec<(PocketId, ChunkRef)>,
+    ) -> Result<(), JournalError> {
+        self.report_lost()?;
+        self.sync()?;
+        self.store_manifest_if_unstored()?;
+        // The old segment the copy replaced whole is named by no manifest now. Removing it is
+        // tidying only: if it fails, the next open quarantines it as an orphan (third round, M1).
+        if let Some(old) = obsolete {
+            let _orphaned_if_this_fails = self.fs.remove_file(&self.dir.join(old));
+        }
         // Only now are the shred records durable: completing a shred whose record a power loss
-        // could still take away would leave references to removed content unexplained.
-        if let Some(store) = &journal.payloads {
+        // could still take away would leave references to removed content unexplained. A shred
+        // is unfinished while a file of the pair or an older KEK version remains (third round,
+        // L3).
+        if let Some(store) = &self.payloads {
             for (pocket, chunk) in shreds_to_complete {
-                if store.has_pair(pocket, chunk).map_err(JournalError::Payload)? {
-                    store.shred(pocket, chunk).map_err(JournalError::Payload)?;
+                if store.shred_incomplete(pocket, chunk).map_err(JournalError::Payload)? {
+                    store.shred_now(pocket, chunk).map_err(JournalError::Payload)?;
                 }
             }
         }
-        journal.update_marker(true).map_err(storage)?;
-        Ok(journal)
+        self.update_marker(true).map_err(storage)?;
+        Ok(())
+    }
+
+    /// Shreds a chunk the way ADR-0018 requires: appends `record` (a `chunk.shredded` record
+    /// naming the chunk in metadata key `chunk`), flushes it, then shreds the chunk in the
+    /// attached store. No other record can be appended meanwhile (this holds the writer), and the
+    /// store forgets the chunk before removing its files, so a record appended afterwards that
+    /// references it is refused until the content is stored again (review WP3.A1, third round,
+    /// H1).
+    ///
+    /// # Errors
+    /// `PayloadsRequired` without a store; `InvalidRecord` for anything but such a record; as
+    /// [`Journal::append`] and [`Journal::sync`]; `Payload` if the shred itself fails, in which
+    /// case its record is durable and the next open completes it.
+    pub fn shred(&mut self, record: EventDraft) -> Result<ShredReport, JournalError> {
+        let Some(store) = self.payloads.clone() else {
+            return Err(JournalError::PayloadsRequired);
+        };
+        if record.event_type != types::CHUNK_SHREDDED {
+            return Err(JournalError::InvalidRecord(
+                "Journal::shred takes a chunk.shredded record",
+            ));
+        }
+        let pocket = record
+            .pocket_id
+            .ok_or(JournalError::InvalidRecord("a chunk.shredded record names its pocket"))?;
+        let chunk: ChunkRef = record
+            .metadata
+            .as_map()
+            .get(CHUNK_METADATA_KEY)
+            .and_then(|c| c.parse().ok())
+            .ok_or(JournalError::InvalidRecord(
+                "a chunk.shredded record names its chunk in metadata key `chunk`",
+            ))?;
+        self.append(record)?;
+        self.sync()?;
+        store.shred_now(pocket, chunk).map_err(JournalError::Payload)
     }
 
     /// Stores the in-memory manifest if it disowned contents that were not yet flushed.
@@ -673,10 +745,11 @@ impl Journal {
     /// # Errors
     /// The marker write failed; the previous marker, if any, is still true.
     fn update_marker(&mut self, force: bool) -> Result<(), FsError> {
-        let Some(store) = &self.payloads else {
-            return Ok(());
-        };
-        if !self.unreported.is_empty() || store.has_untaken_losses() || store.is_poisoned() || self.manifest_unstored {
+        let store_holds_back = self
+            .payloads
+            .as_ref()
+            .is_some_and(|store| store.has_untaken_losses() || store.is_poisoned());
+        if !self.unreported.is_empty() || store_holds_back || self.manifest_unstored {
             return Ok(());
         }
         let now = self.clock.mono().0;
@@ -932,6 +1005,9 @@ struct CarriedTail {
     first: u64,
     /// The last record known durable before them, if any.
     durable: Option<(u64, Sha256Digest)>,
+    /// The old segment's file when the copy replaced it whole; removed once the manifest is
+    /// stored.
+    obsolete: Option<String>,
 }
 
 /// The manifest of a journal that does not exist yet, with a fresh random identifier. Refuses
@@ -1005,11 +1081,18 @@ fn carry_previous_tail(
         ));
     };
     let tail = &bytes[from..to];
-    if let Some(old) = manifest.segments.last_mut() {
-        old.status = SegmentStatus::Suspect;
-        old.last_seq = proven_end.checked_sub(1).filter(|l| *l >= first).map(Seq);
-        old.last_hash = old.last_seq.and_then(|l| hash_of(l.0));
-    }
+    let obsolete = if proven_end == first {
+        // The old file would claim no record: the copy replaces it in the manifest (third
+        // round, M1), and the file goes once that manifest is durable.
+        manifest.segments.pop().map(|old| old.file)
+    } else {
+        if let Some(old) = manifest.segments.last_mut() {
+            old.status = SegmentStatus::Suspect;
+            old.last_seq = proven_end.checked_sub(1).filter(|l| *l >= first).map(Seq);
+            old.last_hash = old.last_seq.and_then(|l| hash_of(l.0));
+        }
+        None
+    };
     let mut file = start_segment_file(fs, dir, manifest, proven_end)?;
     file.append(tail).map_err(storage)?;
     let lines = tail.split_inclusive(|b| *b == b'\n').map(<[u8]>::to_vec).collect();
@@ -1022,6 +1105,7 @@ fn carry_previous_tail(
         bytes: u64::try_from(tail.len()).unwrap_or(u64::MAX),
         first: proven_end,
         durable,
+        obsolete,
     }))
 }
 
