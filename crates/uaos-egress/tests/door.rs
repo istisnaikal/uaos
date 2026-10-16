@@ -36,8 +36,8 @@ use uaos_contracts::time::WallTime;
 use uaos_egress::addr::Blocked;
 use uaos_egress::resolve::Resolution;
 use uaos_egress::{
-    Credential, Door, DoorLimits, EgressError, EgressRequest, HostName, MAX_ADDRESSES_TRIED, Resolve, Scheme, Trust,
-    Upstream, UpstreamError, UpstreamId,
+    CREDENTIAL_HEADERS, Credential, Door, DoorLimits, EgressError, EgressRequest, HostName, MAX_ADDRESSES_TRIED,
+    Resolve, Scheme, Trust, Upstream, UpstreamError, UpstreamId,
 };
 use uaos_platform::sim::SimClock;
 
@@ -182,6 +182,17 @@ fn credential() -> Credential {
         HeaderName::from_static("x-api-key"),
         HeaderValue::from_static(CREDENTIAL_VALUE),
     )
+}
+
+/// Trust in an authority nothing presents: for upstreams that are never reached.
+fn throwaway_root() -> Trust {
+    Trust::Roots(vec![
+        rcgen::generate_simple_self_signed(vec![MOCK_HOST.to_owned()])
+            .unwrap()
+            .cert
+            .der()
+            .clone(),
+    ])
 }
 
 /// A port nothing listens on.
@@ -345,7 +356,7 @@ async fn private_answers_are_refused_unless_the_upstream_is_declared_private() {
         scheme: Scheme::Https,
         pinned: Vec::new(),
         allow_private: false,
-        trust: Trust::Roots(Vec::new()),
+        trust: throwaway_root(),
     };
     let door = door(
         vec![named("loop", "localhost"), named("rebind", "rebind.example")],
@@ -647,7 +658,7 @@ async fn a_private_upstream_never_reaches_link_local_or_special_ranges() {
         scheme: Scheme::Https,
         pinned: Vec::new(),
         allow_private: true,
-        trust: Trust::Roots(Vec::new()),
+        trust: throwaway_root(),
     };
     // Short, so a door that wrongly dials these addresses fails fast instead of waiting.
     let limits = DoorLimits {
@@ -809,19 +820,13 @@ async fn credential_bearing_headers_from_the_caller_are_refused() {
         Table::default(),
         DoorLimits::default(),
     );
-    for (n, (name, value)) in [
-        ("authorization", "Bearer client-key-for-tests"),
-        ("cookie", "session=for-tests"),
-        ("x-goog-api-key", "for-tests"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (n, name) in CREDENTIAL_HEADERS.iter().enumerate() {
         let n = u64::try_from(n).unwrap() + 1;
         let mut carrying = request(op(n), "mock");
-        carrying
-            .headers
-            .insert(HeaderName::from_static(name), HeaderValue::from_static(value));
+        carrying.headers.insert(
+            HeaderName::from_static(name),
+            HeaderValue::from_static("client-value-for-tests"),
+        );
         assert_eq!(
             door.send(op(n), carrying, Some(credential())).await.unwrap_err(),
             EgressError::Refused("the request carries a credential-bearing header"),
@@ -879,4 +884,85 @@ async fn a_connection_attempt_tries_a_bounded_number_of_addresses() {
         Err(EgressError::Unreachable(_))
     ));
     assert_eq!(door.counters().connects, u64::try_from(MAX_ADDRESSES_TRIED).unwrap());
+}
+
+// ── Regressions from the second WP3.A5 review ──────────────────────────────────────────────
+
+/// Round 2, H1: a probe whose caller gives up does not leave the circuit refusing forever; the
+/// next attempt probes again.
+#[tokio::test]
+async fn a_cancelled_probe_lets_the_next_attempt_probe() {
+    // Accepts TCP and never speaks, so every TLS handshake hangs until the connect timeout.
+    let silent = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = silent.local_addr().unwrap().port();
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let keep = Arc::clone(&held);
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = silent.accept().await {
+            keep.lock().unwrap().push(tcp);
+        }
+    });
+    let issued = rcgen::generate_simple_self_signed(vec![MOCK_HOST.to_owned()]).unwrap();
+    let clock = clock();
+    let shared: Arc<dyn uaos_platform::Clock> = clock.clone();
+    let limits = DoorLimits {
+        connect_timeout: Duration::from_millis(300),
+        breaker_threshold: 1,
+        breaker_cooldown: Duration::from_secs(30),
+        ..DoorLimits::default()
+    };
+    let door = Door::new(
+        vec![mock_upstream(port, issued.cert.der().clone())],
+        Arc::new(Table::default()),
+        shared,
+        TokioExecutor::new(),
+        limits,
+    )
+    .unwrap();
+    assert_eq!(
+        door.send(op(1), request(op(1), "mock"), None).await.unwrap_err(),
+        EgressError::Timeout
+    );
+    assert!(matches!(
+        door.send(op(2), request(op(2), "mock"), None).await,
+        Err(EgressError::CircuitOpen { .. })
+    ));
+    clock.advance(31_000_000_000);
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(50),
+        door.send(op(3), request(op(3), "mock"), None),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the probe was expected to still be in flight");
+    let before = door.counters().connects;
+    let next = door.send(op(4), request(op(4), "mock"), None).await;
+    assert!(
+        !matches!(next, Err(EgressError::CircuitOpen { .. })),
+        "a cancelled probe left the circuit refusing: {next:?}"
+    );
+    assert_eq!(door.counters().connects, before + 1, "the next attempt probed");
+}
+
+/// Round 2, L3: an upstream that trusts no root at all is refused when the door is built, not
+/// discovered as a stream of handshake failures.
+#[test]
+fn an_upstream_with_no_root_to_trust_is_refused() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    let mut up = Upstream::https("p", HostName::parse("api.example.com").unwrap());
+    up.trust = Trust::Roots(Vec::new());
+    assert_eq!(
+        Door::new(
+            vec![up],
+            Arc::new(Table::default()),
+            clock(),
+            TokioExecutor::new(),
+            DoorLimits::default()
+        )
+        .unwrap_err(),
+        EgressError::Tls("an upstream declares no root certificate to trust")
+    );
 }

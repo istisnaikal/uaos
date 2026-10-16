@@ -51,16 +51,40 @@ pub enum Blocked {
     /// A public address toward a plain-HTTP upstream, which may only reach this machine or the
     /// local network.
     PublicOverPlaintext,
+    /// A cloud provider's metadata service on an IPv6 unique-local address (`fd00:ec2::254`,
+    /// `fd20:ce::254`).
+    CloudMetadata,
 }
 
-impl Blocked {
-    /// Whether the range is on this machine or the local network: loopback, private
-    /// (RFC 1918) and unique-local. Only these may be admitted by a declared private upstream;
-    /// link-local stays refused because it holds the cloud metadata service.
-    #[must_use]
-    pub fn is_local_network(self) -> bool {
-        matches!(self, Self::Loopback | Self::Private | Self::UniqueLocal)
+/// Whether `ip` is on this machine or the local network: IPv4 loopback or private (RFC 1918),
+/// `::1`, unique-local IPv6 (`fc00::/7`) other than cloud metadata endpoints, and IPv4-mapped
+/// forms of those IPv4 addresses. Only these may be admitted by a declared private upstream;
+/// link-local stays refused because it holds the cloud metadata service.
+///
+/// IPv6 forms that only *embed* an IPv4 address (IPv4-compatible, NAT64, 6to4) are never local,
+/// whatever the inner address: their traffic leaves the machine through a relay, a translator or
+/// the default route (review WP3.A5, round 2, M1). [`classify`] still reports the inner range
+/// for them.
+#[must_use]
+pub fn is_local_network(ip: IpAddr) -> bool {
+    if let IpAddr::V6(v6) = ip
+        && embeds_ipv4(v6)
+    {
+        return false;
     }
+    matches!(
+        classify(ip),
+        Reach::Blocked(Blocked::Loopback | Blocked::Private | Blocked::UniqueLocal)
+    )
+}
+
+/// IPv4-compatible (`::a.b.c.d`, not `::` or `::1`), NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`)
+/// and 6to4 (`2002::/16`) addresses.
+fn embeds_ipv4(ip: Ipv6Addr) -> bool {
+    (in_v6(ip, [0; 8], 96) && !ip.is_unspecified() && !ip.is_loopback())
+        || in_v6(ip, [0x64, 0xff9b, 0, 0, 0, 0, 0, 0], 96)
+        || in_v6(ip, [0x64, 0xff9b, 1, 0, 0, 0, 0, 0], 48)
+        || in_v6(ip, [0x2002, 0, 0, 0, 0, 0, 0, 0], 16)
 }
 
 /// The verdict for one address.
@@ -133,7 +157,10 @@ fn embedded(v4: Ipv4Addr, otherwise: Blocked) -> Reach {
 }
 
 fn classify_v6(ip: Ipv6Addr) -> Reach {
-    const RULES: [([u16; 8], u32, Blocked); 8] = [
+    const RULES: [([u16; 8], u32, Blocked); 10] = [
+        // Cloud metadata services inside fc00::/7, before the unique-local rule (round 2, L2).
+        ([0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254], 128, Blocked::CloudMetadata),
+        ([0xfd20, 0x00ce, 0, 0, 0, 0, 0, 0x254], 128, Blocked::CloudMetadata),
         ([0x100, 0, 0, 0, 0, 0, 0, 0], 64, Blocked::Discard),
         ([0x2001, 0xdb8, 0, 0, 0, 0, 0, 0], 32, Blocked::Documentation),
         // RFC 9637: inside 2000::/3, but not globally reachable.
@@ -216,6 +243,28 @@ mod tests {
             ("255.255.255.255", Blocked::Reserved),
         ] {
             assert_eq!(v(addr), Reach::Blocked(why), "{addr}");
+        }
+    }
+
+    #[test]
+    fn cloud_metadata_on_ipv6_is_refused_and_never_local() {
+        for addr in ["fd00:ec2::254", "fd20:ce::254"] {
+            assert_eq!(v(addr), Reach::Blocked(Blocked::CloudMetadata), "{addr}");
+            assert!(!is_local_network(addr.parse().unwrap()), "{addr}");
+        }
+        assert!(is_local_network("fd12:3456::1".parse().unwrap()));
+        assert!(is_local_network("::1".parse().unwrap()));
+        for embedded in [
+            "2002:7f00:1::1",
+            "64:ff9b::7f00:1",
+            "::7f00:1",
+            "2002:c0a8:101::1",
+            "64:ff9b::a00:5",
+        ] {
+            assert!(
+                !is_local_network(embedded.parse().unwrap()),
+                "{embedded} counted as local"
+            );
         }
     }
 
@@ -303,12 +352,31 @@ mod tests {
             }
         }
 
-        /// Only loopback, private and unique-local ranges count as the local network.
+        /// Only loopback and private IPv4 ranges count as the local network, and an IPv4-mapped
+        /// address counts exactly when its IPv4 address does.
         #[test]
         fn the_local_network_is_exactly_loopback_private_and_unique_local(bits in any::<u32>()) {
             let v4 = Ipv4Addr::from(bits);
-            let local = matches!(classify(IpAddr::V4(v4)), Reach::Blocked(why) if why.is_local_network());
-            prop_assert_eq!(local, v4.is_loopback() || v4.is_private());
+            let local = v4.is_loopback() || v4.is_private();
+            prop_assert_eq!(is_local_network(IpAddr::V4(v4)), local);
+            prop_assert_eq!(is_local_network(IpAddr::V6(v4.to_ipv6_mapped())), local);
+        }
+
+        /// IPv6 forms that embed an IPv4 address are never the local network, whatever the inner
+        /// address (round 2, M1).
+        #[test]
+        fn embedding_forms_are_never_local(inner in any::<u32>(), tail in any::<u64>()) {
+            let v4 = u128::from(inner);
+            for ip in [
+                (0x64_u128 << 112) | (0xff9b_u128 << 96) | v4,
+                (0x64_u128 << 112) | (0xff9b_u128 << 96) | (1_u128 << 80) | u128::from(tail),
+                (0x2002_u128 << 112) | (v4 << 80) | u128::from(tail),
+            ] {
+                prop_assert!(!is_local_network(IpAddr::V6(Ipv6Addr::from(ip))), "{}", Ipv6Addr::from(ip));
+            }
+            if inner > 1 {
+                prop_assert!(!is_local_network(IpAddr::V6(Ipv6Addr::from(v4))), "IPv4-compatible");
+            }
         }
 
         /// The standard library's own classifications are never contradicted.

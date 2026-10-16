@@ -8,7 +8,7 @@ use std::net::IpAddr;
 
 use rustls_pki_types::CertificateDer;
 
-use crate::addr::{Blocked, Reach, classify};
+use crate::addr::{Blocked, Reach, classify, is_local_network};
 use crate::host::HostName;
 
 /// The name routes use for an upstream (for example `anthropic`).
@@ -125,7 +125,7 @@ impl Upstream {
             // Unreachable after `validate`, which pins plain HTTP to local addresses; kept so the
             // dial path never depends on that check alone.
             Reach::Public => Err(Blocked::PublicOverPlaintext),
-            Reach::Blocked(why) if self.allow_private && why.is_local_network() => Ok(()),
+            Reach::Blocked(_) if self.allow_private && is_local_network(ip) => Ok(()),
             Reach::Blocked(why) => Err(why),
         }
     }
@@ -145,11 +145,66 @@ impl Upstream {
             if self.pinned.is_empty() {
                 return Err(UpstreamError::PlaintextNeedsPinned);
             }
-            let local = |ip: &IpAddr| matches!(classify(*ip), Reach::Blocked(why) if why.is_local_network());
+            let local = |ip: &IpAddr| is_local_network(*ip);
             if !self.pinned.iter().all(local) {
                 return Err(UpstreamError::PlaintextToPublic);
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain(pinned: &str) -> Upstream {
+        Upstream {
+            id: UpstreamId::new("local"),
+            host: HostName::parse("ollama.lan").unwrap(),
+            port: 11434,
+            scheme: Scheme::Http,
+            pinned: vec![pinned.parse().unwrap()],
+            allow_private: true,
+            trust: Trust::System,
+        }
+    }
+
+    /// The dial path refuses a public address for plain HTTP on its own, whatever `validate`
+    /// would have said (review WP3.A5, round 2, L5).
+    #[test]
+    fn the_dial_path_refuses_public_addresses_over_plaintext() {
+        let up = plain("127.0.0.1");
+        assert_eq!(up.admits("8.8.8.8".parse().unwrap()), Err(Blocked::PublicOverPlaintext));
+        assert_eq!(
+            up.admits("2606:4700::1111".parse().unwrap()),
+            Err(Blocked::PublicOverPlaintext)
+        );
+        assert_eq!(up.admits("127.0.0.1".parse().unwrap()), Ok(()));
+        assert_eq!(up.admits("169.254.169.254".parse().unwrap()), Err(Blocked::LinkLocal));
+        assert_eq!(up.admits("64:ff9b::7f00:1".parse().unwrap()), Err(Blocked::Loopback));
+    }
+
+    /// Embedded IPv6 forms and IPv6 metadata endpoints are refused for plain HTTP (round 2, M1, L2).
+    #[test]
+    fn plaintext_is_refused_toward_embedded_forms_and_ipv6_metadata() {
+        for refused in [
+            "2002:7f00:1::1",
+            "64:ff9b::7f00:1",
+            "::7f00:1",
+            "2002:c0a8:101::1",
+            "64:ff9b::a00:5",
+            "fd00:ec2::254",
+            "fd20:ce::254",
+        ] {
+            assert_eq!(
+                plain(refused).validate(),
+                Err(UpstreamError::PlaintextToPublic),
+                "{refused}"
+            );
+        }
+        for allowed in ["::1", "::ffff:127.0.0.1", "fd12:3456::1", "192.168.1.20"] {
+            assert_eq!(plain(allowed).validate(), Ok(()), "{allowed}");
+        }
     }
 }

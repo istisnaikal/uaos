@@ -46,7 +46,10 @@ pub mod resolve;
 pub mod upstream;
 
 pub use connect::{CounterSnapshot, MAX_ADDRESSES_TRIED, Stream};
-pub use door::{Credential, Door, DoorLimits, EgressRequest, EgressResponse, MAX_IDLE_PER_UPSTREAM, REPLAY_WINDOW};
+pub use door::{
+    CREDENTIAL_HEADERS, Credential, Door, DoorLimits, EgressRequest, EgressResponse, MAX_IDLE_PER_UPSTREAM,
+    REPLAY_WINDOW,
+};
 pub use host::{HostError, HostName};
 pub use resolve::{Resolve, SystemResolver};
 pub use upstream::{Scheme, Trust, Upstream, UpstreamError, UpstreamId};
