@@ -185,6 +185,10 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - A request carrying one of the listed credential-bearing headers (`authorization`,
       `cookie`, provider key headers and others) is refused, before anything is stripped.
     - The provider credential is inserted last; its value is never printed.
+    - Errors say whether the request may have reached the provider: `Unreachable` and
+      `Timeout` mean nothing was sent (retryable); new codes `EGRESS_INTERRUPTED` (cut off or
+      unanswered after the request was sent) and `EGRESS_UNUSABLE_RESPONSE` (answered in a form
+      the door does not pass on) are not retryable and say the provider may have billed it.
     - One send per Operation; a request bound to another Operation is refused.
     - A circuit breaker per upstream counts transport failures and lets one probe through
       after its cooldown; a probe whose caller gives up lets the next attempt probe, and a
@@ -232,13 +236,13 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     transitively, from network, TLS and async-I/O crates (new `[ring1] ban`, enforced by
     `cargo xtask arch-check`).
   - **`deny.toml`** bans `ring`.
-  - **Seeded violations (52):** `egress-dials-private-range`, `egress-numeric-host`,
+  - **Seeded violations (53):** `egress-dials-private-range`, `egress-numeric-host`,
     `egress-private-reaches-link-local`, `egress-plaintext-resolved`,
     `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel`,
     `egress-embedded-local`, `egress-sends-trace`, `egress-forwards-switching-protocols`,
     `egress-forwards-contradicting-length`, `egress-forwards-unknown-transfer-coding`,
     `egress-forwards-repeated-length`, `egress-forwards-bodiless-length`,
-    `egress-ctor-outside-root`,
+    `egress-delivered-reported-unsent`, `egress-ctor-outside-root`,
     `net-dns-outside-egress`,
     `net-resolver-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
     `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor`,
@@ -254,12 +258,12 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `net-unix-connect-addr-outside-egress`, `net-tokio-unix-connect-outside-egress`,
     `net-unix-socket-connect-outside-egress`; on Windows only (not run in CI)
     `net-named-pipe-outside-egress`, `osfs-doubled-separator-unc` and `osfs-bare-volume`.
-  - **Review:** `docs/reviews/WP3.A5-egress.md`, fifteen rounds, all resolved: 2 High,
+  - **Review:** `docs/reviews/WP3.A5-egress.md`, sixteen rounds, all resolved: 2 High,
     4 Medium, 9 Low; then 1 High, 2 Medium, 7 Low; then 1 Medium, 5 Low; then 1 Medium, 5 Low;
     then 2 Medium, 4 Low; then 2 Medium, 2 Low; then 1 High, 2 Medium, 3 Low; then 1 Medium,
     7 Low; then 4 Low; then 2 Low; then 3 Low; then 2 Low; then 1 Medium, 2 Low; then 2 Low;
-    then 2 Low. Two fixes rest on ADR-0013 Amendment 1, accepted by the maintainer on
-    2026-10-16.
+    then 2 Low; then 1 Medium. Two fixes rest on ADR-0013 Amendment 1, accepted by the
+    maintainer on 2026-10-16.
 - Dependencies for the ADR-0013 stack: tokio, hyper 1, hyper-util, http, rustls 0.23
   (aws-lc-rs only), tokio-rustls, rustls-native-certs, and rcgen for tests only.
   - 48 cargo-vet exemptions, each with a written reason (the unnoted baseline is unchanged);

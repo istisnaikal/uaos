@@ -260,17 +260,23 @@ registry! {
         "error-egress-blocked", "The destination resolved only to private or special-purpose addresses, so UAOS did not connect.",
         "If this is a server on your own machine or network that you trust, declare it as a private upstream in the profile.";
     EGRESS_UNREACHABLE = Egress 2, Provider, S3, retryable: true, leak: false,
-        "error-egress-unreachable", "The provider could not be reached: name resolution, connection or TLS failed.",
+        "error-egress-unreachable", "The provider could not be reached: name resolution, connection or TLS failed, and nothing was sent.",
         "Check the network, then run `uaos doctor --online` and retry.";
     EGRESS_TIMEOUT = Egress 3, Provider, S3, retryable: true, leak: false,
-        "error-egress-timeout", "The provider did not answer within the configured time.",
-        "Retry; if it persists check the provider's status page.";
+        "error-egress-timeout", "Reaching the provider timed out (name resolution, connection or the TLS handshake), and nothing was sent.",
+        "Retry; if it persists check the network and the provider's status page.";
     EGRESS_CIRCUIT_OPEN = Egress 4, Provider, S3, retryable: true, leak: false,
         "error-egress-circuit-open", "Recent attempts to this provider failed, so UAOS paused new attempts for a short time.",
         "Retry after the indicated delay.";
     EGRESS_REFUSED = Egress 5, Internal, S2, retryable: false, leak: false,
         "error-egress-refused", "UAOS refused to send a request that broke the egress door's rules; nothing was sent.",
         "Report this with `uaos trace`; it indicates a defect, not a problem with your request.";
+    EGRESS_INTERRUPTED = Egress 6, Provider, S3, retryable: false, leak: false,
+        "error-egress-interrupted", "The connection to the provider failed, or no answer came in time, after the request was sent: the provider may have received it and billed it.",
+        "Check the Operation with `uaos trace` before retrying; a retry sends the request again.";
+    EGRESS_UNUSABLE_RESPONSE = Egress 7, Provider, S3, retryable: false, leak: false,
+        "error-egress-unusable-response", "The provider answered in a form UAOS does not pass on (an unrequested protocol switch or transfer coding); it may have processed and billed the request.",
+        "Report this with `uaos trace`; a retry sends the same request and gets the same answer.";
     CONFIG_INVALID = Config 1, Config, S3, retryable: false, leak: false,
         "error-config-invalid", "The configuration failed validation and was not applied.",
         "Run `uaos profile check` for the exact field and reason.";

@@ -201,6 +201,17 @@ on the PR-5 branch.
     the circuit is open, `retry_after` is the time left in the cooldown; while a probe is in
     flight, it is a hint (`PROBE_RECHECK`, 1 s), because the probe may settle sooner or take up
     to the response timeout.
+- **Errors say whether the request may have reached the provider** (review WP3.A5, round 16,
+  M1), because the runtime settles a reservation by it (ADR-0002, T6) and a retry is a new billed
+  call:
+  - nothing sent: `Unreachable` (resolution, connection or TLS failed, or the connection closed
+    with the request handed back unsent) and `Timeout` (resolution, connect or handshake timed
+    out), both retryable;
+  - possibly received: `Interrupted` (`EGRESS_INTERRUPTED`), when the connection failed or no
+    answer came within the response timeout after the request was sent; not retryable;
+  - answered but not passed on: `Unusable` (`EGRESS_UNUSABLE_RESPONSE`), for a `101` or a
+    transfer coding the door does not decode; not retryable, since the same request gets the
+    same answer.
 - **The credential's value** is marked sensitive when the `Credential` is built and never
   appears in its `Debug` output.
 - **Connection tasks.** They run on an executor the caller passes in. The runtime passes its
@@ -320,7 +331,8 @@ on the PR-5 branch.
     `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel`,
     `egress-embedded-local`, `egress-sends-trace`, `egress-forwards-switching-protocols` and
     `egress-forwards-contradicting-length`, `egress-forwards-unknown-transfer-coding` and
-    `egress-forwards-repeated-length` and `egress-forwards-bodiless-length`, and
+    `egress-forwards-repeated-length`, `egress-forwards-bodiless-length` and
+    `egress-delivered-reported-unsent`, and
     `osfs-doubled-separator-unc` and `osfs-bare-volume` (Windows) for the platform's file
     system;
   - for the clippy bans: `egress-ctor-outside-root`, `net-dns-outside-egress`,
@@ -355,7 +367,7 @@ on the PR-5 branch.
   - nothing the standard library calls special is ever allowed.
 - **The ban canaries** (`tests/bans.rs`), one per `clippy.toml` entry; the Unix ones were
   also cross-checked with clippy for a Linux target (all fulfilled; a removed ban fails).
-- **27 integration tests** against loopback mocks. They read what the mock received and the
+- **28 integration tests** against loopback mocks. They read what the mock received and the
   door's own counters, and cover:
   - the header policy;
   - op binding and replay;
@@ -378,6 +390,9 @@ on the PR-5 branch.
     returned as errors (four spellings); a `content-length` beside `transfer-encoding`
     dropped, a repeated one forwarded once, none kept on a `204`, and an unchecked one on a
     HEAD answer or a `304` forwarded only as one length in digits;
+  - errors that say whether the request may have reached the provider: an unusable answer and
+    a connection cut after the request was sent are not retryable, a connection that never
+    opened is;
   - the address cap;
   - the credential never printed;
   - **a certificate naming issuer, OCSP and CRL URLs on a local listener: the handshake fails
