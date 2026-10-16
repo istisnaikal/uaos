@@ -11,8 +11,8 @@ accepted with a reason. The property test, extended as M6 asked, then found four
 (N1–N4), all fixed and pinned. One item needs a maintainer decision (L7). A second V1 review of
 the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up,
 a third found 1 High, 3 Medium and 5 Low, a fourth 2 Medium and 4 Low, a fifth 2 Medium and
-3 Low, a sixth 4 Low, a seventh 1 Medium and 2 Low, an eighth 1 Low, and a ninth 4 Low; all are
-fixed below.
+3 Low, a sixth 4 Low, a seventh 1 Medium and 2 Low, an eighth 1 Low, a ninth 4 Low, and a tenth
+4 Low; all are fixed below.
 The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
@@ -276,3 +276,33 @@ and the "tampering" changed nothing. It now flips the byte; 600 runs passed.
 **Verified locally (Windows, dedicated target directory):** 63 durability tests and the rest of
 `uaos-state`, `uaos-testkit` and `uaos-ledger`; workspace clippy with warnings denied; 3 × 4,000
 and 2 × 20,000 schedules of each property, in release; the 31 `journal-durability` negatives.
+
+## Tenth review (2026-10-16)
+
+**Reviewed:** `fcd2393` (on `555494b`) by a fresh-context agent, in a scratch export.
+**Result:** 0 High · 0 Medium · 4 Low. No order of failures through the journal's own paths lost
+a flushed record; the ninth round's refusal holds, and the three rebuilt tests still reach their
+states and fail with their defects restored.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | The chunk store's public loss API worked on a coordinated store. A caller that called `recover_pending` and `take_lost` after a failed payload flush took the loss away from the journal: `recover` reported nothing and the record became durable with an unreadable payload and no `chunk.lost`. A caller's own failed `sync_pending` followed by its own `recover_pending` let `sync` make the record durable before its loss record | With a store attached, `recover_pending`, `take_lost` (now returning a `Result`) and `verify_and_sync` refuse callers with `LossesThroughJournal`; the journal uses crate-internal versions. A flush also refuses while the store holds a loss the journal has not taken | `r10_l1_a_coordinated_stores_losses_go_through_its_journal` (both of the reviewer's scenarios); negative `store-losses-taken-by-caller` **PROVEN** |
+| L2 | Reporting losses at open removed from the front of a `Vec`: quadratic in the records that reference one lost chunk (27 s at 40,000 records in release) | The unreported list is a `VecDeque`, taken from the front in O(1). The `chunk.lost` records written at open without rotating are stated in ADR-0018's "Not modelled" | `r10_l2_every_loss_at_open_is_journaled_and_the_list_is_bounded` (1,124 records referencing one lost chunk: every one journaled, the latest `MAX_LOST_LISTED` listed); linear time by construction |
+| L3 | The property tests' oracles accepted a store that loses every payload, as long as each loss is reported: after a crash they checked only that records survived, and nothing checked progress | After a process crash, every acknowledged record that survived must keep a readable payload unless a flush failure was armed after it was acknowledged (tracked per record) or a later shred removed it. After a power loss, only a `chunk.lost` record that survived the power loss excuses a flushed record's payload. A recovery with no fault armed must succeed and leave neither journal nor store refusing work | The reviewer's never-writes store now fails both properties (it passed 4,000 of each before); 52,000 schedules of each pass on the final code |
+| L4 | `claims.md` says "except those ADR-0018 lists", but the list missed findings fixed by construction: the first round's M1, L1 and part of L4, the second round's pre-existing `get` race, and the fourth round's L2 slot part | Added to ADR-0018's list, with this round's L2; the first round's L4 list bound now has a test (above) | review of the text |
+
+**Found by the stronger schedules.** On their first run the new oracles found that `recover`
+treated a poisoned store only while the writer was healthy (the fourth round's L1 fix). With the
+writer out of space and the store poisoned by a failed flush of its own, `recover` rotated the
+segment, returned `Ok`, and left the store refusing every put until a later flush failed and a
+second recovery ran. No record lost its payload; work stopped. `recover` now recovers the store
+first, whatever state the writer is in, and takes its losses before any branch could flush the
+records that reference them. Pinned by `r10_a_recovery_out_of_space_also_recovers_a_poisoned_store`
+and the negative `recovery-leaves-store-poisoned` **PROVEN**; with the persisted seeds removed,
+both properties find the old behaviour within 4,000 schedules.
+
+**Found while verifying.** The negative `shred-bypasses-journal` stopped biting: its seed anchor, `if self.attached.load(Ordering::SeqCst) {`, now also matched the new refusal above it, and the runner replaced the first match. The anchor names its own site again, and the runner now refuses an anchor that occurs more than once in its file, so a seed can no longer land on the wrong site silently; every anchor in the file is unique.
+
+**Verified locally (Windows, dedicated target directory):** 66 durability tests and the rest of
+`uaos-state`, `uaos-testkit` and `uaos-ledger`; workspace clippy with warnings denied; 3 × 4,000
+and 2 × 20,000 schedules of each property, in release; the 33 `journal-durability` negatives.

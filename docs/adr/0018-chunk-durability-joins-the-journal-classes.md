@@ -130,7 +130,13 @@ record. What follows describes the code after those fixes.
 - **Decision 3.**
   - **Losses are journaled before their records are durable.** The `chunk.lost` records are
     appended before the flush that makes the records they report durable, so one flush covers
-    both. While a found loss is not yet journaled, the writer refuses records and flushes.
+    both. While a found loss is not yet journaled, the writer refuses records and flushes, and
+    a flush also refuses while the store holds a loss the journal has not taken. A coordinated
+    store's recovery and losses belong to its journal: `ChunkStore::recover_pending`,
+    `take_lost` and `verify_and_sync` refuse callers (`LossesThroughJournal`), since a loss a
+    caller took would never get its record, and `Journal::recover` recovers a poisoned store
+    first, whatever state the writer is in (tenth review, L1, and a defect its stronger
+    schedules found).
   - **Durable point.** A one-line marker (`journal/FLUSHED`), written atomically at open and
     then at most once per second, names the last flushed record. Every journal keeps one, with
     or without a store. A separate flag file (`journal/PAYLOADS`) records that the journal
@@ -217,15 +223,20 @@ record. What follows describes the code after those fixes.
   flush either drops the unflushed bytes, or keeps serving them without ever making them durable.
   - **Flush-ordering scenario.** A flush fails at every possible step, then the power goes. A
     record at or before `flushed_through` must have a readable payload.
-  - **Regression tests.** One for each finding of the nine review rounds fixed in code, and
+  - **Regression tests.** One for each finding of the ten review rounds fixed in code, and
     one for each defect the extended schedules found afterwards. Each round-four test was
     checked to fail with its fix reverted. These are fixed by construction, with no test that
-    fails when they are reverted: second round L3 (losses set aside before quarantine) and L4 (a
-    concurrent put between two recovery steps); third round M3 (the stripe count), the marker
+    fails when they are reverted: first round M1 (a chunk is enrolled in `pending` before its
+    slot opens), L1 (the slot is a guard released on drop) and the part of L4 that indexes
+    shreds and earlier reports once at open; second round L3 (losses set aside before
+    quarantine), L4 (a concurrent put between two recovery steps) and the pre-existing `get`
+    race (`get` holds the rotation lock shared); third round M3 (the stripe count), the marker
     half of M1 (restarts are also held flat by removing the replaced segment), the data-file
     half of L3, and two parts of L4 (recovery clears only what it saw; `prepare` poisons);
     fifth round, the flush window, which closes the microseconds between a concurrent write's
-    failure and its poisoning (the generation check it completes is tested).
+    failure and its poisoning (the generation check it completes is tested); fourth round L2's
+    slot part (a shred marks its chunk under the chunk's slot); tenth round L2 (losses found at
+    open are reported in linear time).
   - **Random crash schedules.** Under three flush policies (flushes only when asked, strict,
     and a window that falls due, so appends flush on their own as in production): writes,
     repeated payloads, write-ahead shreds (their re-wraps
@@ -235,10 +246,16 @@ record. What follows describes the code after those fixes.
     lane runs 64 cases of this property and of the next one: enough for a regression most
     schedules reach, not for one only rare schedules reach. The nightly lane runs 20,000 of each
     on all three operating systems (about a minute each in release on the reference machine).
-    52,000 of each ran locally on the final code. Every acknowledged record survives a process crash (except records that existed only
-    in memory after a flush and its rewrite both failed, ADR-0003). Every flushed record's
-    payload survives a power loss unless its loss was journaled first. No surviving record's
-    payload is unreadable without a `chunk.lost` record.
+    52,000 of each ran locally on the final code. Every acknowledged record survives a process
+    crash (except records that existed only in memory after a flush and its rewrite both
+    failed, ADR-0003), and so does its payload, unless a flush failure was armed after the
+    record was acknowledged or a later shred removed it: a reported loss alone does not excuse
+    it. Every flushed record's payload survives a power loss unless a `chunk.lost` record that
+    itself survived the power loss names it. No surviving record's payload is unreadable
+    without a `chunk.lost` record. A recovery with no fault armed succeeds and leaves neither
+    the journal nor the store refusing work. Before the tenth review the oracles accepted a
+    store that never wrote a payload, as long as every loss was reported; now both properties
+    fail on it, and they found round four's recovery of a poisoned store incomplete.
   - **Shred schedules.** A second property runs the same operations plus records that reference
     earlier content without storing it again, under the same three policies, and checks two
     more things: no record referencing content is written after a written shred record of it
@@ -246,16 +263,19 @@ record. What follows describes the code after those fixes.
     record uses leaves the content unreadable and one KEK version alive. The first schedule
     could not see the seventh review's M1; this one fails within seconds with it reverted.
 
-- **Gate self-test.** The `journal-durability` gate lists thirty-one seeded violations in
-  `gates.toml`: thirty for this ADR and P1's `journal-ack-without-write`. Of the thirty, four
-  come from this ADR's own verification plan (`chunk-flushed-before-sync`,
+- **Gate self-test.** The `journal-durability` gate lists thirty-three seeded violations in
+  `gates.toml`: thirty-two for this ADR and P1's `journal-ack-without-write`. Of the
+  thirty-two, four come from this ADR's own verification plan (`chunk-flushed-before-sync`,
   `intent-before-chunk-write`, `chunk-put-pair-race`, and `chunk-put-shared-temp`, which checks
-  temporary naming only), and twenty-six from the classes the review rounds and the crash
+  temporary naming only), and twenty-eight from the classes the review rounds and the crash
   schedules found: every round but the eighth, which added a property test instead.
 - **Not modelled, stated plainly.** `SimFs` cannot model a failed directory flush that drops
   entries, so the poisoning that rule triggers is tested only for being triggered. Open reads
   every `chunk.shredded` record in the journal to find unfinished shreds: the cost grows with
   history until compaction (P4). It asks the keychain once per pocket, not once per record.
+  A lost chunk gets one `chunk.lost` record per record that references it, written at open
+  without rotating the segment, so a chunk shared by many records can grow that segment past
+  its target size.
 - **Bench: the target is not met on the reference machine.** The details are in
   [the appendix](appendix/0018-chunk-put-2026-10-15.md).
   - Balanced chunk put, 4 KiB, after the first review's fixes (`fc4b5a8`; not re-measured

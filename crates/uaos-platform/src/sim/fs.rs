@@ -161,6 +161,17 @@ impl SimFs {
         lock(&self.state).sync_fault_after = Some(n);
     }
 
+    /// Disarms a flush failure armed by [`SimFs::fail_sync_after`] that has not fired yet.
+    pub fn clear_sync_fault(&self) {
+        lock(&self.state).sync_fault_after = None;
+    }
+
+    /// Whether a flush failure armed by [`SimFs::fail_sync_after`] has not fired yet.
+    #[must_use]
+    pub fn sync_fault_pending(&self) -> bool {
+        lock(&self.state).sync_fault_after.is_some()
+    }
+
     /// Simulates the process dying: handles become stale and locks are released; everything
     /// already handed to the OS remains.
     pub fn crash(&self) {

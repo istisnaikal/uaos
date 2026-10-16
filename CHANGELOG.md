@@ -58,7 +58,8 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **Review:** `docs/reviews/WP3.A1-chunk-durability.md` (4 High, 7 Medium, 7 Low, four defects
     found by the extended property test after the fixes, a second round: 1 High, 1 Medium,
     6 Low, a third: 1 High, 3 Medium, 5 Low, a fourth: 2 Medium, 4 Low, a fifth: 2 Medium,
-    3 Low, a sixth: 4 Low, a seventh: 1 Medium, 2 Low, an eighth: 1 Low, and a ninth: 4 Low).
+    3 Low, a sixth: 4 Low, a seventh: 1 Medium, 2 Low, an eighth: 1 Low, a ninth: 4 Low, and a
+    tenth: 4 Low).
     New codes
     `STORE_PAYLOAD_LOST` and `STORE_PAYLOAD_FLUSH_FAILED`.
 
@@ -227,11 +228,18 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   `fc4b5a8`; not re-measured after later rounds), where file
   creation dominates. Until the state actor (WP3.3), the request whose append finds the flush
   window due pays for the flush.
-- Gate `journal-durability` gains twenty-six more seeded violations, one per class found by the
-  WP3.A1 review rounds (every round but the eighth, which added a property test) and the
-  extended property test (thirty for ADR-0018 with the four above, thirty-one in the gate). The
-  nightly lane runs both chunk-durability properties at 20,000 schedules each per OS; merges
-  run 64.
+- Gate `journal-durability` gains twenty-eight more seeded violations, one per class found by
+  the WP3.A1 review rounds (every round but the eighth, which added a property test) and the
+  extended property tests (thirty-two for ADR-0018 with the four above, thirty-three in the
+  gate). The nightly lane runs both chunk-durability properties at 20,000 schedules each per
+  OS; merges run 64. Their oracles require, after a process crash, the payload of every
+  acknowledged record no flush failure could have touched, and a clean recovery to leave
+  nothing refusing work.
+- A chunk store that a journal coordinates refuses `recover_pending`, `take_lost` and
+  `verify_and_sync` from callers (`ChunkError::LossesThroughJournal`; `take_lost` now returns a
+  `Result`), and `Journal::recover` recovers a poisoned store whatever state the writer is in.
+- `cargo xtask negative` refuses a seed anchor that occurs more than once in its file: the
+  first match could be another site, and the case would then prove nothing.
 - `uaos-state`'s `tampering_is_detected` flips the last byte of the tag instead of writing 0:
   the nonce is OS-random, so the byte was already 0 one run in 256 and the test then failed
   (a flake since P1, found while verifying the ninth WP3.A1 review).
