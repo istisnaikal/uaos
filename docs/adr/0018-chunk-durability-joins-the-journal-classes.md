@@ -128,9 +128,12 @@ record. What follows describes the code after those fixes.
   - **The flush still runs inline.** When the window is due, the `append` that finds it due pays
     for the flush. Moving it to its own thread is runtime work (WP3.3, the state actor).
 - **Decision 3.**
-  - **Lost content reads back as lost.** `ChunkStore::get` returns `ChunkError::Lost`
-    (`STORE_PAYLOAD_LOST`) for content whose files were set aside in the pocket's quarantine,
-    not `Unavailable`, whose message says never stored or shredded (twelfth review, L3).
+  - **Lost content reads back as lost.** Every loss the store sets aside leaves a marker under
+    a fixed name in the pocket's quarantine (`<reference>.lost`), also when no file reached the
+    disk, flushed with the quarantine before the loss is reported; `ChunkStore::get` reads it
+    directly and returns `ChunkError::Lost` (`STORE_PAYLOAD_LOST`), not `Unavailable`, whose
+    message says never stored or shredded. A shred removes the marker, so content lost, stored
+    again and shredded reads back as shredded (reviews twelve and thirteen).
   - **Losses are journaled before their records are durable.** The `chunk.lost` records are
     appended before the flush that makes the records they report durable, so one flush covers
     both. While a found loss is not yet journaled, the writer refuses records and flushes, and
@@ -231,7 +234,7 @@ record. What follows describes the code after those fixes.
   flush either drops the unflushed bytes, or keeps serving them without ever making them durable.
   - **Flush-ordering scenario.** A flush fails at every possible step, then the power goes. A
     record at or before `flushed_through` must have a readable payload.
-  - **Regression tests.** One for each finding of the twelve review rounds fixed in code, and
+  - **Regression tests.** One for each finding of the thirteen review rounds fixed in code, and
     one for each defect the extended schedules found afterwards. Each round-four test was
     checked to fail with its fix reverted. These are fixed by construction, with no test that
     fails when they are reverted: first round M1 (a chunk is enrolled in `pending` before its
@@ -243,14 +246,19 @@ record. What follows describes the code after those fixes.
     half of L3, and two parts of L4 (recovery clears only what it saw; `prepare` poisons);
     fifth round, the flush window, which closes the microseconds between a concurrent write's
     failure and its poisoning (the generation check it completes is tested); fourth round L2's
-    slot part (a shred marks its chunk under the chunk's slot); tenth round L2 (losses found at
-    open are reported in linear time).
+    slot part (a shred marks its chunk under the chunk's slot); tenth round L2 and thirteenth
+    round L4 (losses found at open are reported in `O(R log L)` for R referencing records and L
+    lost chunks; each lost chunk still costs one flush of its pocket's quarantine directory, which
+    is slow when many are lost, for example after a data directory is restored from an older
+    backup).
   - **Random crash schedules.** Under three flush policies (flushes only when asked, strict,
     and a window that falls due, so appends flush on their own as in production): writes,
     repeated payloads, write-ahead shreds (their re-wraps
     left pending across later operations, finished later, or lost to a crash), flushes, failed
     flushes, failed appends (which leave half a line in the segment, as `write_all` does when
-    the disk is full), clock advances, process crashes, power losses and recoveries, with
+    the disk is full), the OS writing back on its own (segments, chunk files and directory
+    entries, whole or in part, in no order across files), clock advances, process crashes,
+    power losses and recoveries, with
     faults still armed during the next open, followed by a crash or a power loss. The merge
     lane runs 64 cases of this property and of the next one: enough for a regression most
     schedules reach, not for one only rare schedules reach. The nightly lane runs 20,000 of each
@@ -271,7 +279,11 @@ record. What follows describes the code after those fixes.
     discarded readable content after any failed flush, and a failed append wrote nothing, so
     no schedule tore a segment. Both properties now fail on each of these, and they found round
     four's recovery of a poisoned store incomplete; with the eleventh review's H1 restored they
-    fail within 4,000 schedules.
+    fail within 4,000 schedules. Before the thirteenth review the simulator never wrote anything
+    back on its own, so no record survived a power loss without its payload and no payload was
+    ever torn at a length that still parses: an open or recovery that skipped an unauthentic
+    payload passed every test. With write-backs both properties fail on it at once; after a
+    power loss, a record whose loss the open reported is not counted against later crashes.
   - **Shred schedules.** A second property runs the same operations plus records that reference
     earlier content without storing it again, under the same three policies, and checks two
     more things: no record referencing content is written after a written shred record of it
@@ -279,11 +291,11 @@ record. What follows describes the code after those fixes.
     record uses leaves the content unreadable and one KEK version alive. The first schedule
     could not see the seventh review's M1; this one fails within seconds with it reverted.
 
-- **Gate self-test.** The `journal-durability` gate lists thirty-five seeded violations in
-  `gates.toml`: thirty-four for this ADR and P1's `journal-ack-without-write`. Of the
-  thirty-four, four come from this ADR's own verification plan (`chunk-flushed-before-sync`,
+- **Gate self-test.** The `journal-durability` gate lists thirty-nine seeded violations in
+  `gates.toml`: thirty-eight for this ADR and P1's `journal-ack-without-write`. Of the
+  thirty-eight, four come from this ADR's own verification plan (`chunk-flushed-before-sync`,
   `intent-before-chunk-write`, `chunk-put-pair-race`, and `chunk-put-shared-temp`, which checks
-  temporary naming only), and thirty from the classes the review rounds and the crash
+  temporary naming only), and thirty-four from the classes the review rounds and the crash
   schedules found: every round but the eighth, which added a property test instead.
 - **Not modelled, stated plainly.** `SimFs` cannot model a failed directory flush that drops
   entries, so the poisoning that rule triggers is tested only for being triggered. Open reads

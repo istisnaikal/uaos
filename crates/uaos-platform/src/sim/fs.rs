@@ -208,6 +208,48 @@ impl SimFs {
             .is_some()
     }
 
+    /// The OS writes `path`'s cached bytes back on its own, as a real one may at any time: they
+    /// become durable without a flush (no fault is consumed).
+    pub fn write_back(&self, path: &Path) {
+        let mut s = lock(&self.state);
+        if let Some(&id) = s.live.get(path) {
+            s.flushed(id);
+        }
+    }
+
+    /// The OS writes back only the first `num`/`den` of `path`'s unflushed bytes (page by
+    /// page, from the start), so a later power loss leaves a torn file.
+    pub fn write_back_part(&self, path: &Path, num: usize, den: usize) {
+        let mut s = lock(&self.state);
+        if let Some(&id) = s.live.get(path)
+            && let Some(node) = s.nodes.get_mut(&id)
+            && !node.doomed
+            && node.data.len() > node.durable_len
+        {
+            let extra = (node.data.len() - node.durable_len) * num / den.max(1);
+            node.durable_len += extra;
+        }
+    }
+
+    /// The OS persists `dir`'s entries on its own, whatever the files' bytes: an entry can become
+    /// durable before its data.
+    pub fn write_back_dir(&self, dir: &Path) {
+        let mut s = lock(&self.state);
+        if !s.dirs.contains(dir) {
+            return;
+        }
+        let in_dir = |p: &PathBuf| p.parent() == Some(dir);
+        s.durable.retain(|p, _| !in_dir(p));
+        let live: Vec<(PathBuf, FileId)> = s
+            .live
+            .iter()
+            .filter(|(p, _)| in_dir(p))
+            .map(|(p, id)| (p.clone(), *id))
+            .collect();
+        s.durable.extend(live);
+        s.collect_garbage();
+    }
+
     /// Bytes the OS currently holds for `path` (test inspection).
     #[must_use]
     pub fn os_view(&self, path: &Path) -> Option<Vec<u8>> {

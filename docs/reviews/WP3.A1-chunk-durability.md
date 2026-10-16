@@ -12,7 +12,8 @@ accepted with a reason. The property test, extended as M6 asked, then found four
 the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up,
 a third found 1 High, 3 Medium and 5 Low, a fourth 2 Medium and 4 Low, a fifth 2 Medium and
 3 Low, a sixth 4 Low, a seventh 1 Medium and 2 Low, an eighth 1 Low, a ninth 4 Low, a tenth
-4 Low, an eleventh 1 High and 3 Low, and a twelfth 3 Low; all are fixed below.
+4 Low, an eleventh 1 High and 3 Low, a twelfth 3 Low, and a thirteenth 4 Low; all are fixed
+below.
 The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
@@ -351,3 +352,22 @@ since P1).
 **Verified locally (Windows, dedicated target directory):** 69 durability tests and the rest of
 `uaos-state`; workspace clippy with warnings denied; 3 × 4,000 and 2 × 20,000 schedules of each
 property, in release, with the stricter oracles; the 35 `journal-durability` negatives.
+
+## Thirteenth review (2026-10-16)
+
+**Reviewed:** `775190b` (on `555494b`) by a fresh-context agent, in a scratch export. **Result:**
+0 High · 0 Medium · 4 Low; no durability, loss-ordering, open, shred or KEK defect. The reviewer's
+properties extended with OS write-backs passed 30,000 schedules of each (whole files) and 40,000
+of each with partial write-backs, under all three flush policies and both disk models.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | The simulator never wrote anything back on its own, so no record survived a power loss without its payload and no payload was torn at a length that still parses: an open or a recovery that skipped an unauthentic payload made its record durable with no `chunk.lost` record, and passed every test and both properties | `SimFs` gains `write_back`, `write_back_part` and `write_back_dir` (the OS persisting a file's bytes, part of them, or a directory's entries, on its own). Both properties take write-backs as a trailing parameter, so the persisted seeds still generate their schedules; after a power loss, a record whose loss the open reported is not counted against later crashes. ADR-0018 and `claims.md` say so | `r13_l1_an_unauthentic_payload_found_at_open_is_journaled`, `r13_l1_an_unauthentic_payload_found_in_recovery_is_journaled`; negatives `unauthentic-loss-skipped-at-open` and `unauthentic-loss-skipped-in-recovery` **PROVEN**; with either mutation, both properties fail within 4,000 schedules with the persisted seeds removed |
+| L2 | The twelfth round's `Lost` read found a loss by its quarantined files, so the most likely power-loss loss (the record written back, neither chunk file) left nothing to find and read back as never stored or shredded | Every loss leaves a marker under a fixed name, `quarantine/<reference>.lost`, also when no file reached the disk, made durable with the quarantine before the loss is reported; `get` reads it directly | `r13_l2_a_missing_payload_reads_back_as_lost`; negative `missing-loss-reads-as-unavailable` **PROVEN** |
+| L3 | The same read over-reported: content lost, stored again and shredded read back as lost; content lost before any record referenced it said "a chunk.lost record reports it", though none existed; a listing error read as never stored; every miss listed the whole quarantine | A shred removes the marker; the message says "set aside as lost" and claims no record; the marker is read directly, so no listing, and a read error is a storage error | `r13_l3_lost_then_shredded_reads_back_as_shredded`; negative `shredded-content-reads-as-lost` **PROVEN** |
+| L4 | "Losses found at open are reported in linear time" held for one lost chunk: each referencing record scanned every loss (O(R×L)), and each lost chunk costs a quarantine directory flush | Losses are looked up in a map by pocket and reference; ADR-0018 states the cost: `O(R log L)` plus one quarantine flush per lost chunk | by construction; the bound test from the tenth round still passes |
+
+**Verified locally (Windows, dedicated target directory):** 73 durability tests and the rest of
+`uaos-state`; workspace clippy with warnings denied; 3 × 4,000 and 2 × 20,000 schedules of each
+property, in release, with OS write-backs; the 39 `journal-durability` negatives; every seed
+anchor unique.
