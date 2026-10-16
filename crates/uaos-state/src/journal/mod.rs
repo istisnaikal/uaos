@@ -19,6 +19,6 @@ mod writer;
 pub use error::JournalError;
 pub use scan::{VerifiedRecord, VerifyReport, genesis_hash, read_verified, verify};
 pub use writer::{
-    Appended, CHUNK_METADATA_KEY, EventDraft, FLUSH_MARKER, FlushPolicy, JOURNAL_DIR, Journal, JournalHealth,
-    LOCK_FILE, LostPayload,
+    Appended, CAUSE_METADATA_KEY, CHUNK_METADATA_KEY, EventDraft, FLUSH_MARKER, FlushPolicy, JOURNAL_DIR, Journal,
+    JournalHealth, LOCK_FILE, LostPayload, MAX_LOST_LISTED, RECORD_SEQ_METADATA_KEY,
 };

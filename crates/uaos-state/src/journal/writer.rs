@@ -15,23 +15,33 @@
 //! * Disk full: the segment may end in a torn record, so the writer refuses all appends until
 //!   [`Journal::recover`] has moved to a fresh segment.
 //!
-//! Recovery on [`Journal::open`] verifies the whole chain, seals the previously active segment
-//! at its last complete record, quarantines segment files the manifest does not list, and
-//! starts a new segment. It never appends after a possibly torn tail.
+//! Recovery on [`Journal::open`] verifies the whole chain, quarantines segment files the
+//! manifest does not list, and starts a new segment. It never appends after a possibly torn
+//! tail, and it never flushes the previous run's segment again: after a failed flush (in that
+//! run, or in an open that failed since) a new flush of the same file can report success
+//! without writing anything, and a failing one drops what the OS held. The records after the
+//! last durable point are copied to a fresh active segment and the old file is kept as suspect
+//! up to that point; one flush then covers the copied records together with any `chunk.lost`
+//! records open appends for them, before open returns.
 //!
 //! **Payloads (ADR-0018).** A journal opened with [`Journal::open_with_payloads`] coordinates
 //! the chunk store's durability with its own:
 //! * a record that references a chunk is accepted only once the chunk is stored (I-02);
 //! * every flush makes the store's pending chunks durable **before** the segment, so a record
-//!   is durable only once its payload is; a failed payload flush stops the writer
-//!   ([`JournalHealth::PayloadFlushFailed`]) until [`Journal::recover`] has read the pending
-//!   chunks back;
-//! * after each flush a small marker (`FLUSHED`) records the durable point, itself made durable
-//!   at most once per second. On open, the payloads of every record after the durable point are
-//!   read back and flushed before the previous run's records are made durable. An unreadable
-//!   one is reported by a `chunk.lost` record, never silently ([`Journal::lost_payloads`]).
+//!   is durable only once its payload is. A failed payload flush, here or anywhere in the store,
+//!   stops the writer ([`JournalHealth::PayloadFlushFailed`]) until [`Journal::recover`] has
+//!   read the pending chunks back, rewritten the readable ones and journaled the rest;
+//! * a marker (`FLUSHED`), written atomically at open and then at most once per second, records
+//!   a durable point up to which every payload is durable or its loss journaled. It **never
+//!   moves while a loss is unreported**. Its presence also records that the journal coordinates
+//!   a store, so it cannot be opened without one ([`JournalError::PayloadsRequired`]);
+//! * while a loss is found but not yet journaled, the writer refuses records and flushes: no
+//!   record may become durable before the record that reports its payload lost. On open, the payloads of every record after it are read back, rewritten
+//!   and flushed before the previous run's records are made durable; an unreadable one is
+//!   quarantined and journaled as `chunk.lost` ([`Journal::lost_payloads`]), and only then does
+//!   the marker move. Without a valid marker the whole journal is checked.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -52,7 +62,7 @@ use super::manifest::{
     Manifest, ManifestSchema, READER_VERSION, SegmentEntry, SegmentStatus, is_segment_file_name, segment_file_name,
 };
 use super::scan::{VerifiedRecord, genesis_hash, read_verified};
-use crate::chunks::ChunkStore;
+use crate::chunks::{ChunkStore, LossCause, LostChunk};
 
 /// Name of the data-directory lock file.
 pub const LOCK_FILE: &str = "uaos.lock";
@@ -60,14 +70,23 @@ pub const LOCK_FILE: &str = "uaos.lock";
 pub const JOURNAL_DIR: &str = "journal";
 /// Name of the durable-point marker inside the journal directory (ADR-0018).
 pub const FLUSH_MARKER: &str = "FLUSHED";
-/// First word of the marker's single line: `uaos.flushed/1 <seq> <hash>`.
+/// First word of the marker's single line: `uaos.flushed/1 <seq> <hash>`, or
+/// `uaos.flushed/1 none` while no record is durable.
 const MARKER_PREFIX: &str = "uaos.flushed/1";
-/// How often the marker itself is made durable. It bounds how much of the tail recovery reads
-/// back, never what recovery reports.
-const MARKER_SYNC_INTERVAL: limits::Millis = limits::Millis(1_000);
+/// Second word of the marker while no record is durable.
+const MARKER_NONE: &str = "none";
+/// How often the marker is rewritten. It bounds how much of the tail recovery reads back,
+/// never what recovery reports.
+const MARKER_INTERVAL: limits::Millis = limits::Millis(1_000);
+/// Losses listed by [`Journal::lost_payloads`]; older ones remain in the journal (I-08).
+pub const MAX_LOST_LISTED: usize = 1_024;
 /// Metadata key that names the chunk a `chunk.lost` or `chunk.shredded` record is about. Such
 /// records never set `payload_ref`: the payload is gone.
 pub const CHUNK_METADATA_KEY: &str = "chunk";
+/// Metadata key of a `chunk.lost` record that names the record whose payload was lost.
+pub const RECORD_SEQ_METADATA_KEY: &str = "record_seq";
+/// Metadata key of a `chunk.lost` record that names what the bytes showed.
+pub const CAUSE_METADATA_KEY: &str = "cause";
 
 /// A payload that a record references and that could not be read back (ADR-0018 §3). The
 /// record stands; the loss is journaled as a `chunk.lost` record.
@@ -81,6 +100,8 @@ pub struct LostPayload {
     pub pocket: PocketId,
     /// The lost chunk.
     pub chunk: ChunkRef,
+    /// What the bytes showed.
+    pub cause: LossCause,
 }
 
 /// When acknowledged records are flushed to stable storage.
@@ -198,10 +219,9 @@ pub struct Journal {
     health: JournalHealth,
     /// The chunk store whose durability this journal coordinates (ADR-0018), if any.
     payloads: Option<Arc<ChunkStore>>,
-    /// A newer marker was written and is not yet durable.
-    marker_dirty: bool,
-    last_marker_sync_mono: u64,
-    /// Payloads reported lost since this journal was opened.
+    /// When the marker was last written.
+    last_marker_mono: u64,
+    /// Payloads reported lost since this journal was opened (the latest [`MAX_LOST_LISTED`]).
     lost: Vec<LostPayload>,
     /// Losses found but not yet journaled; kept across failures until their records are written.
     unreported: Vec<(LostPayload, EventEnvelope)>,
@@ -263,6 +283,15 @@ impl Journal {
             FsError::Locked { .. } => JournalError::InstanceLocked,
             other => storage(other),
         })?;
+        // A journal that has coordinated a chunk store must not be opened without it: the
+        // previous run's tail would be made durable over payloads nobody checked (WP3.A1 L3).
+        if payloads.is_none() {
+            match fs.read(&dir.join(FLUSH_MARKER)) {
+                Ok(_) => return Err(JournalError::PayloadsRequired),
+                Err(FsError::NotFound { .. }) => {}
+                Err(e) => return Err(storage(e)),
+            }
+        }
 
         let manifest_exists = match fs.read(&Manifest::path(&dir)) {
             Ok(_) => true,
@@ -271,32 +300,27 @@ impl Journal {
         };
 
         let mut lost_in_tail = Vec::new();
+        let mut carried = None;
         let (mut manifest, next_seq, head, last_flushed) = if manifest_exists {
             let (records, report) = read_verified(fs.as_ref(), &dir)?;
             let mut manifest = Manifest::load(fs.as_ref(), &dir)?;
             quarantine_orphans(fs.as_ref(), &dir, &manifest)?;
             sweep_temporaries(fs.as_ref(), &dir)?;
+            let durable = read_marker(fs.as_ref(), &dir, &records);
             // ADR-0018 §3: the payloads of records after the last durable point must be durable
             // (or reported lost) before those records are made durable below.
             if let Some(store) = &payloads {
-                lost_in_tail = recover_tail_payloads(fs.as_ref(), &dir, &manifest, &records, store)?;
+                lost_in_tail = recover_tail_payloads(&records, durable, store)?;
             }
             // The previous process may have acknowledged records the OS holds but never
-            // flushed. Flush them BEFORE the manifest seals the segment around them: a durable
-            // manifest must never claim records a power loss could still take away.
-            if let Some(active) = manifest.active() {
-                let mut previous = fs.open_append(&dir.join(&active.file)).map_err(storage)?;
-                previous.sync_data().map_err(|_| JournalError::Stopped)?;
-            }
-            // Seal the previously active segment at its last complete, verified record.
-            if let Some(active) = manifest.segments.last_mut() {
-                active.status = SegmentStatus::Sealed;
-                if report.next_seq > active.first_seq.0 {
-                    active.last_seq = Some(Seq(report.next_seq - 1));
-                    active.last_hash = Some(report.head);
-                }
-            }
-            let last = report.next_seq.checked_sub(1).map(|s| (s, report.head));
+            // flushed. They move to the new active segment unflushed, so a durable manifest
+            // never claims them before they are durable, and the flush below covers them with
+            // their loss records (review WP3.A1 H1, N4).
+            carried = carry_previous_tail(fs.as_ref(), &dir, &mut manifest, &records, durable, &report)?;
+            let last = match &carried {
+                Some(tail) => tail.durable,
+                None => report.next_seq.checked_sub(1).map(|s| (s, report.head)),
+            };
             (manifest, report.next_seq, report.head, last)
         } else {
             if fs
@@ -329,7 +353,15 @@ impl Journal {
             (manifest, 0, head, None)
         };
 
-        let active = start_segment(fs.as_ref(), &dir, &mut manifest, next_seq)?;
+        let (active, active_bytes, unflushed, unflushed_first) = match carried {
+            Some(tail) => (tail.file, tail.bytes, tail.lines, tail.first),
+            None => (
+                start_segment(fs.as_ref(), &dir, &mut manifest, next_seq)?,
+                0,
+                Vec::new(),
+                next_seq,
+            ),
+        };
         let last_flush_mono = clock.mono().0;
         let mut journal = Self {
             fs,
@@ -339,24 +371,28 @@ impl Journal {
             _lock: lock,
             manifest,
             active,
-            active_bytes: 0,
+            active_bytes,
             next_seq,
             head,
-            unflushed: Vec::new(),
-            unflushed_first: next_seq,
+            unflushed,
+            unflushed_first,
             last_flushed,
             last_flush_mono,
             flush,
             health: JournalHealth::Healthy,
             payloads,
-            marker_dirty: false,
-            last_marker_sync_mono: last_flush_mono,
+            last_marker_mono: last_flush_mono,
             lost: Vec::new(),
             unreported: lost_in_tail,
         };
-        // Everything that survived is durable now (the previous segment was flushed above).
-        journal.update_marker();
+        // Losses are journaled first, then one flush makes the previous run's records durable
+        // together with them; only then may the marker name the previous run's last record
+        // (review WP3.A1 H1). If either fails, open fails and the next open checks the same
+        // tail again. The marker must exist before any record is accepted: it is also what
+        // makes the journal refuse to open without its store (WP3.A1 L3).
         journal.report_lost()?;
+        journal.sync()?;
+        journal.update_marker(true).map_err(storage)?;
         Ok(journal)
     }
 
@@ -368,8 +404,9 @@ impl Journal {
     }
 
     /// Journals one `chunk.lost` record per unreported loss, then flushes them. A loss leaves
-    /// the unreported list only once its record is appended; on failure the rest stay for the
-    /// next [`Journal::recover`].
+    /// the unreported list once its record has reached the OS (even if a flush after it then
+    /// failed), so a retry never reports it twice; on failure the rest stay for the next
+    /// [`Journal::recover`], and the marker stays where it was.
     fn report_lost(&mut self) -> Result<(), JournalError> {
         if self.unreported.is_empty() {
             return Ok(());
@@ -378,33 +415,44 @@ impl Journal {
             let metadata = Metadata::new(
                 [
                     (CHUNK_METADATA_KEY.to_owned(), payload.chunk.to_string()),
-                    ("record_seq".to_owned(), payload.record_seq.0.to_string()),
+                    (RECORD_SEQ_METADATA_KEY.to_owned(), payload.record_seq.0.to_string()),
+                    (CAUSE_METADATA_KEY.to_owned(), payload.cause.as_str().to_owned()),
                 ]
                 .into_iter()
                 .collect(),
             )
             .map_err(|e| JournalError::Encoding(e.to_string()))?;
-            self.append(EventDraft {
-                session_id: referencing.session_id,
-                pocket_id: Some(payload.pocket),
-                operation_id: referencing.operation_id,
-                request_id: referencing.request_id,
-                correlation_id: referencing.correlation_id,
-                parent_id: Some(referencing.id),
-                actor: Actor::System,
-                event_type: types::CHUNK_LOST,
-                payload_ref: None,
-                payload_inline: None,
-                cost_estimate: None,
-                compensable: false,
-                side_effect_class: SideEffectClass::None,
-                risk_tier: referencing.risk_tier,
-                durability: Durability::Critical,
-                config_version: referencing.config_version,
-                metadata,
-            })?;
-            self.unreported.remove(0);
-            self.lost.push(payload);
+            let before = self.next_seq;
+            let appended = self.append_inner(
+                EventDraft {
+                    session_id: referencing.session_id,
+                    pocket_id: Some(payload.pocket),
+                    operation_id: referencing.operation_id,
+                    request_id: referencing.request_id,
+                    correlation_id: referencing.correlation_id,
+                    parent_id: Some(referencing.id),
+                    actor: Actor::System,
+                    event_type: types::CHUNK_LOST,
+                    payload_ref: None,
+                    payload_inline: None,
+                    cost_estimate: None,
+                    compensable: false,
+                    side_effect_class: SideEffectClass::None,
+                    risk_tier: referencing.risk_tier,
+                    durability: Durability::Critical,
+                    config_version: referencing.config_version,
+                    metadata,
+                },
+                true,
+            );
+            if self.next_seq > before {
+                self.unreported.remove(0);
+                if self.lost.len() >= MAX_LOST_LISTED {
+                    self.lost.remove(0);
+                }
+                self.lost.push(payload);
+            }
+            appended?;
         }
         self.sync()
     }
@@ -431,14 +479,33 @@ impl Journal {
     /// durability contract and the meaning of an error).
     ///
     /// # Errors
-    /// `DiskFull`, `Stopped`, `Write`, `LineTooLarge`, `Platform`, `Encoding`.
+    /// `DiskFull`, `Stopped`, `PayloadFlushFailed`, `Write`, `LineTooLarge`, `Platform`,
+    /// `Encoding`, `PayloadNotStored`, `Payload`, `InvalidRecord`.
     pub fn append(&mut self, draft: EventDraft) -> Result<Appended, JournalError> {
+        self.append_inner(draft, false)
+    }
+
+    /// Appends one record. `reporting` is set only by [`Journal::report_lost`]: its records are
+    /// accepted while losses are unreported, and never rotate or flush on their own, so the one
+    /// flush after them covers them together with the records whose payloads they report.
+    fn append_inner(&mut self, draft: EventDraft, reporting: bool) -> Result<Appended, JournalError> {
         match self.health {
             JournalHealth::Healthy => {}
             JournalHealth::DiskFull => return Err(JournalError::DiskFull),
-            JournalHealth::WriteFailed | JournalHealth::FlushFailed | JournalHealth::PayloadFlushFailed => {
-                return Err(JournalError::Stopped);
-            }
+            JournalHealth::PayloadFlushFailed => return Err(JournalError::PayloadFlushFailed),
+            JournalHealth::WriteFailed | JournalHealth::FlushFailed => return Err(JournalError::Stopped),
+        }
+        if !reporting && !self.unreported.is_empty() {
+            return Err(self.unreported_error());
+        }
+        // A record about a chunk that is gone names it in metadata, never as its payload: the
+        // payload check below would refuse it, and recovery would report it lost (WP3.A1 L5).
+        if (draft.event_type == types::CHUNK_LOST || draft.event_type == types::CHUNK_SHREDDED)
+            && (draft.payload_ref.is_some() || !draft.metadata.as_map().contains_key(CHUNK_METADATA_KEY))
+        {
+            return Err(JournalError::InvalidRecord(
+                "chunk.lost and chunk.shredded name their chunk in metadata key `chunk`, never in payload_ref",
+            ));
         }
         // Payload before record (I-02, ADR-0018): a record may reference only a chunk that is
         // already with the OS, so no acknowledged record can point at content a crash removes.
@@ -485,7 +552,12 @@ impl Journal {
             return Err(JournalError::LineTooLarge);
         }
         let line_len = u64::try_from(line.len()).unwrap_or(u64::MAX);
-        if self.active_bytes > 0 && self.active_bytes.saturating_add(line_len) > limits::JOURNAL_SEGMENT_TARGET.0 {
+        // A loss record may overshoot the segment target: rotating would flush the records it
+        // reports before it exists.
+        if !reporting
+            && self.active_bytes > 0
+            && self.active_bytes.saturating_add(line_len) > limits::JOURNAL_SEGMENT_TARGET.0
+        {
             self.rotate()?;
         }
 
@@ -516,7 +588,7 @@ impl Journal {
                 self.clock.mono().0.saturating_sub(self.last_flush_mono) >= window.as_nanos()
             }
         };
-        if due {
+        if due && !reporting {
             self.sync()?;
         }
         Ok(Appended {
@@ -532,13 +604,16 @@ impl Journal {
     ///
     /// # Errors
     /// `Stopped` if the flush and its recovery both failed (or already had); `DiskFull` if the
-    /// recovery ran out of space.
+    /// recovery ran out of space; `PayloadFlushFailed` if the attached chunk store could not be
+    /// flushed (or had already failed to).
     pub fn sync(&mut self) -> Result<(), JournalError> {
-        if matches!(
-            self.health,
-            JournalHealth::FlushFailed | JournalHealth::PayloadFlushFailed
-        ) {
-            return Err(JournalError::Stopped);
+        match self.health {
+            JournalHealth::FlushFailed => return Err(JournalError::Stopped),
+            JournalHealth::PayloadFlushFailed => return Err(JournalError::PayloadFlushFailed),
+            JournalHealth::Healthy | JournalHealth::DiskFull | JournalHealth::WriteFailed => {}
+        }
+        if !self.unreported.is_empty() {
+            return Err(self.unreported_error());
         }
         if self.unflushed.is_empty() {
             return Ok(());
@@ -548,54 +623,76 @@ impl Journal {
         match self.active.sync_data() {
             Ok(()) => {
                 self.mark_flushed();
-                self.update_marker();
+                // A failed marker write is harmless here: the previous marker is still true,
+                // only further behind.
+                let _behind = self.update_marker(false);
                 Ok(())
             }
-            Err(_) => self.rewrite_unflushed(),
+            Err(_) => self.rewrite_unflushed(true),
         }
     }
 
-    /// Flushes the attached chunk store's pending writes. On failure the writer stops: the
-    /// unflushed records' payloads may be gone, and only [`Journal::recover`] can tell.
+    /// Flushes the attached chunk store's pending writes. On failure, or if the store is already
+    /// poisoned by a failure elsewhere (review WP3.A1 H3), the writer stops: the unflushed
+    /// records' payloads may be gone, and only [`Journal::recover`] can tell.
     fn sync_payloads(&mut self) -> Result<(), JournalError> {
         if let Some(store) = &self.payloads
             && store.sync_pending().is_err()
         {
             self.health = JournalHealth::PayloadFlushFailed;
-            return Err(JournalError::Stopped);
+            return Err(JournalError::PayloadFlushFailed);
         }
         Ok(())
     }
 
-    /// Records the durable point after a flush (journals with payloads only). The marker is
-    /// written without a flush; the previous marker is made durable first, at most once per
-    /// [`MARKER_SYNC_INTERVAL`]. A durable marker therefore never names a record beyond the
-    /// true durable point; a missing or stale one only makes recovery read back more.
-    fn update_marker(&mut self) {
-        if self.payloads.is_none() {
-            return;
-        }
-        let Some((seq, hash)) = self.last_flushed else {
-            return;
+    /// Records the durable point (journals with payloads only), at most once per
+    /// [`MARKER_INTERVAL`] unless `force`. The marker names the last flushed record, and every
+    /// payload up to it is durable or its loss journaled:
+    /// * it **never moves while a loss is unreported**, set aside by the store, or possibly
+    ///   undetected because the store is poisoned (review WP3.A1 H1, H2);
+    /// * it is written atomically and flushed, so a power loss leaves the previous or the new
+    ///   marker, never an empty or torn one that would cost a whole-journal check.
+    ///
+    /// # Errors
+    /// The marker write failed; the previous marker, if any, is still true.
+    fn update_marker(&mut self, force: bool) -> Result<(), FsError> {
+        let Some(store) = &self.payloads else {
+            return Ok(());
         };
-        let path = self.dir.join(FLUSH_MARKER);
+        if !self.unreported.is_empty() || store.has_untaken_losses() || store.is_poisoned() {
+            return Ok(());
+        }
         let now = self.clock.mono().0;
-        if self.marker_dirty && now.saturating_sub(self.last_marker_sync_mono) >= MARKER_SYNC_INTERVAL.as_nanos() {
-            // Best effort: a failure leaves an older durable marker, which is still correct.
-            if self.fs.sync_file(&path).is_ok() && self.fs.sync_dir(&self.dir).is_ok() {
-                self.last_marker_sync_mono = now;
-            }
+        if !force && now.saturating_sub(self.last_marker_mono) < MARKER_INTERVAL.as_nanos() {
+            return Ok(());
         }
-        let line = format!("{MARKER_PREFIX} {seq} {hash}\n");
-        if self.fs.write_unsynced(&path, line.as_bytes()).is_ok() {
-            self.marker_dirty = true;
-        }
+        let line = match self.last_flushed {
+            Some((seq, hash)) => format!("{MARKER_PREFIX} {seq} {hash}\n"),
+            None => format!("{MARKER_PREFIX} {MARKER_NONE}\n"),
+        };
+        self.fs.write_atomic(&self.dir.join(FLUSH_MARKER), line.as_bytes())?;
+        self.last_marker_mono = now;
+        Ok(())
     }
 
     /// Current writer state.
     #[must_use]
     pub fn health(&self) -> JournalHealth {
+        if self.health == JournalHealth::Healthy && !self.unreported.is_empty() {
+            // A loss waits to be journaled; records are refused until `recover` has done so.
+            return JournalHealth::PayloadFlushFailed;
+        }
         self.health
+    }
+
+    /// The refusal for a writer holding a loss it has not journaled: nothing may become durable
+    /// before that loss record (ADR-0018), so [`Journal::recover`] must journal it first.
+    fn unreported_error(&self) -> JournalError {
+        match self.health {
+            JournalHealth::DiskFull => JournalError::DiskFull,
+            JournalHealth::WriteFailed | JournalHealth::FlushFailed => JournalError::Stopped,
+            JournalHealth::Healthy | JournalHealth::PayloadFlushFailed => JournalError::PayloadFlushFailed,
+        }
     }
 
     /// Returns the writer to `Healthy` once the cause is gone: after a disk-full or write
@@ -603,52 +700,65 @@ impl Journal {
     /// and continues in a fresh one; after a flush failure it retries rewriting the
     /// memory-only records to a fresh segment.
     ///
+    /// After a payload flush failure it reads the pending chunks back (the store rewrites the
+    /// readable ones to new files) and journals each loss **before** the flush that makes the
+    /// referencing records durable. Every path ends by journaling any loss still unreported.
+    ///
     /// # Errors
-    /// `DiskFull` if there is still no space; `Stopped` if a flush still cannot be recovered.
+    /// `DiskFull` if there is still no space; `Stopped` if a flush still cannot be recovered;
+    /// `Payload` if the chunk store cannot be read back.
     pub fn recover(&mut self) -> Result<(), JournalError> {
         match self.health {
-            JournalHealth::Healthy => Ok(()),
+            JournalHealth::Healthy => {}
+            // While a loss waits to be journaled, the unflushed records move to a fresh segment
+            // unflushed instead: flushing them first would make them durable before their loss
+            // record. The flush after `report_lost` below covers them together.
+            JournalHealth::DiskFull | JournalHealth::WriteFailed if !self.unreported.is_empty() => {
+                self.rewrite_unflushed(false)?;
+                self.health = JournalHealth::Healthy;
+            }
             JournalHealth::DiskFull | JournalHealth::WriteFailed => {
                 self.rotate()?;
                 self.health = JournalHealth::Healthy;
-                Ok(())
             }
             JournalHealth::FlushFailed => {
-                self.rewrite_unflushed()?;
+                let flush = self.unreported.is_empty();
+                self.rewrite_unflushed(flush)?;
                 self.health = JournalHealth::Healthy;
-                Ok(())
             }
             JournalHealth::PayloadFlushFailed => {
                 let Some(store) = self.payloads.clone() else {
                     return Err(JournalError::Stopped);
                 };
                 store.recover_pending().map_err(JournalError::Payload)?;
+                // Moved into `unreported` at once: from here on the marker cannot pass them,
+                // whatever fails next (review WP3.A1 H2).
                 let lost = store.take_lost();
                 let referencing = self.unflushed_referencing(&lost);
                 self.unreported.extend(referencing);
                 self.health = JournalHealth::Healthy;
-                self.sync()?;
-                self.report_lost()
             }
         }
+        // Appends the `chunk.lost` records, then one flush covers them together with the records
+        // whose payloads they report; with nothing to report, it completes the flush that failed.
+        self.report_lost()?;
+        self.sync()
     }
 
     /// The unflushed records that reference any of `lost`.
-    fn unflushed_referencing(&self, lost: &[(PocketId, ChunkRef)]) -> Vec<(LostPayload, EventEnvelope)> {
-        let lost: BTreeSet<&(PocketId, ChunkRef)> = lost.iter().collect();
+    fn unflushed_referencing(&self, lost: &[LostChunk]) -> Vec<(LostPayload, EventEnvelope)> {
         self.unflushed
             .iter()
             .filter_map(|line| serde_json::from_slice::<EventEnvelope>(line).ok())
             .filter_map(|e| {
-                let key = (e.pocket_id?, e.payload_ref?);
-                if !lost.contains(&key) {
-                    return None;
-                }
+                let (pocket, chunk) = (e.pocket_id?, e.payload_ref?);
+                let found = lost.iter().find(|l| l.pocket == pocket && l.chunk == chunk)?;
                 let payload = LostPayload {
                     record_seq: e.seq,
                     operation_id: e.operation_id,
-                    pocket: key.0,
-                    chunk: key.1,
+                    pocket,
+                    chunk,
+                    cause: found.cause,
                 };
                 Some((payload, e))
             })
@@ -714,8 +824,11 @@ impl Journal {
         }
     }
 
-    /// Recovery from a failed flush (see module docs).
-    fn rewrite_unflushed(&mut self) -> Result<(), JournalError> {
+    /// Recovery from a failed flush (see module docs): seals the segment at its last flushed
+    /// record and rewrites every unflushed record to a fresh segment. With `flush` the fresh
+    /// segment is flushed before the manifest names it; without, its records stay unflushed for a
+    /// later flush (the manifest then claims none of them).
+    fn rewrite_unflushed(&mut self, flush: bool) -> Result<(), JournalError> {
         let saved = self.manifest.clone();
         let result: Result<(Box<dyn AppendFile>, u64), JournalError> = (|| {
             self.seal_active(SegmentStatus::Suspect, self.last_flushed);
@@ -723,7 +836,9 @@ impl Journal {
             for line in &self.unflushed {
                 fresh.append(line).map_err(storage)?;
             }
-            fresh.sync_data().map_err(|_| JournalError::Stopped)?;
+            if flush {
+                fresh.sync_data().map_err(|_| JournalError::Stopped)?;
+            }
             self.fs.sync_dir(&self.dir).map_err(|_| JournalError::Stopped)?;
             self.manifest.store(self.fs.as_ref(), &self.dir)?;
             let bytes: u64 = self
@@ -737,7 +852,9 @@ impl Journal {
             Ok((fresh, bytes)) => {
                 self.active = fresh;
                 self.active_bytes = bytes;
-                self.mark_flushed();
+                if flush {
+                    self.mark_flushed();
+                }
                 Ok(())
             }
             Err(e) => {
@@ -773,6 +890,94 @@ fn start_segment_file(
         status: SegmentStatus::Active,
     });
     Ok(file)
+}
+
+/// The previous run's records after its durable point, moved to a fresh active segment.
+struct CarriedTail {
+    file: Box<dyn AppendFile>,
+    /// The copied lines, in order, not yet flushed.
+    lines: Vec<Vec<u8>>,
+    bytes: u64,
+    /// Sequence number of the first copied line.
+    first: u64,
+    /// The last record known durable before them, if any.
+    durable: Option<(u64, Sha256Digest)>,
+}
+
+/// Seals the previous run's active segment without flushing it again (see the module docs).
+///
+/// If every record in it is durable already (or it has none), it is sealed in place and `None`
+/// is returned; the caller starts a new segment. Otherwise the records up to `durable` stay in
+/// the old file, recorded as suspect up to them, and the records after it are copied, unflushed,
+/// to a fresh segment that becomes the active one. The manifest is stored before this returns;
+/// it claims none of the copied records.
+fn carry_previous_tail(
+    fs: &dyn Fs,
+    dir: &Path,
+    manifest: &mut Manifest,
+    records: &[VerifiedRecord],
+    durable: Option<u64>,
+    report: &super::scan::VerifyReport,
+) -> Result<Option<CarriedTail>, JournalError> {
+    let Some(active) = manifest.active().cloned() else {
+        return Ok(None);
+    };
+    let first = active.first_seq.0;
+    let end = report.next_seq;
+    // One past the last record known durable inside this segment.
+    let proven_end = durable.map_or(first, |d| d.saturating_add(1).clamp(first, end));
+    if proven_end == end {
+        if let Some(old) = manifest.segments.last_mut() {
+            old.status = SegmentStatus::Sealed;
+            old.last_seq = end.checked_sub(1).filter(|l| *l >= first).map(Seq);
+            old.last_hash = old.last_seq.map(|_| report.head);
+        }
+        return Ok(None);
+    }
+    let hash_of = |seq: u64| records.iter().find(|r| r.envelope.seq.0 == seq).map(|r| r.hash);
+    let bytes = fs.read(&dir.join(&active.file)).map_err(storage)?;
+    let (Some(from), Some(to)) = (
+        line_offset(&bytes, proven_end - first),
+        line_offset(&bytes, end - first),
+    ) else {
+        return Err(JournalError::Corrupt(
+            "the active segment changed while it was recovered".to_owned(),
+        ));
+    };
+    let tail = &bytes[from..to];
+    if let Some(old) = manifest.segments.last_mut() {
+        old.status = SegmentStatus::Suspect;
+        old.last_seq = proven_end.checked_sub(1).filter(|l| *l >= first).map(Seq);
+        old.last_hash = old.last_seq.and_then(|l| hash_of(l.0));
+    }
+    let mut file = start_segment_file(fs, dir, manifest, proven_end)?;
+    file.append(tail).map_err(storage)?;
+    manifest.store(fs, dir)?;
+    let lines = tail.split_inclusive(|b| *b == b'\n').map(<[u8]>::to_vec).collect();
+    let durable = proven_end
+        .checked_sub(1)
+        .and_then(|seq| hash_of(seq).map(|hash| (seq, hash)));
+    Ok(Some(CarriedTail {
+        file,
+        lines,
+        bytes: u64::try_from(tail.len()).unwrap_or(u64::MAX),
+        first: proven_end,
+        durable,
+    }))
+}
+
+/// The byte offset just after the `n`th line of `bytes` (0 for `n == 0`), if it has that many.
+fn line_offset(bytes: &[u8], n: u64) -> Option<usize> {
+    if n == 0 {
+        return Some(0);
+    }
+    let n = usize::try_from(n).ok()?;
+    bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| **b == b'\n')
+        .nth(n - 1)
+        .map(|(i, _)| i + 1)
 }
 
 /// Creates a new active segment and stores the manifest.
@@ -818,7 +1023,8 @@ fn sweep_temporaries(fs: &dyn Fs, dir: &Path) -> Result<(), JournalError> {
 }
 
 /// The durable point named by the marker, if the marker parses and names a record that exists
-/// with exactly that hash. Anything else (missing, torn, stale beyond the journal) is ignored.
+/// with exactly that hash. Anything else (missing, torn, stale beyond the journal, or `none`) is
+/// ignored, and the whole journal is checked.
 fn read_marker(fs: &dyn Fs, dir: &Path, records: &[VerifiedRecord]) -> Option<u64> {
     let bytes = fs.read(&dir.join(FLUSH_MARKER)).ok()?;
     let text = std::str::from_utf8(&bytes).ok()?;
@@ -837,62 +1043,67 @@ fn read_marker(fs: &dyn Fs, dir: &Path, records: &[VerifiedRecord]) -> Option<u6
         .then_some(seq)
 }
 
-/// ADR-0018 §3 at startup: reads back and flushes the payloads of every record after the last
-/// durable point, and returns the records whose payload is unreadable.
+/// ADR-0018 §3 at startup: reads back, rewrites and flushes the payloads of every record after
+/// the durable point, and returns the records whose payload is unreadable.
 ///
-/// The durable point is the marker if it is valid; otherwise the start of the previously
-/// active segment (every earlier segment was flushed, payloads first, when it was sealed). A
-/// chunk shredded after the record that references it is not a loss: it is skipped when a
-/// `chunk.shredded` record for it follows.
+/// The durable point is the marker (`durable`) if it is valid. Without one (a store attached
+/// for the first time, or a removed marker) the whole journal is checked: a narrower fallback could skip a
+/// record whose loss was never journaled (review WP3.A1 H1). A record already named by a
+/// `chunk.lost` record is not reported again, and a record whose chunk a later `chunk.shredded`
+/// record names is not a loss. Both are looked up in indexes built once (review WP3.A1 L4).
 fn recover_tail_payloads(
-    fs: &dyn Fs,
-    dir: &Path,
-    manifest: &Manifest,
     records: &[VerifiedRecord],
+    durable: Option<u64>,
     store: &ChunkStore,
 ) -> Result<Vec<(LostPayload, EventEnvelope)>, JournalError> {
-    let first_unproven = match read_marker(fs, dir, records) {
-        Some(seq) => seq + 1,
-        None => manifest.active().map_or(0, |a| a.first_seq.0),
-    };
-    let tail: Vec<&EventEnvelope> = records
+    let first_unproven = durable.map_or(0, |seq| seq + 1);
+    let mut last_shred: BTreeMap<(PocketId, &str), Seq> = BTreeMap::new();
+    let mut reported: BTreeSet<u64> = BTreeSet::new();
+    for e in records.iter().map(|r| &r.envelope) {
+        let named = e.metadata.as_map();
+        if e.event_type == types::CHUNK_SHREDDED
+            && let (Some(pocket), Some(chunk)) = (e.pocket_id, named.get(CHUNK_METADATA_KEY))
+        {
+            let latest = last_shred.entry((pocket, chunk.as_str())).or_insert(e.seq);
+            *latest = (*latest).max(e.seq);
+        } else if e.event_type == types::CHUNK_LOST
+            && let Some(seq) = named.get(RECORD_SEQ_METADATA_KEY).and_then(|v| v.parse().ok())
+        {
+            reported.insert(seq);
+        }
+    }
+    let names: Vec<(PocketId, ChunkRef, String, &EventEnvelope)> = records
         .iter()
         .map(|r| &r.envelope)
-        .filter(|e| e.seq.0 >= first_unproven)
+        .filter(|e| e.seq.0 >= first_unproven && !reported.contains(&e.seq.0))
+        .filter_map(|e| Some((e.pocket_id?, e.payload_ref?, e)))
+        .map(|(pocket, chunk, e)| (pocket, chunk, chunk.to_string(), e))
         .collect();
-    let shredded_after = |pocket: PocketId, chunk: ChunkRef, seq: Seq| {
-        let name = chunk.to_string();
-        tail.iter().any(|e| {
-            e.seq > seq
-                && e.event_type == types::CHUNK_SHREDDED
-                && e.pocket_id == Some(pocket)
-                && e.metadata.as_map().get(CHUNK_METADATA_KEY) == Some(&name)
-        })
-    };
-    let referencing: Vec<(PocketId, ChunkRef, &EventEnvelope)> = tail
+    let referencing: Vec<(PocketId, ChunkRef, &EventEnvelope)> = names
         .iter()
-        .filter_map(|e| Some((e.pocket_id?, e.payload_ref?, *e)))
-        .filter(|(pocket, chunk, e)| !shredded_after(*pocket, *chunk, e.seq))
+        .filter(|(pocket, _, name, e)| {
+            last_shred
+                .get(&(*pocket, name.as_str()))
+                .is_none_or(|shred| *shred < e.seq)
+        })
+        .map(|(pocket, chunk, _, e)| (*pocket, *chunk, *e))
         .collect();
     let refs: Vec<(PocketId, ChunkRef)> = referencing.iter().map(|(p, c, _)| (*p, *c)).collect();
-    let lost: BTreeSet<(PocketId, ChunkRef)> = store
-        .verify_and_sync(&refs)
-        .map_err(JournalError::Payload)?
-        .into_iter()
-        .collect();
+    let lost = store.verify_and_sync(&refs).map_err(JournalError::Payload)?;
     Ok(referencing
         .into_iter()
-        .filter(|(p, c, _)| lost.contains(&(*p, *c)))
-        .map(|(pocket, chunk, e)| {
-            (
+        .filter_map(|(pocket, chunk, e)| {
+            let found = lost.iter().find(|l| l.pocket == pocket && l.chunk == chunk)?;
+            Some((
                 LostPayload {
                     record_seq: e.seq,
                     operation_id: e.operation_id,
                     pocket,
                     chunk,
+                    cause: found.cause,
                 },
                 e.clone(),
-            )
+            ))
         })
         .collect())
 }

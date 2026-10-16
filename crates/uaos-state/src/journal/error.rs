@@ -66,6 +66,18 @@ pub enum JournalError {
     /// The attached chunk store failed while the journal flushed or recovered its payloads.
     #[error("payload store: {0}")]
     Payload(ChunkError),
+    /// Flushing the attached chunk store failed. The writer refuses records until
+    /// [`super::Journal::recover`] has read the pending content back and reported any loss.
+    #[error("making stored content durable failed; records are refused until recovery")]
+    PayloadFlushFailed,
+    /// The journal coordinates a chunk store (`journal/FLUSHED` exists) and was opened without
+    /// it, which would make unverified payload references durable.
+    #[error("this journal coordinates a chunk store; open it with its chunk store")]
+    PayloadsRequired,
+    /// A record breaks a kernel convention (for example `chunk.lost` naming its chunk in
+    /// `payload_ref`); it was not appended.
+    #[error("record refused: {0}")]
+    InvalidRecord(&'static str),
 }
 
 impl JournalError {
@@ -83,8 +95,11 @@ impl JournalError {
             | Self::LineTooLarge
             | Self::Platform(_)
             | Self::Encoding(_)
-            | Self::PayloadNotStored => codes::JOURNAL_WRITE_FAILED,
+            | Self::InvalidRecord(_) => codes::JOURNAL_WRITE_FAILED,
+            Self::PayloadNotStored => codes::JOURNAL_PAYLOAD_NOT_STORED,
             Self::Payload(e) => e.code(),
+            Self::PayloadFlushFailed => codes::STORE_PAYLOAD_FLUSH_FAILED,
+            Self::PayloadsRequired => codes::CONFIG_INVALID,
         }
     }
 }
