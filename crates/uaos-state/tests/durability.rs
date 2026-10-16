@@ -118,6 +118,10 @@ struct FaultFs {
     fail_key_rename: Arc<AtomicBool>,
     /// The next key-file removal fails, once.
     fail_key_remove: Arc<AtomicBool>,
+    /// The first directory flush that fails, held after failing and before it returns.
+    dir_sync_fail: Arc<Gate>,
+    /// The first segment append, held before it runs.
+    segment_append: Arc<Gate>,
 }
 
 #[derive(Debug)]
@@ -125,11 +129,13 @@ struct FaultAppend {
     inner: Box<dyn AppendFile>,
     segment: bool,
     fault: Arc<Mutex<Option<u32>>>,
+    gate: Arc<Gate>,
 }
 
 impl AppendFile for FaultAppend {
     fn append(&mut self, bytes: &[u8]) -> Result<(), FsError> {
         if self.segment {
+            self.gate.hold_if_armed();
             let mut fault = self.fault.lock().unwrap();
             match *fault {
                 Some(0) => {
@@ -181,6 +187,7 @@ impl Fs for FaultFs {
             inner: self.sim.open_append(path)?,
             segment: path.extension().and_then(|e| e.to_str()) == Some("jsonl"),
             fault: Arc::clone(&self.segment_append_fault),
+            gate: Arc::clone(&self.segment_append),
         }))
     }
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
@@ -205,7 +212,11 @@ impl Fs for FaultFs {
         self.sim.remove_file(path)
     }
     fn sync_dir(&self, path: &Path) -> Result<(), FsError> {
-        self.sim.sync_dir(path)
+        let result = self.sim.sync_dir(path);
+        if result.is_err() {
+            self.dir_sync_fail.hold_if_armed();
+        }
+        result
     }
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
         if is_key(path) {
@@ -257,6 +268,8 @@ impl World {
                 key_rename: Arc::new(Gate::default()),
                 fail_key_rename: Arc::new(AtomicBool::new(false)),
                 fail_key_remove: Arc::new(AtomicBool::new(false)),
+                dir_sync_fail: Arc::new(Gate::default()),
+                segment_append: Arc::new(Gate::default()),
             },
             sim,
             clock: Arc::new(SimClock::new(
@@ -2129,6 +2142,189 @@ fn r5_a_failed_rewrap_never_leaves_a_key_only_a_retired_kek_opens() {
 "
         )
     );
+}
+
+/// Sixth-round L1: a direct `sync_pending` whose own directory flush fails poisons the store
+/// inside the flush window, so a concurrent journal flush cannot acknowledge its batch in
+/// between.
+#[test]
+fn r6_l1_a_failed_direct_store_flush_is_seen_by_a_concurrent_journal_flush() {
+    let w = World::new(980);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    write(&store, &mut j, 1);
+    assert_eq!(store.pending_len(), 1);
+    w.fs.dir_sync_fail.arm();
+    w.sim.fail_sync_after(2); // the direct flush's two file flushes pass, its data/ flush fails
+    let direct = {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || store.sync_pending())
+    };
+    w.fs.dir_sync_fail.wait_held(); // failed in the OS, not yet back in the store
+    let synced = std::thread::scope(|s| {
+        let t = s.spawn(|| j.sync());
+        std::thread::sleep(Duration::from_millis(100));
+        w.fs.dir_sync_fail.release();
+        t.join().unwrap()
+    });
+    assert!(direct.join().unwrap().is_err());
+    assert!(store.is_poisoned());
+    assert_eq!(
+        synced,
+        Err(JournalError::PayloadFlushFailed),
+        "a journal flush was acknowledged across a failed flush of the same directory"
+    );
+    assert_eq!(store.pending_len(), 1, "the batch was dropped from the pending set");
+}
+
+/// Sixth-round L2: a put of the same content while `Journal::shred` runs lifts the mark; if the
+/// shred's flush then fails, the chunk is refused again, since the record can still become
+/// durable.
+#[test]
+fn r6_l2_a_put_during_a_shred_whose_flush_fails_does_not_lift_the_refusal() {
+    let w = World::new(981);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    j.sync().unwrap();
+    w.fs.fail_segment_append_after(1); // the shred record passes, the rewrite's copy fails
+    w.sim.fail_sync_after(0); // the segment flush fails
+    w.fs.segment_append.arm(); // holds the shred record's append, after `begin_shred`
+    let shred = std::thread::scope(|s| {
+        let t = s.spawn(|| j.shred(shredded_record(x, 2)).map(drop));
+        w.fs.segment_append.wait_held();
+        assert_eq!(store.put(pocket(), &content(1)).unwrap(), x); // another request, same content
+        w.fs.segment_append.release();
+        t.join().unwrap()
+    });
+    assert!(shred.is_err());
+    w.fs.clear_append_fault();
+    w.sim.fail_sync_after(u32::MAX);
+    j.recover().unwrap(); // the shred record is now durable
+    assert!(w.survey().2.iter().any(|(_, c, _)| *c == x.to_string()));
+    assert_eq!(
+        j.append(draft(Some(pocket()), Some(x), 3)).err(),
+        Some(JournalError::PayloadNotStored),
+        "a record referenced content whose shred record is durable"
+    );
+}
+
+/// Sixth-round L3: a shred refused before its record is written (here a malformed record) leaves
+/// the content as it was.
+#[test]
+fn r6_l3_a_shred_refused_before_its_record_leaves_the_content_alone() {
+    let w = World::new(982);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    j.sync().unwrap();
+    let mut bad = shredded_record(x, 2);
+    bad.payload_ref = Some(x);
+    assert!(matches!(j.shred(bad), Err(JournalError::InvalidRecord(_))));
+    assert!(w.survey().2.is_empty(), "no shred record exists");
+    assert_eq!(
+        store.get(pocket(), x).ok(),
+        Some(content(1)),
+        "content with no shred record is refused"
+    );
+    j.append(draft(Some(pocket()), Some(x), 3)).unwrap();
+}
+
+/// Sixth-round L3: shreds refused by a stopped writer (a full disk) leave no mark behind, so the
+/// backlog holds only shreds whose record exists.
+#[test]
+fn r6_l3_a_disk_full_episode_leaves_no_shred_backlog() {
+    let w = World::new(983);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 0);
+    j.sync().unwrap();
+    w.fs.fail_segment_append_after(0);
+    assert_eq!(
+        j.append(draft(Some(pocket()), None, 99)).err(),
+        Some(JournalError::DiskFull)
+    );
+    for n in 1..=u64::try_from(MAX_UNFINISHED_SHREDS).unwrap() {
+        let r = store.reference(pocket(), &content(n)).unwrap();
+        assert_eq!(j.shred(shredded_record(r, n)).err(), Some(JournalError::DiskFull));
+    }
+    j.recover().unwrap();
+    assert!(w.survey().2.is_empty(), "no shred record exists");
+    assert!(
+        j.shred(shredded_record(x, 0)).map(drop).is_ok(),
+        "a healthy journal refused a shred: the backlog held shreds that never reached their record"
+    );
+}
+
+/// A keyring whose first `kek` lookup, once armed, is held before it runs.
+#[derive(Debug)]
+struct GateKek {
+    inner: Arc<MemoryKeyring>,
+    gate: Arc<Gate>,
+}
+
+impl PocketKeyring for GateKek {
+    fn cas_key(&self, p: PocketId) -> Result<Arc<uaos_platform::crypto::SecretKey>, KeyringError> {
+        self.inner.cas_key(p)
+    }
+    fn current_kek(&self, p: PocketId) -> Result<(KekVersion, Arc<uaos_platform::crypto::SecretKey>), KeyringError> {
+        self.inner.current_kek(p)
+    }
+    fn kek(&self, p: PocketId, v: KekVersion) -> Result<Arc<uaos_platform::crypto::SecretKey>, KeyringError> {
+        self.gate.hold_if_armed();
+        self.inner.kek(p, v)
+    }
+    fn rotate_kek(&self, p: PocketId) -> Result<KekVersion, KeyringError> {
+        self.inner.rotate_kek(p)
+    }
+    fn retire_keks_before(&self, p: PocketId, v: KekVersion) -> Result<(), KeyringError> {
+        self.inner.retire_keks_before(p, v)
+    }
+    fn kek_versions(&self, p: PocketId) -> Result<Vec<KekVersion>, KeyringError> {
+        self.inner.kek_versions(p)
+    }
+}
+
+/// Sixth-round L4: a put that reads back stored content holds the stripe, so a re-wrap finishing
+/// meanwhile waits for it instead of retiring the KEK it is unwrapping with.
+#[test]
+fn r6_l4_a_put_reading_back_content_is_not_failed_by_a_finishing_rewrap() {
+    let w = World::new(984);
+    {
+        let store = w.store();
+        let mut j = w.open(&store).unwrap();
+        write(&store, &mut j, 1);
+        write(&store, &mut j, 2);
+        w.clock.advance(1_100_000_000);
+        j.sync().unwrap(); // the marker passes both records, so the next open leaves them unread
+    }
+    w.sim.crash();
+    let gate = Arc::new(Gate::default());
+    let keys: Arc<dyn PocketKeyring> = Arc::new(GateKek {
+        inner: Arc::clone(&w.keys),
+        gate: Arc::clone(&gate),
+    });
+    let rng: Arc<dyn Rng> = w.rng.clone();
+    let store =
+        Arc::new(ChunkStore::open_with(Arc::new(w.fs.clone()), rng, keys, &w.data, ChunkDurability::Balanced).unwrap());
+    let mut j = w.open(&store).unwrap();
+    let b = store.reference(pocket(), &content(2)).unwrap();
+    let rewrap = j.shred(shredded_record(b, 10)).unwrap();
+    gate.arm();
+    let put = {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || store.put(pocket(), &content(1)))
+    };
+    gate.wait_held(); // the put has read the key file of content 1 (version 1)
+    let rewrapping = std::thread::spawn(move || rewrap.finish());
+    std::thread::sleep(Duration::from_millis(300)); // a re-wrap that does not wait finishes now
+    gate.release();
+    assert_eq!(
+        put.join().unwrap().err(),
+        None,
+        "a put of stored content failed because a re-wrap finished while it read the pair"
+    );
+    assert!(rewrapping.join().unwrap().is_ok());
 }
 
 /// Fifth-round L3: shreds left unfinished by failures are bounded; past the bound a shred is

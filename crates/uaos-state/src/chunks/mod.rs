@@ -709,22 +709,37 @@ impl ChunkStore {
     /// appends the shred record (fifth round, L1); nothing is forgotten here, since a chunk
     /// still pending must stay pending until the record's flush.
     ///
+    /// Returns whether this call marked it (it was not marked already).
+    ///
     /// # Errors
     /// `ShredBacklog` at [`MAX_UNFINISHED_SHREDS`].
-    pub(crate) fn begin_shred(&self, pocket: PocketId, chunk: ChunkRef) -> Result<(), ChunkError> {
+    pub(crate) fn begin_shred(&self, pocket: PocketId, chunk: ChunkRef) -> Result<bool, ChunkError> {
         let key = (pocket, chunk);
         let _slot = self.slot(key);
-        self.mark_shredding(key)
-    }
-
-    /// Adds `key` to the chunks being shredded, within the bound. The caller holds its slot.
-    fn mark_shredding(&self, key: Key) -> Result<(), ChunkError> {
         let mut shredding = locked(&self.shredding);
-        if !shredding.contains(&key) && shredding.len() >= MAX_UNFINISHED_SHREDS {
+        if shredding.contains(&key) {
+            return Ok(false);
+        }
+        if shredding.len() >= MAX_UNFINISHED_SHREDS {
             return Err(ChunkError::ShredBacklog);
         }
-        shredding.insert(key);
-        Ok(())
+        Ok(shredding.insert(key))
+    }
+
+    /// Lifts the mark [`ChunkStore::begin_shred`] set when the shred's record was never written
+    /// (a failed append is never acknowledged): no shred covers the content (sixth round, L3).
+    pub(crate) fn abandon_shred(&self, pocket: PocketId, chunk: ChunkRef) {
+        let key = (pocket, chunk);
+        let _slot = self.slot(key);
+        locked(&self.shredding).remove(&key);
+    }
+
+    /// Marks `chunk` again, beyond the bound: its shred record exists and may become durable, so
+    /// the content stays refused even if a put lifted the mark meanwhile (sixth round, L2).
+    pub(crate) fn keep_refused(&self, pocket: PocketId, chunk: ChunkRef) {
+        let key = (pocket, chunk);
+        let _slot = self.slot(key);
+        locked(&self.shredding).insert(key);
     }
 
     /// Writes a pair for `key` and tracks it. The caller holds the chunk's slot.
@@ -876,6 +891,10 @@ impl ChunkStore {
     /// Reads a chunk back and classifies the result. Keyring and storage failures are reported
     /// as such: they are never evidence that the content is lost.
     fn probe(&self, pocket: PocketId, chunk: ChunkRef) -> Probe {
+        // Held shared, like `get`: a re-wrap finishing meanwhile would otherwise retire the KEK
+        // between reading the key file and unwrapping it (sixth round, L4). Callers hold the
+        // chunk's slot and no stripe, the lock order every chunk operation uses.
+        let _shared = self.rotation_shared(pocket);
         let key_bytes = match self.fs.read(&self.key_path(pocket, chunk)) {
             Ok(b) => b,
             Err(FsError::NotFound { .. }) => return Probe::Absent,
@@ -997,15 +1016,16 @@ impl ChunkStore {
             }
             for path in [self.chunk_path(key.0, key.1), self.key_path(key.0, key.1)] {
                 // A pending chunk's files are removed only under its slot, which also removes
-                // it from `pending`: a missing file here is a failure, never success.
-                self.fs.sync_file(&path).map_err(storage)?;
+                // it from `pending`: a missing file here is a failure, never success. Like every
+                // flush, it poisons inside the window if it fails (sixth round, L1).
+                self.flushed(|| self.fs.sync_file(&path))?;
             }
             pockets.insert(key.0);
             flushed.push(key);
         }
         for pocket in pockets {
-            self.fs.sync_dir(&self.data_dir(pocket)).map_err(storage)?;
-            self.fs.sync_dir(&self.key_dir(pocket)).map_err(storage)?;
+            self.flushed(|| self.fs.sync_dir(&self.data_dir(pocket)))?;
+            self.flushed(|| self.fs.sync_dir(&self.key_dir(pocket)))?;
         }
         // A flushed write elsewhere that failed while this batch was flushed (a re-wrap, a
         // rewrite, a quarantine) may have dropped these chunks' entries. Every such write still
@@ -1181,6 +1201,7 @@ impl ChunkStore {
         if self.attached.load(Ordering::SeqCst) {
             return Err(ChunkError::ShredThroughJournal);
         }
+        self.begin_shred(pocket, chunk)?;
         self.shred_now(pocket, chunk)
     }
 
@@ -1224,7 +1245,8 @@ impl ChunkStore {
         let key = (pocket, chunk);
         // Slot first, then rotation: the same order as a put, so the two never deadlock.
         let _slot = self.slot(key);
-        self.mark_shredding(key)?;
+        // Beyond the bound: the shred was admitted by `begin_shred`, or is completed at open.
+        locked(&self.shredding).insert(key);
         self.forget_on_disk(key);
         self.prepare(pocket)?;
         let _exclusive = self.rotation_exclusive(pocket);

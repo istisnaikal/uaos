@@ -488,9 +488,21 @@ impl Journal {
             ))?;
         // Marked before the record exists: whichever later step fails, even the flush that
         // `recover` later completes, nothing vouches for the content (fifth round, L1).
-        store.begin_shred(pocket, chunk).map_err(JournalError::Payload)?;
-        self.append(record)?;
-        self.sync()?;
+        let marked = store.begin_shred(pocket, chunk).map_err(JournalError::Payload)?;
+        if let Err(e) = self.append(record) {
+            // A failed append is never acknowledged, and recovery excludes its bytes: no record
+            // exists, so nothing is shredded (sixth round, L3). An earlier shred's mark stays.
+            if marked {
+                store.abandon_shred(pocket, chunk);
+            }
+            return Err(e);
+        }
+        if let Err(e) = self.sync() {
+            // The record can still become durable when `recover` completes the flush: the content
+            // stays refused, even if a put of it lifted the mark meanwhile (sixth round, L2).
+            store.keep_refused(pocket, chunk);
+            return Err(e);
+        }
         let removed = store.shred_remove(pocket, chunk).map_err(JournalError::Payload)?;
         Ok(PendingRewrap::new(store, pocket, removed))
     }
