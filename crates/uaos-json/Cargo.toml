@@ -19,5 +19,9 @@ proptest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[[bench]]
+name = "tape"
+harness = false
+
 [lints]
 workspace = true

@@ -155,7 +155,31 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
-- P3 Move 1, PR-2 (WP3.A2), in progress: `uaos-json`, the one structural tokenizer (ADR-0014).
+- P3 Move 1, PR-2 (WP3.A2): `uaos-json`, the one structural tokenizer (ADR-0014). Nothing calls
+  it yet; `uaos-redact` and its final scan are untouched.
+  - **The crate:**
+    - one forward pass over a complete buffered body, with no recursion, into a flat tape of
+      24-byte nodes that `Tape::verify` re-checks;
+    - lazy, allocation-free reads;
+    - one strict string decoder, with an offset map;
+    - the kernel's one encoder, whose bytes equal `serde_json`'s;
+    - integer readers with range checks;
+    - errors and `Debug` output carry no input bytes;
+    - one dependency, `memchr`.
+  - **Tests:** grammar (each error's kind and offset), properties, a differential against
+    `serde_json` read strictly, property fuzzing, and no payload in `Debug`. A one-off
+    20,000-document differential found 0 disagreements; 13 numbers outside the f64 range were
+    accepted by the tape only, which is the known divergence.
+  - **Seeded violations:** `arch-json-io-dependency` and eight `json-*` cases, one per
+    fail-closed rule and one for the oracle.
+  - **Measured** on the reference machine, recorded in the contract's §10:
+    - parse p95 is 2.187 ms at 1.70 MB, or 0.78 GB/s. That is **over the 2 ms stage budget by
+      about 9%**. The duplicate-key check costs about 0.3 ms of it, and the fix is owed in this
+      stage before Train B;
+    - the tape takes 384 KiB for that body;
+    - every adversarial input is bounded.
+  - **First coverage-guided run:** 10,872,985 runs of `parse` and 79,948,806 of `decode` in
+    30 minutes each, with 0 crashes.
   - **Contract first:** `docs/adr/appendix/0014-uaos-json-tape.md` covers:
     - a one-pass, fail-closed RFC 8259 grammar (a byte-order mark refused, duplicate keys
       compared after decoding, numbers grammar-only);
@@ -175,8 +199,8 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       agree, the offset map keeps its rules, encoding round-trips).
     - The nightly lane runs each target for 30 minutes on Linux under a pinned nightly
       toolchain, with generated seeds; the tape's heap bound is asserted on every input, and
-      single allocations over 64 MB fail the run. It first checks
-      the fuzz workspace's supply chain against `deny.toml`.
+      single allocations over 64 MB fail the run. It first checks the fuzz workspace's supply
+      chain against `deny.toml`.
     - `deny.toml` allows NCSA for `libfuzzer-sys` alone, which vendors LLVM's libFuzzer.
       Without the exception that workspace fails its licence check; the UAOS workspace never
       contains the crate.
