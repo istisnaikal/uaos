@@ -37,6 +37,13 @@ allow = [
   "OpenSSL",              # aws-lc-sys (P1+)
   "CDLA-Permissive-2.0",  # webpki-roots data (P3+)
 ]
+# NCSA (University of Illinois/NCSA, a permissive BSD-style license) for libfuzzer-sys alone: it
+# vendors LLVM's libFuzzer and is a dependency of the fuzz workspace only (fuzz/, D-30), never of
+# a shipped crate, and runs only in the nightly lane. The nightly job checks that workspace
+# against this file (`cargo deny --manifest-path fuzz/Cargo.toml --config deny.toml check`).
+exceptions = [
+  { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
 
 [licenses.private]
 ignore = true

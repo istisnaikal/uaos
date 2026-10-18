@@ -5,6 +5,8 @@
 # Every Ring 0 crate, present and future (identity, egress, runtime, api, the bin), and the
 # dev-only harnesses whose results gate merges.
 /crates/                  @istisnaikal
+# The fuzz workspace (D-30): its dependencies run in CI under a scoped license exception.
+/fuzz/                    @istisnaikal
 
 # Contracts, architecture and the gates that enforce them.
 /schemas/                 @istisnaikal

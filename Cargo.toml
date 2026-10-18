@@ -7,6 +7,8 @@
 resolver = "3"
 # `modules/*` (Ring 1) joins the member list with the first module in P3.
 members = ["crates/*", "xtask"]
+# The fuzz workspace (D-30) is its own workspace with its own lockfile and is never built here.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.0"
