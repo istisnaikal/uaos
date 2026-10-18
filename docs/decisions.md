@@ -29,6 +29,7 @@ Merges, publishing, spending and repository-setting changes never default, whate
 | D-33 | E | Which machine judges per-stage budgets and `perf-smoke`: the reference machine, the CI runners, or a dedicated runner | The reference machine judges stage budgets; CI runners are reported, labelled by environment, until a dedicated runner exists | WP3.8 | PENDING-DECISION(D-33) |
 | D-34 | RL | Book the external security audit and the legal review (provider terms of service, licensing, user data, community funding) for the RC-1 evidence window, and start the search for a second reviewer | Start contacts now; lead times run to weeks | Now | PENDING-DECISION(D-34) |
 | D-29 | E | Compressed streams | Relay compressed bytes untouched when nothing must be observed; request `accept-encoding: identity` upstream only when the stream must be observed or rewritten (rehydration, the binding-mismatch SLI, loop detection). From the Claude Code capture, CAP-9 | WP3.4 | PENDING-DECISION(D-29) |
+| D-30 | E | Coverage-guided fuzzing of `uaos-json` (and later the journal reader) | cargo-fuzz in an isolated `fuzz/` workspace: not a member, never shipped, its own lockfile; a pinned nightly toolchain in the nightly lane only (Linux); NCSA allowed for `libfuzzer-sys` alone through a scoped `deny.toml` exception; property fuzzing on every merge stays. Contract: `docs/adr/appendix/0014-uaos-json-tape.md` §9 | WP3.A2 | PENDING-DECISION(D-30) |
 
 ## Later phases (no marker yet)
 

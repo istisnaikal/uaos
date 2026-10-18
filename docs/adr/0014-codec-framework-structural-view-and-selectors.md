@@ -122,6 +122,9 @@ raw offsets. It has no nesting or key paths, and there is no fuzz target for it.
 
 ## Verification (WP3.1, WP3.4)
 
+- `uaos-json` is built against its contract in
+  [appendix/0014-uaos-json-tape.md](appendix/0014-uaos-json-tape.md) (WP3.A2). The contract
+  sets its limits, grammar, layout, memory bounds and proof obligations.
 - Fuzz `uaos-json`: no panic, bounded memory, and spans always within the input.
 - Property: a splice outside forbidden roles leaves every other byte unchanged, and a splice
   inside a forbidden role is rejected.
