@@ -49,14 +49,26 @@ ring = 0
 allow = ["uaos-contracts", "uaos-state"]
 ban = ["hyper", "reqwest"]
 
+[crate.uaos-json]
+ring = 0
+# The one structural tokenizer (ADR-0014 Decision 1; contract in
+# docs/adr/appendix/0014-uaos-json-tape.md): pure, no workspace edge, no I/O. serde_json is its
+# differential oracle, a dev-dependency only; banning it from the product graph keeps the oracle
+# independent of the code it checks (T14).
+allow = []
+ban = [
+  "tokio", "hyper", "hyper-util", "reqwest", "mio", "socket2",
+  "rustls", "tokio-rustls", "rusqlite", "uaos-egress", "serde_json",
+]
+
 [crate.uaos-redact]
 ring = 0
-allow = ["uaos-contracts", "uaos-platform"]
+allow = ["uaos-contracts", "uaos-platform", "uaos-json"]
 ban = ["tokio", "hyper", "reqwest", "rusqlite"]
 
 [crate.uaos-module-api]
 ring = 0
-allow = ["uaos-contracts"]
+allow = ["uaos-contracts", "uaos-json"]
 # The socket modules plug into carries no I/O of its own (ADR-0010, ADR-0014).
 ban = ["tokio", "hyper", "hyper-util", "reqwest", "mio", "socket2", "rustls", "tokio-rustls", "rusqlite", "uaos-egress"]
 
@@ -69,7 +81,7 @@ ban = ["rusqlite"]
 ring = 0
 allow = [
   "uaos-contracts", "uaos-platform", "uaos-state", "uaos-identity", "uaos-policy",
-  "uaos-ledger", "uaos-redact", "uaos-module-api", "uaos-egress",
+  "uaos-ledger", "uaos-redact", "uaos-module-api", "uaos-egress", "uaos-json",
 ]
 ban = []
 

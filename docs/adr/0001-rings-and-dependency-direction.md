@@ -1,6 +1,6 @@
 # ADR-0001: Rings, crate boundaries and dependency direction
 
-**Status:** Accepted (2026-10-12) · **Plan refs:** §1, §2.1, §2.2, D10, D13
+**Status:** Accepted (2026-10-12) · **Plan refs:** §1, §2.1, §2.2, D10, D13 · **Amended by:** ADR-0014 (a thirteenth Ring 0 crate, `uaos-json`)
 
 ## Context
 
@@ -18,7 +18,8 @@ no longer be removed without breaking the kernel.
    changes what UAOS *offers*, it is a module. If two modules would have to implement it
    identically for safety, it is kernel.
 3. **Twelve Ring 0 crates for RC-1**, each an audit unit with one invariant owner (plan §2.2).
-   Crates are added only in the phase that first needs them.
+   Crates are added only in the phase that first needs them. ADR-0014 adds a thirteenth,
+   `uaos-json`, the one structural tokenizer every reader of a JSON body shares.
 4. **Dependency direction is data, not convention.** `arch.toml` lists every crate's allowed
    workspace edges and banned transitive dependencies; `cargo xtask arch-check` enforces it on
    every merge. Ring 1 crates may depend only on `uaos-contracts` and `uaos-module-api`. The

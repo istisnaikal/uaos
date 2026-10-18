@@ -155,6 +155,19 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P3 Move 1, PR-2 (WP3.A2), in progress: `uaos-json`, the one structural tokenizer (ADR-0014).
+  - **Contract first:** `docs/adr/appendix/0014-uaos-json-tape.md` covers:
+    - a one-pass, fail-closed RFC 8259 grammar (a byte-order mark refused, duplicate keys
+      compared after decoding, numbers grammar-only);
+    - limits of 32 MiB, depth 128 and 2^20 nodes;
+    - a 24-byte node with eight structural invariants;
+    - memory bounds (at most 24 MiB of tape at the defaults; about 384 KiB for a 1.7 MB
+      transcript);
+    - its proof obligations.
+  - **`arch.toml`:** declares the crate with no workspace edge and bans async, network, TLS and
+    storage crates and `serde_json`, which is its differential oracle and a dev-dependency only.
+    `uaos-redact`, `uaos-module-api` and `uaos-runtime` may depend on it.
+  - **D-30 (coverage-guided fuzzing)** is in the decision register.
 - Maintainer decisions of 2026-10-15:
   - **Accepted ADRs:** ADR-0010 (as revised), ADR-0011, ADR-0013, ADR-0014 (as revised, after
     the WP3.0c spike), ADR-0018 and ADR-0019 (with Amendment 1). ADR-0011's code merged a day
