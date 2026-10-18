@@ -20,6 +20,7 @@ publish = false
 # Internal
 uaos-contracts = { path = "crates/uaos-contracts" }
 uaos-identity = { path = "crates/uaos-identity" }
+uaos-json = { path = "crates/uaos-json" }
 uaos-ledger = { path = "crates/uaos-ledger" }
 uaos-platform = { path = "crates/uaos-platform" }
 uaos-policy = { path = "crates/uaos-policy" }
