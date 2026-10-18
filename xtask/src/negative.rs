@@ -678,6 +678,125 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "a request handed back unsent was reported as",
         },
         Case {
+            id: "json-duplicate-key-unchecked",
+            gate: "test",
+            tool: None,
+            // ADR-0014 contract §4: an object closes without its duplicate-key check.
+            seed: replace("crates/uaos-json/src/tape.rs", "self.check_duplicate_keys(open)?;", ""),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--test", "grammar", "plain_duplicate_keys_are_rejected"],
+            },
+            expect: "duplicate key accepted",
+        },
+        Case {
+            id: "json-escaped-duplicate-compared-raw",
+            gate: "test",
+            tool: None,
+            // Contract §4: keys compared as raw bytes, so `"a"` and its escaped spelling differ.
+            seed: replace(
+                "crates/uaos-json/src/tape.rs",
+                "if a.flags & KEY_ESCAPED != 0 || b.flags & KEY_ESCAPED != 0 {",
+                "if false {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--test", "grammar", "escaped_duplicate_keys_are_rejected"],
+            },
+            expect: "escaped duplicate key accepted",
+        },
+        Case {
+            id: "json-depth-off-by-one",
+            gate: "test",
+            tool: None,
+            // Contract §3: one level more than the limit gets through.
+            seed: replace(
+                "crates/uaos-json/src/tape.rs",
+                "if self.stack.len() >= usize::from(self.limits.max_depth()) {",
+                "if self.stack.len() > usize::from(self.limits.max_depth()) {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--test", "grammar", "depth_limit_is_exact"],
+            },
+            expect: "depth 129 accepted",
+        },
+        Case {
+            id: "json-lone-surrogate-accepted",
+            gate: "test",
+            tool: None,
+            // Contract §4 (T19): a surrogate escape outside a pair passes as a character.
+            seed: replace("crates/uaos-json/src/tape.rs", "if lone {", "if false {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--test", "grammar", "lone_surrogates_are_rejected"],
+            },
+            expect: "lone surrogate accepted",
+        },
+        Case {
+            id: "json-trailing-data-accepted",
+            gate: "test",
+            tool: None,
+            // Contract §4: bytes after the root value are ignored instead of refused.
+            seed: replace(
+                "crates/uaos-json/src/tape.rs",
+                "if skip_ws(self.bytes, at) != self.bytes.len() {",
+                "if false {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--test", "grammar", "trailing_data_is_rejected"],
+            },
+            expect: "trailing data accepted",
+        },
+        Case {
+            id: "json-bom-stripped",
+            gate: "test",
+            tool: None,
+            // Contract §4: a byte-order mark stripped, so every span would sit three bytes off
+            // the forwarded body.
+            seed: replace(
+                "crates/uaos-json/src/tape.rs",
+                "reject_bom(raw)?;",
+                "let raw = raw.strip_prefix(BOM).unwrap_or(raw);",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--test", "grammar", "bom_is_rejected"],
+            },
+            expect: "BOM accepted",
+        },
+        Case {
+            id: "json-leading-zero-accepted",
+            gate: "test",
+            tool: None,
+            // Contract §4 (T19): `01` read as a number, which another parser may refuse or read
+            // as octal.
+            seed: replace(
+                "crates/uaos-json/src/tape.rs",
+                "Some(b'0') => j += 1,",
+                "Some(b'0') => j = skip_digits(bytes, j),",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--test", "grammar", "leading_zeros_are_rejected"],
+            },
+            expect: "leading zero accepted",
+        },
+        Case {
+            id: "json-decode-escape-wrong",
+            gate: "test",
+            tool: None,
+            // Contract §9 (T14): the independent oracle bites: one escape decoded wrongly makes
+            // the tape disagree with serde_json.
+            seed: replace("crates/uaos-json/src/decode.rs", "b'/' => '/',", "b'/' => '\\\\',"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--test", "differential"],
+            },
+            expect: "differs from serde_json",
+        },
+        Case {
             id: "osfs-bare-volume",
             gate: "test",
             tool: Some(WINDOWS_ONLY),
@@ -1951,6 +2070,19 @@ pub(crate) fn cases() -> Vec<Case> {
                 ],
             },
             expect: "cache kept:",
+        },
+        Case {
+            id: "arch-json-io-dependency",
+            gate: "arch-check",
+            tool: None,
+            // ADR-0014 Decision 1: the tokenizer stays pure; an async runtime in its graph fails.
+            seed: replace(
+                "crates/uaos-json/Cargo.toml",
+                "[dependencies]\nmemchr.workspace = true\n",
+                "[dependencies]\nmemchr.workspace = true\ntokio.workspace = true\n",
+            ),
+            runner: Runner::Xtask(&["arch-check"]),
+            expect: "transitively depends on banned crate `tokio`",
         },
         Case {
             id: "ledger-reserve-beyond-available",
