@@ -1759,6 +1759,39 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "deliberately shredded content reads back as lost",
         },
         Case {
+            id: "shred-of-quarantined-payload-skipped",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 fourteenth round M1: an open that ignores a loss marker when it decides
+            // whether a journaled shred finished, so the KEK is never rotated.
+            seed: replace(
+                "crates/uaos-state/src/chunks/mod.rs",
+                "        for path in [self.key_path(pocket, chunk), self.chunk_path(pocket, chunk), lost] {",
+                "        let _ = lost;\n        for path in [self.key_path(pocket, chunk), self.chunk_path(pocket, chunk)] {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r14_m1_a_shred_whose_payload_was_quarantined_is_completed"],
+            },
+            expect: "was never rotated",
+        },
+        Case {
+            id: "loss-cause-overwritten",
+            gate: "journal-durability",
+            tool: None,
+            // WP3.A1 fourteenth round L2: a chunk set aside twice reported with its later cause.
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "        causes.entry((l.pocket, l.chunk)).or_insert(l.cause);",
+                "        causes.insert((l.pocket, l.chunk), l.cause);",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "r14_l2_the_cause_the_bytes_showed_is_the_cause_reported"],
+            },
+            expect: "cause reported for record",
+        },
+        Case {
             id: "shred-incomplete-key-only",
             gate: "journal-durability",
             tool: None,
@@ -1766,8 +1799,8 @@ pub(crate) fn cases() -> Vec<Case> {
             seed: both(
                 replace(
                     "crates/uaos-state/src/chunks/mod.rs",
-                    "        for path in [self.key_path(pocket, chunk), self.chunk_path(pocket, chunk)] {\n            match self.fs.read(&path) {",
-                    "        for path in [self.key_path(pocket, chunk)] {\n            match self.fs.read(&path) {",
+                    "        for path in [self.key_path(pocket, chunk), self.chunk_path(pocket, chunk), lost] {\n            match self.fs.read(&path) {",
+                    "        let _ = lost;\n        for path in [self.key_path(pocket, chunk)] {\n            match self.fs.read(&path) {",
                 ),
                 replace(
                     "crates/uaos-state/src/chunks/mod.rs",

@@ -242,7 +242,13 @@ pub struct Journal {
 /// The lost chunks by pocket and reference: each referencing record finds its loss in
 /// `O(log L)`, not by a scan of every loss (review WP3.A1, thirteenth round, L4).
 fn loss_causes(lost: &[LostChunk]) -> BTreeMap<(PocketId, ChunkRef), LossCause> {
-    lost.iter().map(|l| ((l.pocket, l.chunk), l.cause)).collect()
+    // The first cause per chunk is what the bytes showed: a chunk set aside twice (unauthentic,
+    // then absent once quarantined) keeps "unauthentic" (fourteenth round, L2).
+    let mut causes = BTreeMap::new();
+    for l in lost {
+        causes.entry((l.pocket, l.chunk)).or_insert(l.cause);
+    }
+    causes
 }
 
 fn storage(e: FsError) -> JournalError {

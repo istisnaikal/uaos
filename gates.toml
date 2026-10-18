@@ -210,6 +210,8 @@ negative = [
   "unauthentic-loss-skipped-in-recovery",
   "missing-loss-reads-as-unavailable",
   "shredded-content-reads-as-lost",
+  "shred-of-quarantined-payload-skipped",
+  "loss-cause-overwritten",
 ]
 
 [[gate]]
