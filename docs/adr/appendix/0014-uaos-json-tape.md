@@ -193,10 +193,10 @@ test and is not this crate's limit.
 - **`decode(content)`** decodes a string's content (between its quotes) under exactly the string
   grammar of §4. On top of that it refuses a raw `"` (`UnescapedQuote`). It returns borrowed text
   when there is no escape. It never substitutes U+FFFD and never falls back silently.
-- **`decode_mapped(content)`** also returns the offset map. It holds one entry per decoded byte,
-  giving the content offset of the character or escape that produced it, plus a final entry
-  equal to the content length. There is no map when the content has no escape. This is
-  `uaos-redact`'s rule, so PR-3 can move onto it.
+- **`decode_mapped(content)`** also returns the offset map. It holds one entry per decoded byte:
+  a byte copied from the content maps to its own offset, and a byte an escape produced maps to
+  the escape's backslash. A final entry equals the content length. There is no map when the
+  content has no escape. This is `uaos-redact`'s rule, so PR-3 can move onto it.
 - **`encode_str`** is the kernel's one encoder for splice replacements:
   - `"` and `\` are escaped;
   - U+0008, U+000C, U+000A, U+000D and U+0009 become `\b \f \n \r \t`;
