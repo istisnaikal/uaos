@@ -189,8 +189,10 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       `Timeout` mean nothing was sent (retryable), also when the connection fails while hyper
       sets it up; new codes `EGRESS_INTERRUPTED` (cut off or unanswered after the request was
       sent) and `EGRESS_UNUSABLE_RESPONSE` (answered in a form the door does not pass on, or
-      could not parse) are not retryable and say the provider may have billed it. `Door::new`
-      refuses a response timeout that does not exceed the connect phase.
+      could not parse) are not retryable and say the provider may have billed it. A response
+      timeout that runs out before the request reached a connection is `Timeout`. `Door::new`
+      refuses a response timeout that does not exceed the connect phase, and an idle timeout
+      over a day.
     - One send per Operation; a request bound to another Operation is refused.
     - A circuit breaker per upstream counts transport failures and lets one probe through
       after its cooldown; a probe whose caller gives up lets the next attempt probe, and a
@@ -200,8 +202,8 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - IPv6 forms that embed a local IPv4 address are never treated as local, and the IPv6
       cloud metadata endpoints are refused.
   - **Connection tasks** run on an executor the runtime provides.
-  - **Error codes** `UAOS-EGRESS-0001` to `0005`: blocked, unreachable, timeout, circuit open,
-    refused.
+  - **Error codes** `UAOS-EGRESS-0001` to `0007`: blocked, unreachable, timeout, circuit open,
+    refused, interrupted, unusable response.
 - Reachability rules for the door (ADR-0010).
   - **`clippy.toml`.** Outbound connects (std and tokio, `TcpSocket` included, Unix streams
     and datagrams, Windows named-pipe clients), name resolution (`lookup_host`,
@@ -238,14 +240,15 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     transitively, from network, TLS and async-I/O crates (new `[ring1] ban`, enforced by
     `cargo xtask arch-check`).
   - **`deny.toml`** bans `ring`.
-  - **Seeded violations (55):** `egress-dials-private-range`, `egress-numeric-host`,
+  - **Seeded violations (57):** `egress-dials-private-range`, `egress-numeric-host`,
     `egress-private-reaches-link-local`, `egress-plaintext-resolved`,
     `egress-breaker-admits-after-cooldown`, `egress-probe-stuck-on-cancel`,
     `egress-embedded-local`, `egress-sends-trace`, `egress-forwards-switching-protocols`,
     `egress-forwards-contradicting-length`, `egress-forwards-unknown-transfer-coding`,
     `egress-forwards-repeated-length`, `egress-forwards-bodiless-length`,
     `egress-delivered-reported-unsent`, `egress-timeout-reported-unsent`,
-    `egress-unsent-reported-delivered`, `egress-ctor-outside-root`,
+    `egress-unsent-reported-delivered`, `egress-unassigned-timeout-reported-delivered`,
+    `egress-canceled-reported-delivered`, `egress-ctor-outside-root`,
     `net-dns-outside-egress`,
     `net-resolver-outside-egress`, `net-connect-outside-egress`, `net-udp-outside-egress`,
     `net-listen-outside-api`, `net-socket-listen-outside-api`, `spawn-outside-supervisor`,
@@ -261,11 +264,12 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `net-unix-connect-addr-outside-egress`, `net-tokio-unix-connect-outside-egress`,
     `net-unix-socket-connect-outside-egress`; on Windows only (not run in CI)
     `net-named-pipe-outside-egress`, `osfs-doubled-separator-unc` and `osfs-bare-volume`.
-  - **Review:** `docs/reviews/WP3.A5-egress.md`, seventeen rounds, all resolved: 2 High,
+  - **Review:** `docs/reviews/WP3.A5-egress.md`, eighteen rounds, all resolved: 2 High,
     4 Medium, 9 Low; then 1 High, 2 Medium, 7 Low; then 1 Medium, 5 Low; then 1 Medium, 5 Low;
     then 2 Medium, 4 Low; then 2 Medium, 2 Low; then 1 High, 2 Medium, 3 Low; then 1 Medium,
     7 Low; then 4 Low; then 2 Low; then 3 Low; then 2 Low; then 1 Medium, 2 Low; then 2 Low;
-    then 2 Low; then 1 Medium; then 5 Low. Two fixes rest on ADR-0013 Amendment 1, accepted by
+    then 2 Low; then 1 Medium; then 5 Low; then 4 Low. Two fixes rest on ADR-0013 Amendment 1,
+    accepted by
     the
     maintainer on 2026-10-16.
 - Dependencies for the ADR-0013 stack: tokio, hyper 1, hyper-util, http, rustls 0.23

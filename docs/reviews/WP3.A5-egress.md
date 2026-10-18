@@ -10,7 +10,8 @@ Low findings fixed or accepted with a reason. Two fixes change accepted decision
 as ADR-0013 Amendment 1, which the maintainer accepted on 2026-10-16. A second V1 review of the
 fixes found 1 High, 2 Medium and 7 Low findings, a third 1 Medium and 5 Low, a fourth
 1 Medium and 5 Low, a fifth 2 Medium and 4 Low, a sixth 2 Medium and 2 Low, a seventh
-1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, an eleventh 3 Low, a twelfth 2 Low, a thirteenth 1 Medium and 2 Low, a fourteenth 2 Low, a fifteenth 2 Low, a sixteenth 1 Medium, and a seventeenth 5 Low, all resolved below. The PR stays a draft until a review comes back clean.
+1 High, 2 Medium and 3 Low, an eighth 1 Medium and 7 Low, a ninth 4 Low, a tenth 2 Low, an eleventh 3 Low, a twelfth 2 Low, a thirteenth 1 Medium and 2 Low, a fourteenth 2 Low, a fifteenth 2 Low, a sixteenth 1 Medium, a seventeenth 5 Low, and an eighteenth 4 Low, all resolved below. The
+eighteenth round's fixes have not been reviewed again.
 
 ## Findings as reported
 
@@ -388,10 +389,30 @@ inside verbatim paths, look-alike separators) over loopback SMB.
 |---|---|---|---|
 | L1 | A connection that failed while hyper set it up, before it took the request (the upstream speaks first, or accepts and closes at once), came back as `Interrupted`, "after the request was sent", though the upstream received nothing (23 of 40 runs with the stock executor) | hyper-util attaches connection info only to errors from sending on a connection it holds, so an error without it is "nothing sent": `Unreachable`, retryable | `a_connection_lost_before_the_request_left_is_unreachable` (a server that speaks first counts 0 bytes; one that closes at once), 20 of 20 repeats; negative `egress-unsent-reported-delivered` **PROVEN** |
 | L2 | The response timeout also runs through the connect phase; set shorter than it, a request that never left read as `Interrupted` | `Door::new` refuses (`Limits`, `CONFIG_INVALID`) a response timeout that does not exceed resolution, `MAX_ADDRESSES_TRIED` connects and the handshake; `DoorLimits` says the timeout runs from handing the request to the client | `a_response_timeout_inside_the_connect_phase_is_refused` |
-| L3 | Two verdicts had no test: no answer within the response timeout (the dangerous direction: changed to `Timeout`, it reads "nothing sent, retryable") and the canceled-unsent branch | Tests for both | `no_answer_within_the_response_timeout_is_interrupted` and the L1 test; negative `egress-timeout-reported-unsent` **PROVEN** |
+| L3 | Two verdicts had no test: no answer within the response timeout (the dangerous direction: changed to `Timeout`, it reads "nothing sent, retryable") and the canceled-unsent branch | Tests for both; the canceled branch's test did not in fact reach it (eighteenth round, L3) | `no_answer_within_the_response_timeout_is_interrupted` and the L1 test; negative `egress-timeout-reported-unsent` **PROVEN** |
 | L4 | An answer hyper could not parse (`content-length: abc`, a four-digit status, not HTTP) came back as `Interrupted`, "the connection failed", and counted against the breaker, while an answer the door refuses after the headers counts as answered | hyper's parse errors are `Unusable`, "could not be parsed", and the breaker counts every `Unusable` as answered | `an_unparsable_answer_is_unusable` (three answers); the breaker's unit test |
 | L5 | The delivery contract stopped at `send`'s result; `Timeout`'s text said a connect timeout gives `Timeout` (it gives `Unreachable` after the last address); the breaker docs still said "unreachable or timed out" | `EgressResponse` and ADR-0013 say a body that fails mid-stream is an answer cut short and a `send` dropped after the hand-over may have been delivered; the `Timeout` doc and `EGRESS_TIMEOUT` text name resolution and the handshake; the breaker docs name interrupted requests | review of the text |
 
 **Verified locally (Windows, dedicated target directory):** 24 egress unit and 32 integration
 tests; 43 contracts tests; 24 platform tests; 29 xtask tests; `cargo xtask clippy`, `allow-audit`;
 all 55 egress negatives, of which 51 PROVEN here and the four Unix ones left to Linux CI.
+
+## Eighteenth review (2026-10-16)
+
+**Reviewed:** `543c2c5` (on `555494b`) by a fresh-context agent with the same checklist, in a
+scratch export. **Result:** 0 High · 0 Medium · 4 Low. No path in hyper 1.12.0 or hyper-util
+0.1.21 reports a sent request as "nothing sent": every error hyper-util builds without connection
+info comes before the request is sent, and every client-side "canceled" in hyper hands the
+request back unsent. `OsFs` refused sixteen more spellings at runtime; `\\?\C:/x` passes the
+check, but Windows reads `C:/` as one object name and the open fails.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| L1 | The response timeout could run out while hyper-util still waited for the executor to run the connection task, before the request left: the door said `Interrupted` ("may have been received") though the upstream received 0 bytes, and ADR-0013 said that timeout always meant the request was handed over. The error leaned the safe way (settled as possibly billed) and needs a badly delayed executor | The door attaches hyper-util's `capture_connection` to the request: a timeout before a connection was assigned is `Timeout` (nothing sent, retryable), after it `Interrupted` | `a_timeout_before_the_request_was_handed_over_is_not_interrupted` (a late executor; the upstream counts 0 bytes); negative `egress-unassigned-timeout-reported-delivered` **PROVEN** |
+| L2 | `DoorLimits::idle_timeout` was not checked: `Duration::MAX` panicked hyper-util's idle task (`Instant` overflow) once the first connection went idle | `Door::new` refuses an idle timeout over a day (`Limits`) | `a_response_timeout_inside_the_connect_phase_is_refused` also checks `Duration::MAX` (refused) and a day (accepted) |
+| L3 | The canceled-unsent branch had no test, though the seventeenth round's record said it had: that test reached only the no-connection-info path, and removing the branch left every test green | A test whose executor delays the connection task's second poll, so the upstream's greeting arrives while the request is still queued and hyper hands it back canceled, with connection info; the seventeenth round's row corrected | `a_queued_request_handed_back_is_unreachable` (0 bytes received); negative `egress-canceled-reported-delivered` **PROVEN** |
+| L4 | The CHANGELOG listed error codes 0001 to 0005, though 0006 and 0007 exist; `EGRESS_UNUSABLE_RESPONSE`'s message named only a protocol switch or a transfer coding and said a retry gets the same answer, though it also covers answers that could not be parsed | The CHANGELOG lists 0001 to 0007; the message names malformed answers and says a retry sends the request again | review of the text |
+
+**Verified locally (Windows, dedicated target directory):** 24 egress unit and 34 integration
+tests; 43 contracts tests; 24 platform tests; 29 xtask tests; `cargo xtask clippy`, `allow-audit`;
+all 57 egress negatives, of which 53 PROVEN here and the four Unix ones left to Linux CI.

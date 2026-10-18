@@ -937,6 +937,130 @@ async fn a_connection_lost_before_the_request_left_is_unreachable() {
     }
 }
 
+/// A plain loopback upstream that never speaks first and counts every byte it receives.
+async fn counting_upstream() -> (u16, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&received);
+    tokio::spawn(async move {
+        while let Ok((mut tcp, _)) = listener.accept().await {
+            let count = Arc::clone(&count);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                while let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(5), tcp.read(&mut buf)).await {
+                    if n == 0 {
+                        break;
+                    }
+                    count.fetch_add(n, Ordering::SeqCst);
+                }
+            });
+        }
+    });
+    (port, received)
+}
+
+fn local_upstream(port: u16) -> Upstream {
+    Upstream {
+        id: UpstreamId::new("local"),
+        host: HostName::parse("ollama.lan").unwrap(),
+        port,
+        scheme: Scheme::Http,
+        pinned: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        allow_private: true,
+        trust: Trust::System,
+    }
+}
+
+/// Round 18, L1: the response timeout runs out while hyper-util still waits for the connection
+/// task (a busy executor): the request never left, so it is `Timeout`, not `Interrupted`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_timeout_before_the_request_was_handed_over_is_not_interrupted() {
+    let (port, received) = counting_upstream().await;
+    let limits = DoorLimits {
+        connect_timeout: Duration::from_millis(100),
+        response_timeout: Duration::from_millis(1000),
+        ..DoorLimits::default()
+    };
+    let door = Door::new(
+        vec![local_upstream(port)],
+        Arc::new(Table::default()),
+        clock(),
+        LateExecutor(Duration::from_millis(1500)),
+        limits,
+    )
+    .unwrap();
+    let e = door.send(op(1), request(op(1), "local"), None).await.unwrap_err();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(received.load(Ordering::SeqCst), 0, "the request reached the upstream");
+    assert_eq!(
+        e,
+        EgressError::Timeout,
+        "a request that never left was reported as possibly received"
+    );
+}
+
+/// Polls each connection task once at once, then waits before polling it again: hyper takes the
+/// request into its queue while the dispatcher sleeps, and the upstream's greeting arrives first.
+#[derive(Debug, Clone)]
+struct SlowSecondPoll(Duration);
+
+impl hyper::rt::Executor<Pin<Box<dyn Future<Output = ()> + Send>>> for SlowSecondPoll {
+    fn execute(&self, fut: Pin<Box<dyn Future<Output = ()> + Send>>) {
+        let late = self.0;
+        tokio::spawn(async move {
+            let mut fut = fut;
+            let done = std::future::poll_fn(|cx| std::task::Poll::Ready(fut.as_mut().poll(cx).is_ready())).await;
+            if done {
+                return;
+            }
+            tokio::time::sleep(late).await;
+            fut.await;
+        });
+    }
+}
+
+/// Round 18, L3: a request queued on a connection but never written is handed back by hyper as
+/// canceled, with connection info attached: nothing left, `Unreachable`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_request_handed_back_is_unreachable() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&received);
+    tokio::spawn(async move {
+        while let Ok((mut tcp, _)) = listener.accept().await {
+            let count = Arc::clone(&count);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                let _written = tcp.write_all(b"HTTP/1.1 503 Busy\r\ncontent-length: 0\r\n\r\n").await;
+                let mut buf = vec![0u8; 8192];
+                while let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(1), tcp.read(&mut buf)).await {
+                    if n == 0 {
+                        break;
+                    }
+                    count.fetch_add(n, Ordering::SeqCst);
+                }
+            });
+        }
+    });
+    let door = Door::new(
+        vec![local_upstream(port)],
+        Arc::new(Table::default()),
+        clock(),
+        SlowSecondPoll(Duration::from_millis(300)),
+        DoorLimits::default(),
+    )
+    .unwrap();
+    let e = door.send(op(1), request(op(1), "local"), None).await.unwrap_err();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(received.load(Ordering::SeqCst), 0, "the request reached the upstream");
+    assert!(
+        matches!(e, EgressError::Unreachable(_)),
+        "a request handed back unsent was reported as {e:?}"
+    );
+}
+
 /// Round 17, L3: no answer within the response timeout after the request was sent is
 /// `Interrupted`: the provider may have received it.
 #[tokio::test]
@@ -981,6 +1105,23 @@ fn a_response_timeout_inside_the_connect_phase_is_refused() {
     };
     assert!(matches!(build(Duration::from_secs(60)), Err(EgressError::Limits(_))));
     assert!(build(Duration::from_secs(61)).is_ok());
+    // Round 18, L2: an idle timeout hyper-util's timer cannot add is refused too.
+    let idle = |idle_timeout: Duration| {
+        let limits = DoorLimits {
+            idle_timeout,
+            ..DoorLimits::default()
+        };
+        Door::new(
+            Vec::new(),
+            Arc::new(Table::default()),
+            clock(),
+            TokioExecutor::new(),
+            limits,
+        )
+        .map(|_| ())
+    };
+    assert!(matches!(idle(Duration::MAX), Err(EgressError::Limits(_))));
+    assert!(idle(Duration::from_hours(24)).is_ok());
 }
 
 /// Round 17, L4: an answer hyper cannot parse is an answer: `Unusable`, not a lost connection.

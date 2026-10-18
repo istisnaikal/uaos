@@ -69,8 +69,9 @@ pub enum EgressError {
     /// sent: nothing reached the provider.
     #[error("provider unreachable: {0}")]
     Unreachable(&'static str),
-    /// Name resolution or the TLS handshake timed out: nothing was sent. (A connect that times
-    /// out moves on to the next address; when none accepts, the door reports `Unreachable`.)
+    /// Name resolution or the TLS handshake timed out, or the response timeout ran out before
+    /// hyper handed the request to a connection: nothing was sent. (A connect that times out
+    /// moves on to the next address; when none accepts, the door reports `Unreachable`.)
     #[error("provider could not be reached in time")]
     Timeout,
     /// The connection failed, or no answer came within the response timeout, after the request

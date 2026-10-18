@@ -207,12 +207,16 @@ on the PR-5 branch.
   - nothing sent: `Unreachable` (resolution, every connect or TLS failed; the connection
     failed while hyper set it up, before it took the request, as when the upstream speaks first
     or closes at once; or hyper handed the request back unsent) and `Timeout` (resolution or the
-    TLS handshake timed out), both retryable;
+    TLS handshake timed out, or the response timeout ran out before hyper handed the request to
+    a connection), both retryable;
   - possibly received: `Interrupted` (`EGRESS_INTERRUPTED`), when the connection failed or no
-    answer came within the response timeout after the request was sent; not retryable.
+    answer came within the response timeout after the request was handed to a connection; not
+    retryable. Whether it was handed over is read from the connection hyper-util assigned to the
+    request (`capture_connection`), not inferred from the timeout: a connection task the
+    executor runs late can hold the request past the timeout before anything leaves (round 18).
     `Door::new` refuses a response timeout that does not exceed the whole connect phase
-    (resolution, `MAX_ADDRESSES_TRIED` connects and the handshake), so that timeout always means
-    the request was handed over;
+    (resolution, `MAX_ADDRESSES_TRIED` connects and the handshake), and an idle timeout over a
+    day, which hyper-util's idle task could not add to the clock;
   - answered but not passed on: `Unusable` (`EGRESS_UNUSABLE_RESPONSE`), for a `101`, a transfer
     coding the door does not decode, or an answer hyper could not parse; not retryable, since
     the same request gets the same answer, and counted by the breaker as answered;
@@ -339,8 +343,9 @@ on the PR-5 branch.
     `egress-embedded-local`, `egress-sends-trace`, `egress-forwards-switching-protocols` and
     `egress-forwards-contradicting-length`, `egress-forwards-unknown-transfer-coding` and
     `egress-forwards-repeated-length`, `egress-forwards-bodiless-length` and
-    `egress-delivered-reported-unsent`, `egress-timeout-reported-unsent` and
-    `egress-unsent-reported-delivered`, and
+    `egress-delivered-reported-unsent`, `egress-timeout-reported-unsent`,
+    `egress-unsent-reported-delivered`, `egress-unassigned-timeout-reported-delivered` and
+    `egress-canceled-reported-delivered`, and
     `osfs-doubled-separator-unc` and `osfs-bare-volume` (Windows) for the platform's file
     system;
   - for the clippy bans: `egress-ctor-outside-root`, `net-dns-outside-egress`,
@@ -375,7 +380,7 @@ on the PR-5 branch.
   - nothing the standard library calls special is ever allowed.
 - **The ban canaries** (`tests/bans.rs`), one per `clippy.toml` entry; the Unix ones were
   also cross-checked with clippy for a Linux target (all fulfilled; a removed ban fails).
-- **32 integration tests** against loopback mocks. They read what the mock received and the
+- **34 integration tests** against loopback mocks. They read what the mock received and the
   door's own counters, and cover:
   - the header policy;
   - op binding and replay;
@@ -400,8 +405,10 @@ on the PR-5 branch.
     HEAD answer or a `304` forwarded only as one length in digits;
   - errors that say whether the request may have reached the provider: an unusable or
     unparsable answer, a connection cut after the request was sent and no answer within the
-    response timeout are not retryable; a connection that never opened, or failed before hyper
-    took the request, is; a response timeout inside the connect phase is refused;
+    response timeout are not retryable; a connection that never opened or failed before hyper
+    took the request, a request hyper handed back from its queue, and a response timeout that
+    ran out before the request reached a connection are; a response timeout inside the connect
+    phase and an idle timeout over a day are refused;
   - the address cap;
   - the credential never printed;
   - **a certificate naming issuer, OCSP and CRL URLs on a local listener: the handshake fails
