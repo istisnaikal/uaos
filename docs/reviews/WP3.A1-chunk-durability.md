@@ -12,8 +12,8 @@ accepted with a reason. The property test, extended as M6 asked, then found four
 the fixes found 1 High, 1 Medium and 6 Low findings, one of them introduced by an N4 follow-up,
 a third found 1 High, 3 Medium and 5 Low, a fourth 2 Medium and 4 Low, a fifth 2 Medium and
 3 Low, a sixth 4 Low, a seventh 1 Medium and 2 Low, an eighth 1 Low, a ninth 4 Low, a tenth
-4 Low, an eleventh 1 High and 3 Low, a twelfth 3 Low, and a thirteenth 4 Low; all are fixed
-below.
+4 Low, an eleventh 1 High and 3 Low, a twelfth 3 Low, a thirteenth 4 Low, and a fourteenth
+1 Medium and 4 Low; all are fixed below.
 The PR stays a draft until a review comes back clean.
 
 ## Findings as reported
@@ -371,3 +371,25 @@ of each with partial write-backs, under all three flush policies and both disk m
 `uaos-state`; workspace clippy with warnings denied; 3 × 4,000 and 2 × 20,000 schedules of each
 property, in release, with OS write-backs; the 39 `journal-durability` negatives; every seed
 anchor unique.
+
+## Fourteenth review (2026-10-16)
+
+**Reviewed:** `369a8c6` (on `555494b`) by a fresh-context agent, in a scratch export. **Result:**
+0 High · 1 Medium · 4 Low (one of them docs). With four more write-back kinds (chunk files without
+directories, the quarantine alone, half of each key file, data files without `keys/`) both
+properties passed 20,000 schedules each; `FLUSHED`, `PAYLOADS` and the manifest go through
+`write_atomic`, so their write-backs do not matter; the new power-loss excuse is sound.
+
+| Finding | What it was | What changed | Proof |
+|---|---|---|---|
+| M1 | A shred of content still pending whose own record flush failed on that content's data file: recovery quarantined the payload and made the shred record durable, but the open completed a shred only while a file of the pair or an older KEK version remained, so the pocket's KEK was never rotated and the quarantined key file still opened the torn ciphertext's data key (its readable prefix decrypts without the tag) from a copy of the data directory. "One KEK version alive" also holds for a KEK never rotated, so the shred property could not see it | A shred also counts as unfinished while the content's loss marker remains; the shred removes it once it has rotated. The shred property now checks that no key file of shredded content, in `keys/` or quarantine, is wrapped under a KEK still alive (the reviewer's proxy, a KEK that moved past the version in force when the record was written, gave false alarms where the content never reached the disk or was shredded twice) | `r14_m1_a_shred_whose_payload_was_quarantined_is_completed`; negative `shred-of-quarantined-payload-skipped` **PROVEN**; with the fix reverted, the shred property fails within 4,000 schedules (persisted seeds removed); the reviewer's shrunk schedule is kept in `durability.proptest-regressions` |
+| L1 | A shred of content lost and stored again, cut by a power loss between its `data/` and `quarantine/` flushes, read back as lost: the pair's removal was durable, the marker's was not | Same fix: the remaining marker makes the open complete the shred again, which removes it | `r14_l1_a_shred_cut_before_its_quarantine_flush_reads_back_as_shredded` |
+| L2 | The thirteenth round's map kept the last cause per chunk, so a chunk set aside twice (unauthentic by store-first recovery, then absent at the open's check) was reported `missing`, hiding a possible tampering signal | The first cause per chunk is kept | `r14_l2_the_cause_the_bytes_showed_is_the_cause_reported`; negative `loss-cause-overwritten` **PROVEN** |
+| L3 | A full disk while writing a loss marker failed the recovery after the loss was set aside; the next recovery reported the loss without ever writing the marker, so it read back as never stored | The marker is written and flushed before the loss is set aside: if it cannot be, nothing is set aside and the next recovery finds the chunk again. The test harness can fail a marker write | `r14_l3_a_full_disk_while_marking_a_loss_leaves_it_to_the_next_recovery` |
+| L4 | The write-back model persists a file from its start only; a real OS can write a later page first, so after a power loss the active segment's unflushed tail can hold a zero-filled gap before a newline, and the open fails though every flushed record is intact (pre-existing since P1) | Stated in ADR-0018's "Not modelled" with the possible fix (treat a zero-led line in the unflushed tail as torn), left as a maintainer decision; `claims.md` says "from each file's start, in no order across files" | review of the text |
+| L5 | `get`'s doc said a `Lost` content has a `chunk.lost` record, which may not exist | Reworded | review of the text |
+
+**Verified locally (Windows, dedicated target directory):** 77 durability tests and the rest of
+`uaos-state`; workspace clippy with warnings denied; 3 × 4,000 and 2 × 20,000 schedules of each
+property, in release; the 41 `journal-durability` negatives; every seed anchor unique (one
+round-three seed moved with the code it seeds).

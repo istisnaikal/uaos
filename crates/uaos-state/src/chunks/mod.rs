@@ -889,13 +889,21 @@ impl ChunkStore {
                 Err(e) => return Err(storage(e)),
             }
         }
-        // Every loss leaves its marker, also when no file was left to set aside (the pair never
-        // reached the disk), so `get` reports the content as lost (thirteenth round, L2).
+        // The new entries are made durable now, before any later flush of `data/` or `keys/`
+        // can make their removal there durable (third round, L1).
+        self.flushed(|| self.fs.sync_dir(&dir))
+    }
+
+    /// Leaves the marker `get` reads for lost content, durable, before the loss is set aside:
+    /// every loss leaves one, also when no file reached the disk (thirteenth round, L2), and if
+    /// it cannot be written (a full disk) nothing is set aside, so the next recovery finds the
+    /// chunk again instead of reporting a loss with no marker (fourteenth round, L3).
+    fn mark_lost(&self, pocket: PocketId, chunk: ChunkRef) -> Result<(), ChunkError> {
+        let dir = self.pocket_dir(pocket).join(QUARANTINE_DIR);
+        self.fs.create_dir_all(&dir).map_err(storage)?;
         self.fs
             .write_unsynced(&self.lost_marker(pocket, chunk), b"")
             .map_err(storage)?;
-        // The new entries are made durable now, before any later flush of `data/` or `keys/`
-        // can make their removal there durable (third round, L1).
         self.flushed(|| self.fs.sync_dir(&dir))
     }
 
@@ -1105,6 +1113,7 @@ impl ChunkStore {
                 Probe::Lost(cause) => cause,
                 Probe::Failed(e) => return Err(e),
             };
+            self.mark_lost(key.0, key.1)?;
             // Set aside first: from here on the loss is remembered whatever fails next.
             locked(&self.lost).push(LostChunk {
                 pocket: key.0,
@@ -1173,6 +1182,7 @@ impl ChunkStore {
                 Probe::Lost(cause) => cause,
                 Probe::Failed(e) => return Err(e),
             };
+            self.mark_lost(key.0, key.1)?;
             // Set aside first: from here on the loss is remembered whatever fails next (review
             // WP3.A1, second round, L3).
             locked(&self.lost).push(LostChunk {
@@ -1208,8 +1218,9 @@ impl ChunkStore {
     /// Reads and authenticates a chunk.
     ///
     /// # Errors
-    /// `Unavailable` if never stored, shredded, or a shred of it has begun; `Lost` if its files
-    /// were set aside as lost (a `chunk.lost` record reports it); `Corrupt` if anything fails
+    /// `Unavailable` if never stored, shredded, or a shred of it has begun; `Lost` if it was
+    /// set aside as lost (its loss marker remains; the journal reports the loss for every record
+    /// that referenced it, if any did); `Corrupt` if anything fails
     /// authentication, including the end-to-end check that the content still matches its
     /// reference.
     pub fn get(&self, pocket: PocketId, chunk: ChunkRef) -> Result<Vec<u8>, ChunkError> {
@@ -1283,7 +1294,11 @@ impl ChunkStore {
     /// # Errors
     /// Storage failures.
     pub(crate) fn pair_remains(&self, pocket: PocketId, chunk: ChunkRef) -> Result<bool, ChunkError> {
-        for path in [self.key_path(pocket, chunk), self.chunk_path(pocket, chunk)] {
+        // The loss marker counts too: content set aside as lost after its shred record was written
+        // still needs the shred's rotation, or its quarantined key file still opens it; and a
+        // shred cut before its quarantine flush left the marker behind (fourteenth round, M1, L1).
+        let lost = self.lost_marker(pocket, chunk);
+        for path in [self.key_path(pocket, chunk), self.chunk_path(pocket, chunk), lost] {
             match self.fs.read(&path) {
                 Ok(_) => return Ok(true),
                 Err(FsError::NotFound { .. }) => {}

@@ -118,6 +118,8 @@ struct FaultFs {
     fail_key_rename: Arc<AtomicBool>,
     /// The next key-file removal fails, once.
     fail_key_remove: Arc<AtomicBool>,
+    /// The next loss-marker write fails with `NoSpace`, once.
+    fail_marker: Arc<AtomicBool>,
     /// The first directory flush that fails, held after failing and before it returns.
     dir_sync_fail: Arc<Gate>,
     /// The first segment append, held before it runs.
@@ -235,6 +237,9 @@ impl Fs for FaultFs {
         if is_key(path) {
             self.key_write.hold_if_armed();
         }
+        if path.extension().and_then(|e| e.to_str()) == Some("lost") && self.fail_marker.swap(false, Ordering::SeqCst) {
+            return Err(FsError::NoSpace { op: "write_unsynced" });
+        }
         self.sim.write_unsynced(path, bytes)
     }
     fn sync_file(&self, path: &Path) -> Result<(), FsError> {
@@ -275,6 +280,7 @@ impl World {
                 key_rename: Arc::new(Gate::default()),
                 fail_key_rename: Arc::new(AtomicBool::new(false)),
                 fail_key_remove: Arc::new(AtomicBool::new(false)),
+                fail_marker: Arc::new(AtomicBool::new(false)),
                 dir_sync_fail: Arc::new(Gate::default()),
                 segment_append: Arc::new(Gate::default()),
             },
@@ -2899,6 +2905,122 @@ fn r13_l3_lost_then_shredded_reads_back_as_shredded() {
     );
 }
 
+// ── Fourteenth review (WP3.A1, fourteenth round) ───────────────────────────────────────────
+
+/// Fourteenth-round M1: a shred of content still pending whose own record flush fails on that
+/// content's data file after the OS wrote part of it back. Recovery finds the payload
+/// unauthentic, quarantines it and makes the shred record durable; the open must still complete
+/// the shred, or the pocket's KEK is never rotated and the quarantined key file still opens the
+/// content's data key.
+#[test]
+fn r14_m1_a_shred_whose_payload_was_quarantined_is_completed() {
+    let w = World::new(1405);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_seq, x) = write(&store, &mut j, 1); // payload pending, record unflushed
+    let pocket_dir = w.data.join(CHUNKS_DIR).join(pocket().to_string());
+    for p in files_in(&w, &pocket_dir.join("data"), "chunk") {
+        w.sim.write_back_part(&p, 3, 4);
+    }
+    let v0 = w.keys.kek_versions(pocket()).unwrap().into_iter().max();
+    w.sim.fail_next_sync(); // the shred record's flush fails on the payload's data file
+    assert!(j.shred(shredded_record(x, 2)).is_err());
+    j.recover().unwrap();
+    assert!(!w.survey().2.is_empty(), "the shred record is durable");
+    assert!(w.quarantined() >= 1, "the payload's files sit in quarantine");
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(false);
+    let v1 = w.keys.kek_versions(pocket()).unwrap().into_iter().max();
+    assert!(
+        v1 > v0,
+        "a durable shred record, yet the pocket's KEK ({v0:?}) was never rotated"
+    );
+    assert_eq!(w.keys.kek_versions(pocket()).unwrap().len(), 1);
+    assert_eq!(
+        store.get(pocket(), x),
+        Err(ChunkError::Unavailable),
+        "shredded content reads back as lost"
+    );
+}
+
+/// Fourteenth-round L1: a shred of content lost once and stored again, whose quarantine flush
+/// (its last) fails before the power goes: the pair's removal is durable, the marker's removal is
+/// not. The open completes the shred again, so the content reads back as shredded.
+#[test]
+fn r14_l1_a_shred_cut_before_its_quarantine_flush_reads_back_as_shredded() {
+    let w = World::new(1402);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (_, x) = write(&store, &mut j, 1);
+    w.sim.fail_next_sync();
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    j.recover().unwrap();
+    assert_eq!(store.get(pocket(), x), Err(ChunkError::Lost));
+    store.put(pocket(), &content(1)).unwrap();
+    j.append(draft(Some(pocket()), Some(x), 2)).unwrap();
+    j.sync().unwrap();
+    // Flushes: the shred record's segment (1), keys/ (2), data/ (3); quarantine/ (4) fails.
+    w.sim.fail_sync_after(3);
+    assert!(j.shred(shredded_record(x, 3)).is_err());
+    drop(j);
+    drop(store);
+    let (store, _j) = w.restart(true);
+    assert!(!w.survey().2.is_empty(), "the shred record is durable");
+    assert_eq!(
+        store.get(pocket(), x),
+        Err(ChunkError::Unavailable),
+        "deliberately shredded content reads back as lost after a power loss"
+    );
+}
+
+/// Fourteenth-round L2: a store poisoned when the journal reopens with it: recovery at open finds
+/// the payload unauthentic and quarantines it, then the check of the previous run's records finds
+/// the chunk absent. The loss reported is the one the bytes showed.
+#[test]
+fn r14_l2_the_cause_the_bytes_showed_is_the_cause_reported() {
+    let w = World::new(1401);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, _x) = write(&store, &mut j, 1);
+    let pocket_dir = w.data.join(CHUNKS_DIR).join(pocket().to_string());
+    for p in files_in(&w, &pocket_dir.join("data"), "chunk") {
+        w.sim.write_back_part(&p, 3, 4);
+    }
+    w.sim.fail_next_sync(); // only the written-back three quarters remain
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    drop(j); // closed without recovering; the store stays poisoned
+    let j = w.open(&store).unwrap();
+    let causes: Vec<LossCause> = j
+        .lost_payloads()
+        .iter()
+        .filter(|l| l.record_seq.0 == seq)
+        .map(|l| l.cause)
+        .collect();
+    assert_eq!(causes, vec![LossCause::Unauthentic], "cause reported for record {seq}");
+}
+
+/// Fourteenth-round L3: the disk is full when recovery writes a loss's marker. Nothing is set
+/// aside then; the next recovery finds the chunk again, writes the marker and reports the loss.
+#[test]
+fn r14_l3_a_full_disk_while_marking_a_loss_leaves_it_to_the_next_recovery() {
+    let w = World::new(1403);
+    let store = w.store();
+    let mut j = w.open(&store).unwrap();
+    let (seq, x) = write(&store, &mut j, 1);
+    w.sim.fail_next_sync();
+    assert_eq!(j.sync(), Err(JournalError::PayloadFlushFailed));
+    w.fs.fail_marker.store(true, Ordering::SeqCst);
+    assert!(j.recover().is_err(), "the marker write did not fail");
+    j.recover().unwrap();
+    assert!(w.survey().1.contains(&seq), "the loss was not journaled");
+    assert_eq!(
+        store.get(pocket(), x),
+        Err(ChunkError::Lost),
+        "a journaled loss reads back as never stored or shredded"
+    );
+}
+
 // ── Random crash schedules ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -3240,6 +3362,29 @@ fn check_shreds_complete(w: &World, store: &ChunkStore, what: &str) {
             store.get(*pocket, r).is_err(),
             "{what}: shred record {sseq} is durable, no record uses the chunk again, yet it is readable"
         );
+        // No copy of its data key can still be unwrapped: no key file of the chunk, in `keys/` or
+        // set aside in quarantine, is wrapped under a KEK version still alive. "One version alive"
+        // also holds for a KEK never rotated (review WP3.A1, fourteenth round, M1). A key file
+        // starts with "UAOSKEY1" and its KEK version (u32 little-endian).
+        let alive = w.keys.kek_versions(*pocket).unwrap();
+        let name = chunk.trim_start_matches("hmac-sha256:");
+        let pocket_dir = w.data.join(CHUNKS_DIR).join(pocket.to_string());
+        for dir in ["keys", QUARANTINE_DIR] {
+            for file in files_in(w, &pocket_dir.join(dir), "key") {
+                let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                if !file_name.starts_with(&format!("{name}.")) {
+                    continue;
+                }
+                let bytes = w.sim.read(&file).unwrap_or_default();
+                let Some(version) = bytes.get(8..12).and_then(|b| <[u8; 4]>::try_from(b).ok()) else {
+                    continue;
+                };
+                assert!(
+                    !alive.contains(&KekVersion(u32::from_le_bytes(version))),
+                    "{what}: shred record {sseq} is durable, yet {file_name} is wrapped under a KEK still alive"
+                );
+            }
+        }
     }
     let versions = w.keys.kek_versions(pocket()).unwrap();
     assert!(

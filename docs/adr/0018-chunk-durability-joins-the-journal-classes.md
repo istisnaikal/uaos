@@ -130,10 +130,12 @@ record. What follows describes the code after those fixes.
 - **Decision 3.**
   - **Lost content reads back as lost.** Every loss the store sets aside leaves a marker under
     a fixed name in the pocket's quarantine (`<reference>.lost`), also when no file reached the
-    disk, flushed with the quarantine before the loss is reported; `ChunkStore::get` reads it
+    disk. The marker is written and flushed before the loss is set aside, so a full disk leaves
+    nothing set aside and the next recovery finds the chunk again. `ChunkStore::get` reads it
     directly and returns `ChunkError::Lost` (`STORE_PAYLOAD_LOST`), not `Unavailable`, whose
     message says never stored or shredded. A shred removes the marker, so content lost, stored
-    again and shredded reads back as shredded (reviews twelve and thirteen).
+    again and shredded reads back as shredded. A chunk set aside twice keeps the cause its bytes
+    showed first (reviews twelve to fourteen).
   - **Losses are journaled before their records are durable.** The `chunk.lost` records are
     appended before the flush that makes the records they report durable, so one flush covers
     both. While a found loss is not yet journaled, the writer refuses records and flushes, and
@@ -194,7 +196,10 @@ record. What follows describes the code after those fixes.
     before its record until earlier ones are retried. A direct `ChunkStore::shred` on a
     coordinated store is refused. A shred whose record is durable but which a crash interrupted is completed when the
     journal opens, once its record is durable again after the open's flush, and it counts as
-    unfinished while a file of the pair or an older KEK version remains; the store's own startup
+    unfinished while a file of the pair, the content's loss marker or an older KEK version
+    remains (content set aside as lost after its shred record was written still needs the
+    shred's rotation, or its quarantined key file still opens its data key; fourteenth review,
+    M1); the store's own startup
     would otherwise re-wrap the leftover key and leave the content readable. Both `chunk.lost` and
     `chunk.shredded` name the chunk in metadata, never as `payload_ref`, and `append` enforces
     it. With a store attached, `append` refuses both from callers: `chunk.shredded` goes through
@@ -234,7 +239,7 @@ record. What follows describes the code after those fixes.
   flush either drops the unflushed bytes, or keeps serving them without ever making them durable.
   - **Flush-ordering scenario.** A flush fails at every possible step, then the power goes. A
     record at or before `flushed_through` must have a readable payload.
-  - **Regression tests.** One for each finding of the thirteen review rounds fixed in code, and
+  - **Regression tests.** One for each finding of the fourteen review rounds fixed in code, and
     one for each defect the extended schedules found afterwards. Each round-four test was
     checked to fail with its fix reverted. These are fixed by construction, with no test that
     fails when they are reverted: first round M1 (a chunk is enrolled in `pending` before its
@@ -288,14 +293,18 @@ record. What follows describes the code after those fixes.
     earlier content without storing it again, under the same three policies, and checks two
     more things: no record referencing content is written after a written shred record of it
     unless the content was stored again since, and after every reopen a durable shred no later
-    record uses leaves the content unreadable and one KEK version alive. The first schedule
-    could not see the seventh review's M1; this one fails within seconds with it reverted.
+    record uses leaves the content unreadable, one KEK version alive, and no key file of the
+    chunk, in `keys/` or set aside in quarantine, wrapped under a KEK version still alive (one
+    version alive also holds for a KEK never rotated: fourteenth review, M1, which this check
+    finds within 4,000 schedules with the fix reverted).
+    The first schedule could not see the seventh review's M1; this one fails within seconds with
+    it reverted.
 
-- **Gate self-test.** The `journal-durability` gate lists thirty-nine seeded violations in
-  `gates.toml`: thirty-eight for this ADR and P1's `journal-ack-without-write`. Of the
-  thirty-eight, four come from this ADR's own verification plan (`chunk-flushed-before-sync`,
+- **Gate self-test.** The `journal-durability` gate lists forty-one seeded violations in
+  `gates.toml`: forty for this ADR and P1's `journal-ack-without-write`. Of the forty, four
+  come from this ADR's own verification plan (`chunk-flushed-before-sync`,
   `intent-before-chunk-write`, `chunk-put-pair-race`, and `chunk-put-shared-temp`, which checks
-  temporary naming only), and thirty-four from the classes the review rounds and the crash
+  temporary naming only), and thirty-six from the classes the review rounds and the crash
   schedules found: every round but the eighth, which added a property test instead.
 - **Not modelled, stated plainly.** `SimFs` cannot model a failed directory flush that drops
   entries, so the poisoning that rule triggers is tested only for being triggered. Open reads
@@ -306,7 +315,14 @@ record. What follows describes the code after those fixes.
   its target size. `SimFs` models a failed flush as the file falling back to its durable
   prefix; Linux can drop only the pages whose writeback failed, leaving a zero-filled hole
   before pages still cached, so after `FlushFailed` and a crash a real open could fail on the
-  hole instead of only losing the in-memory records (pre-existing since P1).
+  hole instead of only losing the in-memory records (pre-existing since P1). The simulated OS
+  writes a file back from its start, in no order across files; a real one can write a later
+  page first (Linux re-dirtying a partial last page, NTFS zero-filling past its valid data
+  length), so after a power loss the unflushed tail of the active segment can hold a zero-filled
+  gap before a newline, and the open then fails (`ChainBroken`) though every flushed record is
+  intact. Nothing is lost, but the journal does not open until the tail is cut by hand. Treating
+  a line that starts with a zero byte in the unflushed tail as torn would fix it; that changes
+  what the reader accepts and is a maintainer decision (open, not decided).
 - **Bench: the target is not met on the reference machine.** The details are in
   [the appendix](appendix/0018-chunk-put-2026-10-15.md).
   - Balanced chunk put, 4 KiB, after the first review's fixes (`fc4b5a8`; not re-measured
