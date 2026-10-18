@@ -128,7 +128,10 @@ jobs:
 
   fuzz:
     # Coverage-guided fuzzing of uaos-json (D-30; docs/adr/appendix/0014-uaos-json-tape.md §9):
-    # libFuzzer through cargo-fuzz, 30 minutes per target, resident memory capped at 256 MB.
+    # libFuzzer through cargo-fuzz (AddressSanitizer on), 30 minutes per target. The tape's own
+    # memory bound is asserted per input inside the target; the process limits stay coarse
+    # (libFuzzer's default 2048 MB of RSS, 64 MB per allocation), because ASan's quarantine and
+    # libFuzzer's tables share the process: a 256 MB RSS cap tripped on them, not on the tape.
     # The fuzz workspace (fuzz/) is not a member of the UAOS workspace and never ships; its supply
     # chain is checked against deny.toml first. libFuzzer needs a nightly toolchain: it is pinned
     # and used by this job alone. Seeds are generated here; nothing captured is committed.
@@ -166,9 +169,9 @@ jobs:
           {"a":{"b":[1,{"c":"~u0000"}]},"d":"","e":{}}
           SEEDS
       - name: Fuzz parse (30 minutes)
-        run: cargo "+$FUZZ_TOOLCHAIN" fuzz run parse fuzz/corpus/parse -- -max_total_time=1800 -rss_limit_mb=256 -max_len=65536
+        run: cargo "+$FUZZ_TOOLCHAIN" fuzz run parse fuzz/corpus/parse -- -max_total_time=1800 -rss_limit_mb=2048 -malloc_limit_mb=64 -max_len=65536
       - name: Fuzz decode (30 minutes)
-        run: cargo "+$FUZZ_TOOLCHAIN" fuzz run decode fuzz/corpus/decode -- -max_total_time=1800 -rss_limit_mb=256 -max_len=65536
+        run: cargo "+$FUZZ_TOOLCHAIN" fuzz run decode fuzz/corpus/decode -- -max_total_time=1800 -rss_limit_mb=2048 -malloc_limit_mb=64 -max_len=65536
       - name: Crash inputs (on failure; synthetic, from the fuzzer)
         if: failure()
         shell: bash

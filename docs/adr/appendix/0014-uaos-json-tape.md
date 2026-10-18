@@ -238,9 +238,15 @@ test and is not this crate's limit.
   - cargo-fuzz in an isolated `fuzz/` workspace. It is not a workspace member, never ships and has
     its own lockfile.
   - It runs only in the nightly lane, on Linux, with a pinned nightly toolchain.
-  - Targets: `parse` (arbitrary bytes, then `verify`, then decode every string) and `decode`.
-  - Each target runs for 30 minutes with `-rss_limit_mb=256` and `-max_len=65536`. Seeds are
+  - Targets: `parse` (arbitrary bytes, then `verify`, then decode every string, then the heap
+    bound of §6 on that input) and `decode`.
+  - Each target runs for 30 minutes under AddressSanitizer with `-max_len=65536`. Seeds are
     generated, and nothing captured is committed.
+  - The memory bound is asserted per input, not read from the process. The first nightly run
+    (2026-10-18) used `-rss_limit_mb=256` and stopped after about 176,000 runs at 277 MB. The
+    live heap was 25 MB, nearly all of it libFuzzer's own; ASan's quarantine held 160 MB. The
+    process limits are therefore coarse: libFuzzer's default of 2048 MB of resident memory, and
+    64 MB for any single allocation.
   - `libfuzzer-sys` is licensed `(MIT OR Apache-2.0) AND NCSA`. NCSA is allowed for that crate
     alone, through a scoped exception in `deny.toml`. The nightly job also runs `cargo deny` on the
     fuzz workspace.
