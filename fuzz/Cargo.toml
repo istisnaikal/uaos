@@ -3,7 +3,7 @@
 # Coverage-guided fuzzing of uaos-json (D-30; docs/adr/appendix/0014-uaos-json-tape.md §9).
 # Its own workspace: not a member of the UAOS workspace, never built by it and never shipped, with
 # its own lockfile. It runs only in the nightly lane, on Linux, under a pinned nightly toolchain:
-#   cargo +nightly-2026-10-01 fuzz run parse -- -max_total_time=1800 -rss_limit_mb=256 -max_len=65536
+#   cargo +nightly-2026-10-01 fuzz run parse -- -max_total_time=1800 -rss_limit_mb=2048 -malloc_limit_mb=64 -max_len=65536
 # libfuzzer-sys vendors LLVM's libFuzzer (NCSA); deny.toml allows NCSA for that crate alone.
 
 [package]

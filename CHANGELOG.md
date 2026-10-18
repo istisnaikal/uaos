@@ -174,7 +174,8 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       must pass `Tape::verify` and decode everywhere) and `decode` (the decoder and the tape
       agree, the offset map keeps its rules, encoding round-trips).
     - The nightly lane runs each target for 30 minutes on Linux under a pinned nightly
-      toolchain, with resident memory capped at 256 MB and generated seeds. It first checks
+      toolchain, with generated seeds; the tape's heap bound is asserted on every input, and
+      single allocations over 64 MB fail the run. It first checks
       the fuzz workspace's supply chain against `deny.toml`.
     - `deny.toml` allows NCSA for `libfuzzer-sys` alone, which vendors LLVM's libFuzzer.
       Without the exception that workspace fails its licence check; the UAOS workspace never
