@@ -8,7 +8,16 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+# Each exception names its advisory, why it cannot be fixed now, and when it ends.
+ignore = [
+  # zbus 6.0.0 (2026-10-16) absorbed zvariant, zbus_names and zvariant_derive. They reach us only
+  # through the Linux keyring store: zbus-secret-service-keyring-store 1.0.1 -> secret-service
+  # 5.2.0 -> zbus 5, and neither has a release on zbus 6 as of 2026-10-18. Unmaintained, not a
+  # vulnerability. Remove these when the keyring store moves to zbus 6.
+  { id = "RUSTSEC-2026-0370", reason = "zvariant: merged into zbus 6; the keyring store is still on zbus 5" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names: merged into zbus 6; the keyring store is still on zbus 5" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: merged into zbus 6; the keyring store is still on zbus 5" },
+]
 
 [licenses]
 version = 2
