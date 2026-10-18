@@ -8,6 +8,11 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Security
 
+- `deny.toml` takes its first advisory exceptions: RUSTSEC-2026-0370, -0371 and -0372
+  (`zvariant`, `zbus_names`, `zvariant_derive` unmaintained, merged into zbus 6.0.0). They reach
+  the build only through the Linux keyring store (`zbus-secret-service-keyring-store` 1.0.1 →
+  `secret-service` 5.2.0 → zbus 5), which has no zbus 6 release yet. They are not
+  vulnerabilities; the exceptions end when the keyring store moves to zbus 6.
 - `uaos-policy` hardening after the retroactive review (`docs/reviews/WP2.1-policy.md`; ADR-0008
   Amendment 1):
   - **Crafted policy text aborted the process** (about 80 nested parentheses overflowed Cedar's
