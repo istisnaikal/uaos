@@ -644,6 +644,40 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "nothing was sent, but the door reported",
         },
         Case {
+            id: "egress-unassigned-timeout-reported-delivered",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 18, L1: a response timeout before hyper handed the request to a
+            // connection reported as possibly received.
+            seed: replace(
+                "crates/uaos-egress/src/door.rs",
+                "                if handed_over.connection_metadata().is_none() {",
+                "                if handed_over.connection_metadata().is_none() && false {",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_timeout_before_the_request_was_handed_over_is_not_interrupted"],
+            },
+            expect: "a request that never left was reported as possibly received",
+        },
+        Case {
+            id: "egress-canceled-reported-delivered",
+            gate: "test",
+            tool: None,
+            // Review WP3.A5 round 18, L3: a request hyper handed back unsent reported as possibly
+            // received.
+            seed: replace(
+                "crates/uaos-egress/src/lib.rs",
+                "                unsent |= h.is_canceled();",
+                "                let _ = h.is_canceled();",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-egress", "--test", "door", "a_queued_request_handed_back_is_unreachable"],
+            },
+            expect: "a request handed back unsent was reported as",
+        },
+        Case {
             id: "osfs-bare-volume",
             gate: "test",
             tool: Some(WINDOWS_ONLY),

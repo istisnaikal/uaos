@@ -55,7 +55,8 @@ pub struct DoorLimits {
     pub breaker_cooldown: Duration,
     /// Largest request body the door sends.
     pub max_request_body: usize,
-    /// How long an idle pooled connection is kept.
+    /// How long an idle pooled connection is kept; at most a day ([`Door::new`] refuses more:
+    /// hyper-util's idle timer overflows on `Duration::MAX`).
     pub idle_timeout: Duration,
 }
 
@@ -151,6 +152,9 @@ pub struct EgressResponse {
     /// Body, not yet read.
     pub body: Incoming,
 }
+
+/// Longest idle time a pooled connection is kept ([`DoorLimits::idle_timeout`]).
+const MAX_IDLE_TIMEOUT: Duration = Duration::from_hours(24);
 
 /// Headers that describe one connection, not the message (RFC 9110 §7.6.1).
 const HOP_BY_HOP: [&str; 9] = [
@@ -384,6 +388,11 @@ impl Door {
                 "the response timeout must exceed the connect phase, (MAX_ADDRESSES_TRIED + 2) connect timeouts",
             ));
         }
+        // hyper-util adds the idle timeout to an `Instant`; `Duration::MAX` panics a connection
+        // task when the first connection goes idle (review WP3.A5, round 18, L2).
+        if limits.idle_timeout > MAX_IDLE_TIMEOUT {
+            return Err(EgressError::Limits("the idle timeout must not exceed a day"));
+        }
         let mut system_roots = None;
         let mut by_id = BTreeMap::new();
         let mut targets = BTreeMap::new();
@@ -526,13 +535,17 @@ impl Door {
         }
 
         bump(&self.counters.sent);
+        // hyper-util records the connection when it hands the request to it, so a timeout tells
+        // a request still waiting for its connection (a connect phase or connection task that ran
+        // late) from one that may have been sent (review WP3.A5, round 18, L1).
+        let handed_over = hyper_util::client::legacy::connect::capture_connection(&mut outbound);
         let result = tokio::time::timeout(self.limits.response_timeout, self.client.request(outbound)).await;
         let response = match result {
             Err(_) => {
-                // The connect phase fits inside this timeout (`Door::new` checks), and its own
-                // timeouts come back as `Timeout` or `Unreachable`; this one ran out while waiting
-                // for an answer to a request that may have been sent (rounds 16 and 17).
                 admitted.settle(Outcome::TransportFailure);
+                if handed_over.connection_metadata().is_none() {
+                    return Err(EgressError::Timeout);
+                }
                 return Err(EgressError::Interrupted("no answer within the response timeout"));
             }
             Ok(Err(e)) => {
