@@ -168,6 +168,20 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     storage crates and `serde_json`, which is its differential oracle and a dev-dependency only.
     `uaos-redact`, `uaos-module-api` and `uaos-runtime` may depend on it.
   - **D-30 (coverage-guided fuzzing)** is in the decision register.
+  - **Fuzzing (D-30):**
+    - `fuzz/` is a cargo-fuzz workspace of its own, excluded from the UAOS workspace, never
+      shipped, with its own lockfile. It has two targets: `parse` (arbitrary bytes; every tape
+      must pass `Tape::verify` and decode everywhere) and `decode` (the decoder and the tape
+      agree, the offset map keeps its rules, encoding round-trips).
+    - The nightly lane runs each target for 30 minutes on Linux under a pinned nightly
+      toolchain, with resident memory capped at 256 MB and generated seeds. It first checks
+      the fuzz workspace's supply chain against `deny.toml`.
+    - `deny.toml` allows NCSA for `libfuzzer-sys` alone, which vendors LLVM's libFuzzer.
+      Without the exception that workspace fails its licence check; the UAOS workspace never
+      contains the crate.
+    - The nightly lane also runs the tape's property fuzzing at 1,000,000 cases per property
+      and its differential at 100,000, and adds `uaos-json` to mutation testing.
+    - `.github/CODEOWNERS` covers `/fuzz/`.
 - Maintainer decisions of 2026-10-15:
   - **Accepted ADRs:** ADR-0010 (as revised), ADR-0011, ADR-0013, ADR-0014 (as revised, after
     the WP3.0c spike), ADR-0018 and ADR-0019 (with Amendment 1). ADR-0011's code merged a day
