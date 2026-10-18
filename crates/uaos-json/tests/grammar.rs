@@ -85,6 +85,18 @@ fn escaped_duplicate_keys_are_rejected() {
     }
     let distinct = j(r#"{"a":1,"~u0062":2,"~u00e9":3,"e":4}"#);
     assert!(accepted(&distinct), "distinct keys refused");
+    // Past the pairwise size, through the sorted check: 20 members, the repeat escaped.
+    let mut wide = String::from("{");
+    for i in 0..20 {
+        write!(wide, "\"k{i}\":{i},").unwrap();
+    }
+    let at = u32::try_from(wide.len()).unwrap();
+    wide.push_str("\"~u006b7\":0}");
+    assert_eq!(
+        refused(&j(&wide)),
+        (ErrorKind::DuplicateKey, at),
+        "escaped duplicate key accepted in a wide object"
+    );
 }
 
 #[test]

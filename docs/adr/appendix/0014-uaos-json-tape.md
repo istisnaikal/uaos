@@ -263,5 +263,63 @@ throughput, heap, and the adversarial rows of §6.
 
 ## 10. Measured
 
-Not measured yet. This section is filled from `benches/tape.rs` before the pull request leaves
-draft. Until then, the only numbers are the spike's, recorded in its appendix.
+**Environment:** the reference machine (AMD Ryzen 5 5600X, Windows 10 Pro), single thread,
+2026-10-18. Release build (`codegen-units = 1`, thin LTO), run with
+`cargo bench -p uaos-json --bench tape`.
+
+**Stage.** The input is a deterministic agent-session body of 1,700,659 bytes:
+- 3 system blocks, 29 tools, and alternating turns with text, tool calls and tool results;
+- escapes and non-ASCII throughout;
+- 9,459 nodes, depth 6.
+
+| Stage | p50 | p95 | p99 | GB/s at p95 |
+|---|---|---|---|---|
+| parse, the whole stage | 2.158 ms | 2.187 ms | 2.259 ms | 0.78 |
+| UTF-8 check alone | 0.509 ms | 0.538 ms | 0.593 ms | 3.16 |
+
+**Over budget.** The budget is parse p95 ≤ 2 ms at 1.7 MB, that is at least 0.85 GB/s. The
+measured p95 is 2.187 ms, about 9% over.
+- **Where the time goes:** with the duplicate-key check switched off, p95 is 1.883 ms
+  (0.90 GB/s). That was a measurement only, never committed. So the check costs about 0.3 ms,
+  spent per object rather than in sorting.
+- **Tried and not kept:** a pair-by-pair check for objects of up to 8 members saved 0.02 ms,
+  too little for a second code path.
+- **The rule:** the master plan fixes a stage in place, never by borrowing another stage's
+  budget, and the Move 1 checkpoint requires the fix before Train B starts. The spike's 1.87 ms
+  p95 was measured on its own transcript and does not compare directly.
+
+**Memory.**
+- That body reserves its tape once: 16,384 node slots, 384 KiB, of which 9,459 slots are used.
+- A single-scalar body of 32 MiB reserves 6 MiB of tape for one node. The first reserve assumes
+  about one node per 128 bytes. That is inside the §6 bound, but wasteful for scalar-heavy
+  input.
+
+**Adversarial inputs** (p50 of 5 runs):
+
+| Input | Size | p50 | Outcome |
+|---|---|---|---|
+| `[0,0,…]` to the size limit | 33.6 MB | 16.7 ms | refused: `too_many_nodes` |
+| one object of 1,000,001 members | 11.9 MB | 166.1 ms | accepted, 24 MiB of tape |
+| 4,001 keys sharing a 4 KiB prefix | 16.4 MB | 16.1 ms | accepted, 3 MiB |
+| 129 levels | — | under 0.1 ms | refused: `depth_exceeded` |
+| a string of escapes to the size limit | 33.6 MB | 131.7 ms | accepted, one node |
+| number text to the size limit | 33.6 MB | 15.9 ms | accepted, one node |
+| whitespace around one value, to the size limit | 33.6 MB | 16.1 ms | accepted, one node |
+
+**Coverage-guided fuzzing.** Nightly run 39146599664 on `316513d`, ubuntu-latest, with
+AddressSanitizer:
+
+| Target | Runs in 30 minutes | Coverage edges | Corpus | Crashes |
+|---|---|---|---|---|
+| `parse` | 10,872,985 | 1,091 | 1,613 inputs | 0 |
+| `decode` | 79,948,806 | 461 | 499 inputs | 0 |
+
+- The heap bound held on every input `parse` parsed.
+- Peak resident memory was 608 MB and 627 MB, AddressSanitizer included.
+- The first run, 39146269561, stopped on the 256 MB process cap described in §9.
+
+**Differential.** The one-off release run of 20,000 documents found:
+- 5,952 accepted by both;
+- 14,035 refused by both;
+- 13 numbers outside the f64 range, accepted by the tape only (the known divergence);
+- 0 disagreements.
