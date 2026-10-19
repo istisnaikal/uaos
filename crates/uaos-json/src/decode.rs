@@ -106,16 +106,22 @@ fn decode_inner(content: &str, mapped: bool) -> Result<Decoded<'_>, JsonError> {
             Some(b'"') => return Err(JsonError::new(ErrorKind::UnescapedQuote, i)),
             Some(_) => {}
         }
-        // A backslash: from here on the text is owned. Copy what came before it once.
-        let buf = out.get_or_insert_with(|| {
-            let mut buf = Vec::with_capacity(bytes.len());
+        // A backslash: from here on the text is owned. What came before it is copied once, into
+        // a text and a map sized exactly from the decoded length (contract §6), or the decode is
+        // refused with `OutOfMemory` when that much cannot be had.
+        if out.is_none() {
+            let decoded = i + Unescape::new(bytes.get(i..).unwrap_or_default()).count();
+            let oom = || JsonError::new(ErrorKind::OutOfMemory, i);
+            let mut buf = Vec::new();
+            buf.try_reserve_exact(decoded).map_err(|_| oom())?;
             buf.extend_from_slice(bytes.get(..i).unwrap_or_default());
             if mapped {
-                map.reserve(bytes.len() + 1);
+                map.try_reserve_exact(decoded + 1).map_err(|_| oom())?;
                 map.extend((0..i).map(to_u32));
             }
-            buf
-        });
+            out = Some(buf);
+        }
+        let buf = out.get_or_insert_with(Vec::new);
         let (ch, consumed) = unescape_at(bytes, i)?;
         let mut utf8 = [0_u8; 4];
         let encoded = ch.encode_utf8(&mut utf8).as_bytes();

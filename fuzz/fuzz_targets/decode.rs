@@ -44,7 +44,9 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let mut encoded = Vec::new();
-    encode_str(&text, &mut encoded);
+    if encode_str(&text, &mut encoded).is_err() {
+        return; // refused for memory: nothing was written, nothing to check
+    }
     let inner = encoded.get(1..encoded.len().saturating_sub(1)).unwrap_or_default();
     let Ok(inner) = std::str::from_utf8(inner) else {
         panic!("the encoder wrote invalid UTF-8");

@@ -58,7 +58,7 @@ proptest! {
     #[test]
     fn encoding_round_trips(text in any::<String>()) {
         let mut encoded = Vec::new();
-        encode_str(&text, &mut encoded);
+        encode_str(&text, &mut encoded).unwrap();
         let expected = serde_json::to_string(&text).unwrap();
         prop_assert_eq!(&encoded, expected.as_bytes());
         let tape = parse(&encoded).unwrap();
@@ -170,36 +170,125 @@ fn member_lookup_and_navigation() {
     assert_eq!(root.subtree_end().index(), tape.nodes().len());
 }
 
-/// Keys the duplicate property draws from: plain, with a slash, non-ASCII, astral, and two
-/// distinct keys that share a fingerprint (`tape.rs` pins the pair).
-const KEYS: &[&str] = &["a", "b", "ab", "a/b", "é", "😀", "k4312", "k27385"];
+/// Keys the duplicate property draws from: empty, short and long (around the 8-byte words the
+/// fingerprint folds, review WP3.A2 M2), with characters that must be escaped, non-ASCII,
+/// astral, the pair that shares a fingerprint (`tape.rs` pins it), and enough distinct keys
+/// that objects of more than 8 members without a repeat occur (L9).
+const KEYS: &[&str] = &[
+    "",
+    "a",
+    "ab",
+    "abcdefg",
+    "abcdefgh",
+    "abcdefghi",
+    "abcdefghijklmnop",
+    "abcdefghijklmnopq",
+    "é",
+    "😀",
+    "k4312",
+    "k27385",
+    "a/b",
+    "tool_use_id",
+    "q\"",
+    "\\",
+    "\0x",
+    "x\0",
+    "id",
+    "type",
+    "text",
+    "role",
+    "content",
+    "cache_control",
+    "input",
+    "name",
+    "signature",
+    "thinking",
+    "is_error",
+    "model",
+];
+
+/// A generated value: a number, or an object or array of generated values.
+#[derive(Clone, Debug)]
+enum Doc {
+    Number,
+    Object(Vec<(usize, u8, Doc)>),
+    Array(Vec<Doc>),
+}
+
+fn doc() -> impl Strategy<Value = Doc> {
+    Just(Doc::Number).prop_recursive(4, 64, 20, |inner| {
+        prop_oneof![
+            prop::collection::vec((0..KEYS.len(), 0_u8..5, inner.clone()), 0..20).prop_map(Doc::Object),
+            prop::collection::vec(inner, 0..4).prop_map(Doc::Array),
+        ]
+    })
+}
 
 /// Writes `key` as JSON string content in one of five spellings that all decode to it: raw,
 /// every character escaped (lower- or upper-case hex, astral characters as a surrogate pair),
-/// only the first character escaped, or only a slash escaped in its short form.
+/// only the first character escaped, or a slash in its short form. Characters JSON forbids raw
+/// are always escaped.
 fn spell(key: &str, spelling: u8, out: &mut String) {
     let backslash = "\\";
     for (i, ch) in key.chars().enumerate() {
         let escaped = match spelling {
             1 | 2 => true,
             3 => i == 0,
-            4 if ch == '/' => {
-                out.push_str(backslash);
-                out.push('/');
-                continue;
-            }
             _ => false,
         };
-        if !escaped {
+        if escaped || ch == '"' || ch == '\\' || u32::from(ch) < 0x20 {
+            let mut units = [0_u16; 2];
+            for unit in ch.encode_utf16(&mut units).iter() {
+                if spelling == 2 {
+                    write!(out, "{backslash}u{unit:04X}").unwrap();
+                } else {
+                    write!(out, "{backslash}u{unit:04x}").unwrap();
+                }
+            }
+        } else if spelling == 4 && ch == '/' {
+            out.push_str(backslash);
+            out.push('/');
+        } else {
             out.push(ch);
-            continue;
         }
-        let mut units = [0_u16; 2];
-        for unit in ch.encode_utf16(&mut units).iter() {
-            if spelling == 2 {
-                write!(out, "{backslash}u{unit:04X}").unwrap();
-            } else {
-                write!(out, "{backslash}u{unit:04x}").unwrap();
+    }
+}
+
+/// Writes `value`; records the earliest second occurrence in the first object that closes with
+/// a repeat, which is where the parser reports it (contract §7).
+fn write_value(value: &Doc, out: &mut String, first_closed: &mut Option<u32>) {
+    match value {
+        Doc::Number => out.push('0'),
+        Doc::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_value(item, out, first_closed);
+            }
+            out.push(']');
+        }
+        Doc::Object(members) => {
+            out.push('{');
+            let mut seen = BTreeSet::new();
+            let mut repeat = None;
+            for (i, (key, spelling, member)) in members.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let at = u32::try_from(out.len()).unwrap();
+                out.push('"');
+                spell(KEYS.get(*key).unwrap(), *spelling, out);
+                out.push_str("\":");
+                if !seen.insert(*key) && repeat.is_none() {
+                    repeat = Some(at);
+                }
+                write_value(member, out, first_closed);
+            }
+            out.push('}');
+            if first_closed.is_none() {
+                *first_closed = repeat;
             }
         }
     }
@@ -208,32 +297,18 @@ fn spell(key: &str, spelling: u8, out: &mut String) {
 proptest! {
     #![proptest_config(config(256))]
 
-    /// An object's duplicate keys are found after decoding, whatever their spelling, and the
-    /// error points at the earliest second occurrence (contract §4). Distinct keys are accepted,
-    /// including two that share a fingerprint. The generator knows every key's decoded text and
-    /// offset, so the expectation is exact and independent of the parser.
+    /// Duplicate keys are found after decoding, whatever their spelling and nesting, and reported
+    /// at the earliest second occurrence of the first object that closes with one (contract §4,
+    /// §7). Distinct keys are accepted, objects of more than 8 members and keys that share a
+    /// fingerprint included. The generator knows every key's decoded text and offset, so the
+    /// expectation is exact and independent of the parser. Ported from the V1 review (WP3.A2).
     #[test]
-    fn duplicates_are_found_exactly_after_decoding(
-        members in prop::collection::vec((0..KEYS.len(), 0_u8..5), 1..40),
-    ) {
-        let mut text = String::from("{");
-        let mut seen = BTreeSet::new();
+    fn duplicates_are_found_exactly_after_decoding(root in doc()) {
+        let mut text = String::new();
         let mut expected = None;
-        for (i, &(key, spelling)) in members.iter().enumerate() {
-            if i > 0 {
-                text.push(',');
-            }
-            let at = u32::try_from(text.len()).unwrap();
-            text.push('"');
-            spell(KEYS.get(key).unwrap(), spelling, &mut text);
-            write!(text, "\":{i}").unwrap();
-            if !seen.insert(key) && expected.is_none() {
-                expected = Some(at);
-            }
-        }
-        text.push('}');
+        write_value(&root, &mut text, &mut expected);
         match (parse(text.as_bytes()), expected) {
-            (Ok(_), None) => {}
+            (Ok(tape), None) => check_tape(&tape).map_err(TestCaseError::fail)?,
             (Err(e), Some(at)) => {
                 prop_assert_eq!(e.kind(), uaos_json::ErrorKind::DuplicateKey, "{}", text);
                 prop_assert_eq!(e.offset(), at, "{}", text);

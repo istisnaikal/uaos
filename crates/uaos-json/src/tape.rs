@@ -5,8 +5,6 @@
 //! one 24-byte node, appended in pre-order; a container's end and subtree end are filled in when
 //! it closes, and an object's keys are checked for duplicates at that moment.
 
-use std::cell::Cell;
-use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -102,7 +100,9 @@ pub struct TapeStats {
 /// # Errors
 ///
 /// The first rule the input breaks, with the byte offset where it breaks. The checks run in
-/// order: size, byte-order mark, UTF-8, then structure.
+/// order: size, byte-order mark, UTF-8, then structure. A repeated key is found when its object
+/// closes: the first object to close with one is reported, at the earliest second occurrence,
+/// unless the parser meets another error before that close (contract §7).
 pub fn parse<'a>(raw: &'a [u8], limits: &Limits) -> Result<Tape<'a>, JsonError> {
     if raw.len() > to_usize(limits.max_bytes()) {
         return Err(JsonError::new(ErrorKind::TooLarge, to_usize(limits.max_bytes())));
@@ -140,8 +140,26 @@ struct Parser<'a> {
     keys: Vec<u64>,
     /// Where each open object's entries begin in `keys`, innermost last.
     marks: Vec<u32>,
+    /// Reused by every run of members that share a fingerprint.
+    run: RunScratch,
     deepest: u16,
 }
+
+/// Scratch for comparing one run of members that share a fingerprint, reused for every run
+/// (contract §6). Each escaped key is decoded once; keys without escapes are read in place.
+#[derive(Default)]
+struct RunScratch {
+    /// The run's escaped keys, decoded. At most their raw length, so at most the input's.
+    decoded: Vec<u8>,
+    /// Per member of the run, where its decoded key is: `(start, len)`, with [`IN_DECODED`] set
+    /// in `start` when it points into `decoded` rather than the input.
+    spans: Vec<(u32, u32)>,
+    /// Positions in the run, sorted by key, then by where the key starts.
+    order: Vec<u32>,
+}
+
+/// Marks a span in [`RunScratch::decoded`]; the input and the scratch stay below 2^31 bytes.
+const IN_DECODED: u32 = 1 << 31;
 
 impl<'a> Parser<'a> {
     fn new(bytes: &'a [u8], limits: Limits) -> Result<Self, JsonError> {
@@ -160,6 +178,7 @@ impl<'a> Parser<'a> {
             stack: Vec::with_capacity(usize::from(limits.max_depth())),
             keys: Vec::new(),
             marks: Vec::with_capacity(usize::from(limits.max_depth())),
+            run: RunScratch::default(),
             deepest: 0,
         })
     }
@@ -186,6 +205,11 @@ impl<'a> Parser<'a> {
         let Some(&byte) = self.bytes.get(at) else {
             return Err(JsonError::new(ErrorKind::UnexpectedEnd, at));
         };
+        // A byte that cannot start a value is that grammar error, whatever the node count: the
+        // limit never hides the first byte that cannot continue the document (contract §7).
+        if !matches!(byte, b'{' | b'[' | b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n') {
+            return Err(JsonError::new(ErrorKind::ExpectedValue, at));
+        }
         if self.nodes.len() >= to_usize(self.limits.max_nodes()) {
             return Err(JsonError::new(ErrorKind::TooManyNodes, at));
         }
@@ -356,10 +380,9 @@ impl<'a> Parser<'a> {
     /// top segment of `keys`, fingerprinted as they were read: O(m log m), no allocation.
     fn check_duplicate_keys(&mut self) -> Result<(), JsonError> {
         let mark = self.marks.pop().map_or(self.keys.len(), to_usize);
-        let found = self
-            .keys
-            .get_mut(mark..)
-            .map_or(Ok(()), |members| find_duplicate(self.bytes, &self.nodes, members));
+        let found = self.keys.get_mut(mark..).map_or(Ok(()), |members| {
+            find_duplicate(self.bytes, &self.nodes, members, &mut self.run)
+        });
         self.keys.truncate(mark);
         found
     }
@@ -367,50 +390,102 @@ impl<'a> Parser<'a> {
 
 /// Finds a repeated key among an object's members, given as `keys` entries (fingerprint, node
 /// id). Equal decoded keys always share a fingerprint, so only members that share one are
-/// compared exactly; they are sorted exactly first, so an object whose keys all collide still
-/// costs O(m log m).
-fn find_duplicate(bytes: &[u8], nodes: &[RawNode], members: &mut [u64]) -> Result<(), JsonError> {
+/// compared exactly (`repeat_in_run`).
+fn find_duplicate(
+    bytes: &[u8],
+    nodes: &[RawNode],
+    members: &mut [u64],
+    scratch: &mut RunScratch,
+) -> Result<(), JsonError> {
     if members.len() < 2 || (members.len() <= PAIRWISE_MEMBERS && !any_shared_fingerprint(members)) {
         return Ok(());
     }
     // By fingerprint, then node id: members sharing a fingerprint are adjacent.
     members.sort_unstable();
-    let broken = Cell::new(false);
-    let node = |member: u64| nodes.get(to_usize(member_id(member)));
-    let order = |x: &u64, y: &u64| match (node(*x), node(*y)) {
-        (Some(a), Some(b)) => compare_keys(bytes, a, b, &broken).then(a.key_start.cmp(&b.key_start)),
-        _ => x.cmp(y),
-    };
     // Report the duplicate a streaming reader meets first: the earliest second occurrence.
     let mut first_repeat: Option<u32> = None;
-    for run in members.chunk_by_mut(|x, y| x >> 32 == y >> 32) {
+    for run in members.chunk_by(|x, y| x >> 32 == y >> 32) {
         if run.len() < 2 {
             continue;
         }
-        run.sort_unstable_by(&order);
-        for pair in run.windows(2) {
-            if let [x, y] = pair
-                && let (Some(a), Some(b)) = (node(*x), node(*y))
-                && compare_keys(bytes, a, b, &broken) == Ordering::Equal
-            {
-                let later = a.key_start.max(b.key_start);
-                first_repeat = Some(first_repeat.map_or(later, |seen| seen.min(later)));
-            }
+        if let Some(later) = repeat_in_run(bytes, nodes, run, scratch)? {
+            first_repeat = Some(first_repeat.map_or(later, |seen| seen.min(later)));
         }
-    }
-    if broken.get() {
-        let at = members
-            .iter()
-            .filter_map(|&member| node(member))
-            .map(|node| node.key_start)
-            .min()
-            .unwrap_or(0);
-        return Err(JsonError::new(ErrorKind::InvalidEscape, to_usize(at)));
     }
     match first_repeat {
         Some(at) => Err(JsonError::new(ErrorKind::DuplicateKey, to_usize(at))),
         None => Ok(()),
     }
+}
+
+/// The earliest second occurrence of a key among one run of members that share a fingerprint,
+/// if any. Each escaped key is decoded once into the scratch and every key is then compared as
+/// bytes, so a run crafted to collide costs one decode per key plus O(m log m) byte comparisons,
+/// never a decode per comparison (review WP3.A2 M1).
+fn repeat_in_run(
+    bytes: &[u8],
+    nodes: &[RawNode],
+    run: &[u64],
+    scratch: &mut RunScratch,
+) -> Result<Option<u32>, JsonError> {
+    let RunScratch { decoded, spans, order } = scratch;
+    decoded.clear();
+    spans.clear();
+    order.clear();
+    let node = |position: u32| {
+        run.get(to_usize(position))
+            .and_then(|&member| nodes.get(to_usize(member_id(member))))
+    };
+    let oom = |at: u32| JsonError::new(ErrorKind::OutOfMemory, to_usize(at));
+    let first_key = node(0).map_or(0, |n| n.key_start);
+    spans.try_reserve(run.len()).map_err(|_| oom(first_key))?;
+    order.try_reserve(run.len()).map_err(|_| oom(first_key))?;
+    for position in 0..to_u32(run.len()) {
+        let Some(member) = node(position) else {
+            spans.push((0, 0));
+            order.push(position);
+            continue;
+        };
+        let content = key_content(bytes, member);
+        if member.flags & KEY_ESCAPED == 0 {
+            spans.push((member.key_start + 1, u32::from(member.key_len)));
+        } else {
+            // An escaped key decodes to at most its raw length.
+            let start = decoded.len();
+            decoded.try_reserve(content.len()).map_err(|_| oom(member.key_start))?;
+            let mut unescaped = Unescape::new(content);
+            decoded.extend(unescaped.by_ref());
+            if unescaped.broken() {
+                // The scan already ruled this out: kept fail-closed.
+                return Err(JsonError::new(ErrorKind::InvalidEscape, to_usize(member.key_start)));
+            }
+            spans.push((to_u32(start) | IN_DECODED, to_u32(decoded.len() - start)));
+        }
+        order.push(position);
+    }
+    let key = |position: u32| -> &[u8] {
+        let (start, len) = spans.get(to_usize(position)).copied().unwrap_or((0, 0));
+        let (source, start) = if start & IN_DECODED == 0 {
+            (bytes, start)
+        } else {
+            (decoded.as_slice(), start & !IN_DECODED)
+        };
+        source
+            .get(to_usize(start)..to_usize(start) + to_usize(len))
+            .unwrap_or_default()
+    };
+    let key_start = |position: u32| node(position).map_or(0, |n| n.key_start);
+    order.sort_unstable_by(|&a, &b| key(a).cmp(key(b)).then(key_start(a).cmp(&key_start(b))));
+    let mut first_repeat: Option<u32> = None;
+    for pair in order.windows(2) {
+        if let [a, b] = pair
+            && key(*a) == key(*b)
+        {
+            let later = key_start(*a).max(key_start(*b));
+            first_repeat = Some(first_repeat.map_or(later, |seen| seen.min(later)));
+        }
+    }
+    Ok(first_repeat)
 }
 
 /// Up to this many members, fingerprints are compared pairwise in place (at most 28 integer
@@ -438,6 +513,9 @@ fn member_id(member: u64) -> u32 {
 
 const FINGERPRINT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 const FINGERPRINT_MULTIPLIER: u64 = 0x517C_C1B7_2722_0A95;
+/// murmur3's `fmix64` multipliers.
+const FMIX_FIRST: u64 = 0xFF51_AFD7_ED55_8CCD;
+const FMIX_SECOND: u64 = 0xC4CE_B9FE_1A85_EC53;
 
 /// A 32-bit fingerprint of a key's decoded bytes, taken eight bytes at a time: multiply, then
 /// fold the high bits back down, and finish with murmur3's `fmix64`. On structured key sets
@@ -486,9 +564,9 @@ impl Fingerprint {
         // murmur3's 64-bit finalizer.
         let mut k = self.hash ^ self.len;
         k ^= k >> 33;
-        k = k.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+        k = k.wrapping_mul(FMIX_FIRST);
         k ^= k >> 33;
-        k = k.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+        k = k.wrapping_mul(FMIX_SECOND);
         k ^= k >> 33;
         u32::try_from(k >> 32).unwrap_or(0)
     }
@@ -522,23 +600,6 @@ fn fingerprint_decoded(content: &[u8]) -> Option<u32> {
         return None;
     }
     Some(fp.finish())
-}
-
-/// Orders two members by their decoded keys. Keys without escapes compare as bytes (their raw
-/// bytes are their decoded bytes); an escaped key is streamed through the decoder.
-fn compare_keys(bytes: &[u8], a: &RawNode, b: &RawNode, broken: &Cell<bool>) -> Ordering {
-    let left = key_content(bytes, a);
-    let right = key_content(bytes, b);
-    if a.flags & KEY_ESCAPED != 0 || b.flags & KEY_ESCAPED != 0 {
-        let mut left_decoded = Unescape::new(left);
-        let mut right_decoded = Unescape::new(right);
-        let order = left_decoded.by_ref().cmp(right_decoded.by_ref());
-        if left_decoded.broken() || right_decoded.broken() {
-            broken.set(true);
-        }
-        return order;
-    }
-    left.cmp(right)
 }
 
 fn key_content<'b>(bytes: &'b [u8], node: &RawNode) -> &'b [u8] {
@@ -725,7 +786,11 @@ impl<'a> Tape<'a> {
         if count == 0 || count > to_usize(Limits::MAX_NODES_CEILING) {
             return Err(Violation::new(0, "node count out of range"));
         }
-        if self.root.parent != NONE || self.root.flags & HAS_KEY != 0 {
+        if self.root.parent != NONE
+            || self.root.flags & (HAS_KEY | KEY_ESCAPED) != 0
+            || self.root.key_start != 0
+            || self.root.key_len != 0
+        {
             return Err(Violation::new(0, "the root has a parent or a key"));
         }
         if to_usize(self.root.after) != count {
@@ -920,8 +985,15 @@ impl fmt::Debug for Tape<'_> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "unit tests: a failed fixture must abort the test")]
 mod tests {
-    use super::fingerprint;
+    use std::fmt::Write as _;
+
+    use super::{
+        FINGERPRINT_MULTIPLIER, FMIX_FIRST, FMIX_SECOND, Fingerprint, Parser, fingerprint, fingerprint_decoded,
+    };
+    use crate::error::ErrorKind;
+    use crate::{Limits, parse, to_u32};
 
     /// `tests/grammar.rs` (`distinct_keys_sharing_a_fingerprint_are_accepted`) relies on these
     /// two distinct keys sharing a fingerprint. If the fingerprint changes, find a new pair
@@ -930,5 +1002,213 @@ mod tests {
     fn the_grammar_tests_colliding_keys_collide() {
         assert_eq!(fingerprint(b"k4312"), fingerprint(b"k27385"));
         assert_eq!(fingerprint(b"k4312"), 0xd14d_3837);
+    }
+
+    fn bytes_of(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes().first().copied().unwrap_or(0)
+            })
+            .collect()
+    }
+
+    fn bytewise(content: &[u8]) -> u32 {
+        let mut fp = Fingerprint::new();
+        for &byte in content {
+            fp.push(byte);
+        }
+        fp.finish()
+    }
+
+    /// Writes `content` as JSON string content: the bytes listed in `escape` (by position) as
+    /// a backslash-u escape, the others raw. Every byte must be ASCII.
+    fn spell(content: &[u8], escape: impl Fn(usize, u8) -> bool, out: &mut String) {
+        let backslash = "\\";
+        for (i, &byte) in content.iter().enumerate() {
+            if escape(i, byte) || byte < 0x20 || byte == b'"' || byte == b'\\' {
+                write!(out, "{backslash}u{byte:04x}").unwrap();
+            } else {
+                out.push(char::from(byte));
+            }
+        }
+    }
+
+    /// Raw keys are fingerprinted a word at a time and escaped ones a byte at a time; an object
+    /// is accepted when its fingerprints differ, so the two paths must agree on every length,
+    /// whole words and remainders alike (review WP3.A2 M2).
+    #[test]
+    fn the_word_path_equals_the_byte_path() {
+        for len in 0..=40 {
+            for seed in 0..64 {
+                let content = bytes_of(seed * 41 + u64::try_from(len).unwrap(), len);
+                assert_eq!(
+                    fingerprint(&content),
+                    bytewise(&content),
+                    "word path differs from the byte path at length {len}"
+                );
+            }
+        }
+    }
+
+    /// Every spelling of a key, raw or escaped in any mix, gets the raw key's fingerprint.
+    #[test]
+    fn escaped_spellings_share_the_raw_fingerprint() {
+        for len in 0..=40 {
+            for seed in 0..16 {
+                let ascii: Vec<u8> = bytes_of(seed * 97 + u64::try_from(len).unwrap(), len)
+                    .into_iter()
+                    .map(|b| b & 0x7F)
+                    .collect();
+                let expected = fingerprint(&ascii);
+                for style in 0..4_usize {
+                    let mut spelled = String::new();
+                    spell(
+                        &ascii,
+                        |i, _| style == 0 || (style == 1 && i == 0) || (style == 2 && i % 3 == 1),
+                        &mut spelled,
+                    );
+                    if style == 3 {
+                        spelled.clear();
+                        spell(&ascii, |i, _| i + 1 == len, &mut spelled);
+                    }
+                    assert_eq!(
+                        fingerprint_decoded(spelled.as_bytes()),
+                        Some(expected),
+                        "an escaped spelling of a {len}-byte key differs from the raw fingerprint"
+                    );
+                }
+            }
+        }
+    }
+
+    fn inverse(odd: u64) -> u64 {
+        // Newton's iteration for the inverse modulo 2^64: each step doubles the correct bits.
+        let mut x = odd;
+        for _ in 0..6 {
+            x = x.wrapping_mul(2_u64.wrapping_sub(odd.wrapping_mul(x)));
+        }
+        x
+    }
+
+    /// Suffix words that, after `prefix`, give the decoded key a fingerprint of `target`: the
+    /// fingerprint run backwards, as the review crafted them (WP3.A2 M1). Every byte is below
+    /// 0x80, so each can be spelled as an escape that decodes to itself.
+    fn colliding_suffixes(prefix: &[u8], target: u32, count: usize) -> Vec<[u8; 8]> {
+        assert!(prefix.len().is_multiple_of(8));
+        let mut fp = Fingerprint::new();
+        for &byte in prefix {
+            fp.push(byte);
+        }
+        let state = fp.hash;
+        let len = u64::try_from(prefix.len() + 8).unwrap();
+        let (unmultiply, unfirst, unsecond) = (
+            inverse(FINGERPRINT_MULTIPLIER),
+            inverse(FMIX_FIRST),
+            inverse(FMIX_SECOND),
+        );
+        let mut found = Vec::with_capacity(count);
+        for low in 0_u64.. {
+            let mut k = (u64::from(target) << 32) | low;
+            k ^= k >> 33;
+            k = k.wrapping_mul(unsecond);
+            k ^= k >> 33;
+            k = k.wrapping_mul(unfirst);
+            k ^= k >> 33;
+            let folded = k ^ len;
+            let mixed = folded ^ (folded >> 29) ^ (folded >> 58);
+            let word = (mixed.wrapping_mul(unmultiply) ^ state).to_le_bytes();
+            if word.iter().all(|&b| b < 0x80) {
+                found.push(word);
+                if found.len() == count {
+                    break;
+                }
+            }
+        }
+        found
+    }
+
+    /// Keys crafted to share one fingerprint are accepted, and a repeat among them, spelled
+    /// differently, is found where it starts (review WP3.A2 M1).
+    #[test]
+    fn crafted_collisions_are_compared_exactly() {
+        let target = 0x5eed_0019;
+        let prefix = [b'p'; 40];
+        let suffixes = colliding_suffixes(&prefix, target, 2_000);
+        let mut text = String::from("{");
+        for (i, suffix) in suffixes.iter().enumerate() {
+            if i > 0 {
+                text.push(',');
+            }
+            let mut key = String::new();
+            let decoded: Vec<u8> = prefix.iter().chain(suffix.iter()).copied().collect();
+            spell(&decoded, |_, _| true, &mut key);
+            assert_eq!(
+                fingerprint_decoded(key.as_bytes()),
+                Some(target),
+                "crafted key {i} does not collide"
+            );
+            write!(text, "\"{key}\":{i}").unwrap();
+        }
+        text.push('}');
+        assert!(
+            parse(text.as_bytes(), &Limits::DEFAULT).is_ok(),
+            "crafted colliding keys refused"
+        );
+
+        text.pop();
+        text.push(',');
+        let at = to_u32(text.len());
+        text.push('"');
+        let repeat: Vec<u8> = prefix
+            .iter()
+            .chain(suffixes.get(1000).unwrap().iter())
+            .copied()
+            .collect();
+        spell(&repeat, |_, _| false, &mut text);
+        text.push_str("\":0}");
+        assert_eq!(
+            parse(text.as_bytes(), &Limits::DEFAULT)
+                .err()
+                .map(|e| (e.kind(), e.offset())),
+            Some((ErrorKind::DuplicateKey, at)),
+            "a repeat among crafted colliding keys was accepted, or reported elsewhere"
+        );
+    }
+
+    /// The side stack holds one entry per key of the open objects and grows like the tape, so
+    /// its capacity never passes the node limit (contract §6; review WP3.A2 L5).
+    #[test]
+    fn the_side_stack_never_outgrows_the_node_limit() {
+        let mut wide = String::from("{");
+        for i in 0..1_000_000 {
+            write!(wide, "\"k{i}\":0,").unwrap();
+        }
+        wide.push_str("\"end\":0}");
+        let limits = Limits::DEFAULT;
+        let mut parser = Parser::new(wide.as_bytes(), limits).unwrap();
+        parser.run().unwrap();
+        let entries = parser.keys.capacity();
+        assert!(entries >= 1_000_001, "the side stack held {entries} entries");
+        assert!(
+            entries <= crate::to_usize(limits.max_nodes()),
+            "the side stack reached {entries} entries"
+        );
+
+        let small = Limits::new(1 << 20, 128, 1_000).unwrap();
+        let mut narrow = String::from("{");
+        for i in 0..998 {
+            write!(narrow, "\"k{i}\":0,").unwrap();
+        }
+        narrow.push_str("\"end\":0}");
+        let mut parser = Parser::new(narrow.as_bytes(), small).unwrap();
+        parser.run().unwrap();
+        assert!(
+            parser.keys.capacity() <= 1_000,
+            "the side stack passed a node limit of 1,000"
+        );
     }
 }

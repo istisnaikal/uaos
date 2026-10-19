@@ -693,11 +693,12 @@ pub(crate) fn cases() -> Vec<Case> {
             id: "json-escaped-duplicate-compared-raw",
             gate: "test",
             tool: None,
-            // Contract §4: keys compared as raw bytes, so `"a"` and its escaped spelling differ.
+            // Contract §4: an escaped key compared by its raw bytes in a run, so `"a"` and its
+            // escaped spelling differ.
             seed: replace(
                 "crates/uaos-json/src/tape.rs",
-                "if a.flags & KEY_ESCAPED != 0 || b.flags & KEY_ESCAPED != 0 {",
-                "if false {",
+                "        if member.flags & KEY_ESCAPED == 0 {",
+                "        if true {",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -739,14 +740,32 @@ pub(crate) fn cases() -> Vec<Case> {
             // collide refuse the object.
             seed: replace(
                 "crates/uaos-json/src/tape.rs",
-                "                && compare_keys(bytes, a, b, &broken) == Ordering::Equal\n",
-                "                && (compare_keys(bytes, a, b, &broken) == Ordering::Equal || a.key_start != b.key_start)\n",
+                "            && key(*a) == key(*b)\n",
+                "            && (key(*a) == key(*b) || key_start(*a) != key_start(*b))\n",
             ),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-json", "--test", "grammar", "distinct_keys_sharing_a_fingerprint_are_accepted"],
             },
             expect: "colliding keys rejected",
+        },
+        Case {
+            id: "json-fingerprint-word-order",
+            gate: "test",
+            tool: None,
+            // Contract §6: raw keys fingerprinted a word at a time in the wrong byte order, so a
+            // raw key of eight bytes or more and its escaped spelling get different fingerprints
+            // and are never compared (review WP3.A2 M2).
+            seed: replace(
+                "crates/uaos-json/src/tape.rs",
+                "fp.word = u64::from_le_bytes(word);",
+                "fp.word = u64::from_be_bytes(word);",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--lib", "the_word_path_equals_the_byte_path"],
+            },
+            expect: "word path differs",
         },
         Case {
             id: "json-pairwise-skips-shared-fingerprint",
