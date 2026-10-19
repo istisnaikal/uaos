@@ -22,11 +22,12 @@ runs yet. Everything below is a library with tests, and each claim names the gat
 | Scoped credentials (`uaos-identity`): `uaos_sk_` keys stored only as keyed digests, a child's scope within its parent's, revocation and epoch bumps journaled before they return, a guard against restoring an old data directory | `test`: random hierarchies checked against an independent model, 256 per merge and 10,000 nightly; seeded negative `identity-epoch-check-skipped` |
 | Fail-closed authorization over Cedar (`uaos-policy`): default deny, any evaluation error denies, Deny > Ask > Allow, a grant never beats a forbid | `policy-semantics`; p99 688 µs at 1,000 mixed policies on the reference machine ([ADR-0008](docs/adr/0008-authorization-semantics-over-cedar.md)) |
 | Budget ledger (`uaos-ledger`): a reservation or outgoing transfer beyond the available balance is refused before anything is recorded; spend above a reservation is recorded as an S1 overrun | `budget-concurrency`: randomized simulation against a reference model, 256 schedules per merge and 100,000 nightly |
+| The one outbound door (`uaos-egress`): only declared upstreams, by DNS name; the door resolves names itself and refuses private, link-local and metadata addresses in every spelling; TLS on aws-lc-rs against the system's roots, fetching nothing; redirects returned, never followed; the credential inserted last; errors say whether the request may have reached the provider. Built, not yet in any request path | `test` and `clippy`: an SSRF and header suite, bans on every other network path outside the door, each proven by a seeded negative |
 | Secret redaction with a fail-closed final scan, 11 high-risk formats (`uaos-redact`) | `redaction-corpus`: synthetic corpus v2 (six evasion forms, 40 negative families). Recall is bound to the claimed formats and this corpus; it is not a real-world rate ([ADR-0009](docs/adr/0009-redaction-detectors-placeholders-final-scan.md)) |
 | Merge gates: fmt, clippy (pedantic + restriction set), tests, architecture direction and guarded-lint owners, schema compatibility, SPDX headers, claim wording, cargo-deny, cargo-vet with an exemption ratchet, secret scan, DCO, docs-with-contract, CodeQL | every gate is proven to **fail** on a seeded violation: `cargo xtask negative` |
 
-What does **not** exist yet: the runtime, the network door, the proxy, the CLI, the panel and
-every product module. Their gates are listed as pending in [`gates.toml`](gates.toml) and block a
+What does **not** exist yet: the runtime, the module socket, the proxy, the CLI, the panel and
+every product module. No request flows through UAOS yet. Their gates are listed as pending in [`gates.toml`](gates.toml) and block a
 release until they are active. The path ahead is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Principles you can hold us to
