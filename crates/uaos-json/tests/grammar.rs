@@ -65,6 +65,60 @@ fn plain_duplicate_keys_are_rejected() {
     );
 }
 
+/// Each object's keys are compared with that object's keys only, however deeply objects
+/// nest (contract §4).
+#[test]
+fn duplicates_are_checked_per_object() {
+    for input in [
+        &br#"{"a":{"a":1,"b":2},"b":3}"#[..],
+        br#"{"x":{"y":{"z":1},"z":2},"y":3,"z":4}"#,
+        br#"[{"a":1},{"a":2},{"b":{"a":3}}]"#,
+        br#"{"a":[{"a":1},{"a":2}],"b":{}}"#,
+    ] {
+        assert!(
+            accepted(input),
+            "same key in different objects refused: {}",
+            String::from_utf8_lossy(input)
+        );
+    }
+    for (input, offset) in [
+        (&br#"{"x":{"y":{"z":1}},"x":2}"#[..], 19),
+        (br#"{"x":{"y":1,"y":2},"z":3}"#, 12),
+        (br#"{"a":{},"b":{},"a":1}"#, 15),
+    ] {
+        assert_eq!(
+            refused(input),
+            (ErrorKind::DuplicateKey, offset),
+            "duplicate key accepted across nesting, or reported elsewhere: {}",
+            String::from_utf8_lossy(input)
+        );
+    }
+}
+
+/// `k4312` and `k27385` are distinct keys with the same 32-bit fingerprint (a unit test in
+/// `tape.rs` pins the pair). A shared fingerprint never refuses an object on its own, and a
+/// real repeat among colliding keys is still found.
+#[test]
+fn distinct_keys_sharing_a_fingerprint_are_accepted() {
+    for input in [
+        j(r#"{"k4312":1,"k27385":2}"#),
+        j(r#"{"k27385":1,"x":0,"k4312":2}"#),
+        // Escaped, it still decodes to `k27385`, so it shares the fingerprint too.
+        j(r#"{"k4312":1,"k2738~u0035":2}"#),
+    ] {
+        assert!(
+            accepted(&input),
+            "colliding keys rejected: {}",
+            String::from_utf8_lossy(&input)
+        );
+    }
+    assert_eq!(
+        refused(br#"{"k4312":1,"k27385":2,"k4312":3}"#),
+        (ErrorKind::DuplicateKey, 22),
+        "duplicate among colliding keys accepted, or reported elsewhere"
+    );
+}
+
 #[test]
 fn escaped_duplicate_keys_are_rejected() {
     for (input, offset) in [

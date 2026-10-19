@@ -682,7 +682,7 @@ pub(crate) fn cases() -> Vec<Case> {
             gate: "test",
             tool: None,
             // ADR-0014 contract §4: an object closes without its duplicate-key check.
-            seed: replace("crates/uaos-json/src/tape.rs", "self.check_duplicate_keys(open)?;", ""),
+            seed: replace("crates/uaos-json/src/tape.rs", "self.check_duplicate_keys()?;", ""),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-json", "--test", "grammar", "plain_duplicate_keys_are_rejected"],
@@ -704,6 +704,62 @@ pub(crate) fn cases() -> Vec<Case> {
                 args: &["test", "-p", "uaos-json", "--test", "grammar", "escaped_duplicate_keys_are_rejected"],
             },
             expect: "escaped duplicate key accepted",
+        },
+        Case {
+            id: "json-fingerprint-raw-bytes",
+            gate: "test",
+            tool: None,
+            // Contract §6: escaped keys fingerprinted over their raw bytes, so `"a"` and its
+            // escaped spelling land on different fingerprints and are never compared.
+            seed: replace("crates/uaos-json/src/tape.rs", "let fingerprint = if escaped {", "let fingerprint = if false {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--test", "grammar", "escaped_duplicate_keys_are_rejected"],
+            },
+            expect: "escaped duplicate key accepted",
+        },
+        Case {
+            id: "json-fingerprint-collision-accepts",
+            gate: "test",
+            tool: None,
+            // Contract §6: members that share a fingerprint are never compared exactly, so a
+            // shared fingerprint, a real repeat included, passes.
+            seed: replace("crates/uaos-json/src/tape.rs", "        if run.len() < 2 {", "        if run.len() >= 2 {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--test", "grammar", "plain_duplicate_keys_are_rejected"],
+            },
+            expect: "duplicate key accepted",
+        },
+        Case {
+            id: "json-fingerprint-collision-rejects",
+            gate: "test",
+            tool: None,
+            // Contract §6: a shared fingerprint taken for a repeat, so two distinct keys that
+            // collide refuse the object.
+            seed: replace(
+                "crates/uaos-json/src/tape.rs",
+                "                && compare_keys(bytes, a, b, &broken) == Ordering::Equal\n",
+                "                && (compare_keys(bytes, a, b, &broken) == Ordering::Equal || a.key_start != b.key_start)\n",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--test", "grammar", "distinct_keys_sharing_a_fingerprint_are_accepted"],
+            },
+            expect: "colliding keys rejected",
+        },
+        Case {
+            id: "json-pairwise-skips-shared-fingerprint",
+            gate: "test",
+            tool: None,
+            // Contract §6: the small-object path that skips sorting also skips a shared
+            // fingerprint, so a small object's repeat passes.
+            seed: replace("crates/uaos-json/src/tape.rs", "!any_shared_fingerprint(members)", "true"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--test", "grammar", "plain_duplicate_keys_are_rejected"],
+            },
+            expect: "duplicate key accepted",
         },
         Case {
             id: "json-depth-off-by-one",

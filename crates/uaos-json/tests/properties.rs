@@ -2,7 +2,8 @@
 
 //! Properties of the contract (§5, §6, §8, §9): every tape passes its invariants; the encoder
 //! round-trips and writes `serde_json`'s bytes; the decoder and the tape accept the same strings;
-//! the offset map keeps its rules; heap stays within its bound.
+//! the offset map keeps its rules; heap stays within its bound; duplicate keys are found after
+//! decoding, whatever their spelling.
 
 #![allow(
     clippy::unwrap_used,
@@ -10,6 +11,9 @@
 )]
 
 mod common;
+
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 use common::{check_tape, config, document, parse};
 use proptest::prelude::*;
@@ -164,4 +168,78 @@ fn member_lookup_and_navigation() {
     assert!(content.member("x").unwrap().is_none(), "a string has no members");
     assert_eq!(root.member("n").unwrap().unwrap().as_u64(), Some(2));
     assert_eq!(root.subtree_end().index(), tape.nodes().len());
+}
+
+/// Keys the duplicate property draws from: plain, with a slash, non-ASCII, astral, and two
+/// distinct keys that share a fingerprint (`tape.rs` pins the pair).
+const KEYS: &[&str] = &["a", "b", "ab", "a/b", "é", "😀", "k4312", "k27385"];
+
+/// Writes `key` as JSON string content in one of five spellings that all decode to it: raw,
+/// every character escaped (lower- or upper-case hex, astral characters as a surrogate pair),
+/// only the first character escaped, or only a slash escaped in its short form.
+fn spell(key: &str, spelling: u8, out: &mut String) {
+    let backslash = "\\";
+    for (i, ch) in key.chars().enumerate() {
+        let escaped = match spelling {
+            1 | 2 => true,
+            3 => i == 0,
+            4 if ch == '/' => {
+                out.push_str(backslash);
+                out.push('/');
+                continue;
+            }
+            _ => false,
+        };
+        if !escaped {
+            out.push(ch);
+            continue;
+        }
+        let mut units = [0_u16; 2];
+        for unit in ch.encode_utf16(&mut units).iter() {
+            if spelling == 2 {
+                write!(out, "{backslash}u{unit:04X}").unwrap();
+            } else {
+                write!(out, "{backslash}u{unit:04x}").unwrap();
+            }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(config(256))]
+
+    /// An object's duplicate keys are found after decoding, whatever their spelling, and the
+    /// error points at the earliest second occurrence (contract §4). Distinct keys are accepted,
+    /// including two that share a fingerprint. The generator knows every key's decoded text and
+    /// offset, so the expectation is exact and independent of the parser.
+    #[test]
+    fn duplicates_are_found_exactly_after_decoding(
+        members in prop::collection::vec((0..KEYS.len(), 0_u8..5), 1..40),
+    ) {
+        let mut text = String::from("{");
+        let mut seen = BTreeSet::new();
+        let mut expected = None;
+        for (i, &(key, spelling)) in members.iter().enumerate() {
+            if i > 0 {
+                text.push(',');
+            }
+            let at = u32::try_from(text.len()).unwrap();
+            text.push('"');
+            spell(KEYS.get(key).unwrap(), spelling, &mut text);
+            write!(text, "\":{i}").unwrap();
+            if !seen.insert(key) && expected.is_none() {
+                expected = Some(at);
+            }
+        }
+        text.push('}');
+        match (parse(text.as_bytes()), expected) {
+            (Ok(_), None) => {}
+            (Err(e), Some(at)) => {
+                prop_assert_eq!(e.kind(), uaos_json::ErrorKind::DuplicateKey, "{}", text);
+                prop_assert_eq!(e.offset(), at, "{}", text);
+            }
+            (Ok(_), Some(at)) => prop_assert!(false, "duplicate key at {} accepted: {}", at, text),
+            (Err(e), None) => prop_assert!(false, "distinct keys refused ({:?}): {}", e.kind(), text),
+        }
+    }
 }
