@@ -16,7 +16,9 @@
 //!   [`Journal::recover`] has moved to a fresh segment.
 //!
 //! Recovery on [`Journal::open`] verifies the whole chain, quarantines segment files the
-//! manifest does not list, and starts a new segment. It never appends after a possibly torn
+//! manifest does not list, and starts a new segment. Without a manifest it starts a new history
+//! only over segment files that are all empty, which is what a first open killed before storing
+//! its manifest leaves; any byte in them is refused. It never appends after a possibly torn
 //! tail, and it never flushes the previous run's segment again: after a failed flush (in that
 //! run, or in an open that failed since) a new flush of the same file can report success
 //! without writing anything, and a failing one drops what the OS held. The records after the
@@ -1127,17 +1129,38 @@ struct CarriedTail {
 }
 
 /// The manifest of a journal that does not exist yet, with a fresh random identifier. Refuses
-/// to start a new history over segment files whose manifest is missing.
+/// to start a new history over segment files whose manifest is missing, unless every one of them
+/// is empty.
+///
+/// A first open killed between creating its segment and storing the manifest leaves exactly
+/// that: empty segment files and no manifest. Nothing is written to a segment before its
+/// manifest is stored, let alone acknowledged, so those files are set aside as orphans and the
+/// history starts; before, the directory could never be opened again (found by the kill
+/// harness's kills during boot, nightly 39330543607). A single byte in any segment file is a
+/// history whose manifest is missing, and is refused: a new history over it would hide that the
+/// history is gone.
 fn new_manifest(fs: &dyn Fs, dir: &Path, rng: &dyn Rng) -> Result<Manifest, JournalError> {
-    if fs
+    let segments: Vec<PathBuf> = fs
         .list_dir(dir)
         .map_err(storage)?
-        .iter()
-        .any(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(is_segment_file_name))
-    {
-        return Err(JournalError::Corrupt(
-            "segment files exist but the manifest is missing; refusing to start a new history over them".to_owned(),
-        ));
+        .into_iter()
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(is_segment_file_name))
+        .collect();
+    for path in &segments {
+        if !fs.read(path).map_err(storage)?.is_empty() {
+            return Err(JournalError::Corrupt(
+                "segment files exist but the manifest is missing; refusing to start a new history over them".to_owned(),
+            ));
+        }
+    }
+    for path in &segments {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            fs.rename(path, &dir.join(format!("{name}.orphan-g0")))
+                .map_err(storage)?;
+        }
+    }
+    if !segments.is_empty() {
+        fs.sync_dir(dir).map_err(storage)?;
     }
     let mut id = [0u8; 16];
     rng.fill(&mut id).map_err(JournalError::Platform)?;
