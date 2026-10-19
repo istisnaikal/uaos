@@ -65,6 +65,56 @@ fn plain_duplicate_keys_are_rejected() {
     );
 }
 
+/// A repeat is found when its object closes (contract §7): the first object to close with one
+/// is reported, at its earliest second occurrence, and an error the parser meets before that
+/// close is reported instead (review WP3.A2 M3).
+#[test]
+fn a_duplicate_is_reported_when_its_object_closes() {
+    for (input, expected) in [
+        // The inner object closes first: its repeat, not the outer one at offset 7.
+        (&br#"{"a":1,"a":{"b":1,"b":2}}"#[..], (ErrorKind::DuplicateKey, 18)),
+        // The object never closes, so the first byte that cannot continue it is reported.
+        (br#"{"a":1,"a":2,]"#, (ErrorKind::ExpectedKey, 13)),
+        (br#"{"a":1,"a":2"#, (ErrorKind::UnexpectedEnd, 12)),
+        (br#"{"a":1,"a":2,"b":x}"#, (ErrorKind::ExpectedValue, 17)),
+    ] {
+        assert_eq!(
+            refused(input),
+            expected,
+            "close-time duplicate semantics changed: {}",
+            String::from_utf8_lossy(input)
+        );
+    }
+}
+
+/// The node limit never hides a grammar error: a byte that cannot start a value is reported as
+/// such, whatever the node count (contract §7; review WP3.A2 L1).
+#[test]
+fn the_node_limit_never_hides_a_grammar_error() {
+    let two = Limits::new(1 << 20, 128, 2).unwrap();
+    assert_eq!(
+        refused_under(b"[1,]", &two),
+        (ErrorKind::ExpectedValue, 3),
+        "node limit hid a grammar error"
+    );
+    assert_eq!(
+        refused_under(b"[1,x", &two),
+        (ErrorKind::ExpectedValue, 3),
+        "node limit hid a grammar error"
+    );
+    assert_eq!(
+        refused_under(b"[1,2]", &two),
+        (ErrorKind::TooManyNodes, 3),
+        "node limit not applied"
+    );
+    let one = Limits::new(1 << 20, 128, 1).unwrap();
+    assert_eq!(
+        refused_under(b"[}", &one),
+        (ErrorKind::ExpectedValue, 1),
+        "node limit hid a grammar error"
+    );
+}
+
 /// Each object's keys are compared with that object's keys only, however deeply objects
 /// nest (contract §4).
 #[test]

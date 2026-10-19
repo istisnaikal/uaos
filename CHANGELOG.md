@@ -170,24 +170,35 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `serde_json` read strictly, property fuzzing, and no payload in `Debug`. A one-off
     20,000-document differential found 0 disagreements; 13 numbers outside the f64 range were
     accepted by the tape only, which is the known divergence.
-  - **Seeded violations:** `arch-json-io-dependency` and twelve `json-*` cases: one per
-    fail-closed rule, one for the oracle, and four for the fingerprinted duplicate check.
+  - **Seeded violations:** `arch-json-io-dependency` and thirteen `json-*` cases: one per
+    fail-closed rule, one for the oracle, and five for the fingerprinted duplicate check.
   - **Duplicate keys are fingerprinted.**
     - Each key is fingerprinted over its **decoded** bytes as it is read, so an escaped and an
       unescaped spelling of a key always share a fingerprint.
     - When an object closes, objects of up to 8 members compare fingerprints pairwise, and
       larger ones sort them. Only members that share a fingerprint are compared exactly.
-    - A collision costs an exact comparison, never a wrong answer. A test pins a real colliding
-      pair, and a property checks every spelling against an exact oracle.
+    - A collision costs an exact comparison, never a wrong answer. In a run of shared
+      fingerprints each escaped key is decoded once and keys are compared as bytes, so keys
+      crafted offline to collide (the fingerprint has no key and can be run backwards) cost
+      1.4–1.6 times a control of the same shape, not the 12–15 times the V1 review measured
+      before the fix.
+    - A test pins a real colliding pair; unit tests prove the word-at-a-time and byte-at-a-time
+      fingerprints agree at every length and craft 2,000 colliding keys; a nested property
+      checks every spelling against an exact oracle.
     - The control-byte check runs branch-free over each run of string bytes.
     - The side stack takes 8 bytes per key of the open objects, at most 8 MiB.
+  - **The V1 review** (`docs/reviews/WP3.A2-json.md`): 0 High, 4 Medium, 9 Low, all resolved
+    there. Beyond the collisions: a repeat is found when its object closes, now stated and
+    pinned; the offset map and the decoded text are reserved exactly; the node limit no longer
+    hides a grammar error; `decode`, `decode_mapped` and `encode_str` return `OutOfMemory`
+    instead of aborting, so `encode_str` now returns a `Result`.
   - **Measured** on the reference machine, recorded in the contract's §10:
-    - parse p95 is **1.882 ms and 1.888 ms in two runs** at 1.70 MB, or 0.90 GB/s: within the
-      2 ms stage budget, with 6% headroom on this machine only. The first version measured
-      2.187 ms, 9% over; the fix stayed within the stage;
-    - one object of a million members now parses in 51 ms instead of 166 ms;
+    - parse p95 is **1.853–1.868 ms over 5 runs** at 1.70 MB, or 0.91 GB/s: within the 2 ms
+      stage budget, with 7% headroom on this machine only. The first version measured 2.187 ms,
+      9% over; the fix stayed within the stage;
+    - one object of a million members now parses in about 53 ms instead of 166 ms;
     - the tape takes 384 KiB for that body;
-    - every adversarial input is bounded.
+    - every adversarial input is bounded, and `tests/adversarial.rs` asserts each outcome.
   - **First coverage-guided run:** 10,872,985 runs of `parse` and 79,948,806 of `decode` in
     30 minutes each, with 0 crashes.
   - **Contract first:** `docs/adr/appendix/0014-uaos-json-tape.md` covers:
