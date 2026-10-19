@@ -19,7 +19,7 @@ Each phase has two exits:
 | P0 Bedrock | Contracts, platform boundary, merge gates that are proven to bite | built |
 | P1 Truth | Hash-chained journal, encrypted chunks, projections, OS keychain | built. Owed: the passphrase vault for hosts without a keychain; chunk durability joining the journal's flush schedule (ADR-0018) |
 | P2 Control | Scoped credentials, Cedar authorization, budget ledger, secret redaction | built; closed by the signed threat model v1 (2026-10-15) |
-| P3 Flow → **Kernel RC-1** | Runtime, the one network door, the module socket, proxy for Anthropic Messages and OpenAI Responses clients, CLI, pricing, release pipeline | **in progress.** First move: the module socket and the first governed Operation, end to end against a local mock provider |
+| P3 Flow → **Kernel RC-1** | Runtime, the one network door, the module socket, proxy for Anthropic Messages and OpenAI Responses clients, CLI, pricing, release pipeline | **in progress.** Built: the one network door (`uaos-egress`) and chunk durability inside the journal's classes (ADR-0018). In review: the structural tokenizer (`uaos-json`). Next: the runtime spine and the first governed Operation against a local mock provider, then the module socket, dialects and pricing, the API and CLI, and the proof and release lane. No request flows through UAOS yet |
 
 Work owed by finished phases is tracked as `phase-debt` and must be repaid before RC-1. The
 current phase above is checked against [`gates.toml`](../gates.toml) and the README on every
@@ -27,8 +27,12 @@ merge.
 
 ## Kernel RC-1
 
-**Target:** a release-candidate go/no-go on **2026-11-12 at the earliest**, preceded by a two-week
-evidence window in which only fixes land, no features.
+**Target:** re-baselined on 2026-10-19 from the measured pace. About 31 pull requests remain
+before the build exit, and one person merges, so the build exit is expected in **early to mid
+December 2026**. The go/no-go follows at least two weeks later, after an evidence window in
+which only fixes land, no features. This is an estimate from the pace so far, not a commitment:
+gates decide, and a missed proof moves the date, never a threshold. The earlier target of
+2026-11-12 assumed a pace the work has not shown.
 
 **What RC-1 means.** Unmodified coding agents that use API keys point at UAOS with a base URL, or
 run under `uaos run --`. Every request that passes through UAOS is then:

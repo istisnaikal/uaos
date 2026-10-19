@@ -609,6 +609,17 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Changed
 
+- **Re-baselined on 2026-10-19.**
+  - The roadmap's P3 row says what is built (the network door, chunk durability), what is in
+    review (`uaos-json`), what comes next, and that no request flows through UAOS yet.
+  - The RC-1 target moves from "2026-11-12 at the earliest" to an estimate from the measured
+    pace: build exit in early to mid December 2026, go/no-go at least two weeks later. Gates
+    decide; no threshold moved.
+  - README lists `uaos-egress` as built but not yet in any request path; it was still under
+    "does not exist yet".
+  - Four open decisions join the register: D-31 review convergence, D-32 the chunk storage
+    format before the freeze, D-33 which machine judges stage budgets, and D-34 booking the
+    external audit and legal review.
 - README and roadmap describe the real state. The phase is P3. Scoped credentials exist. The
   numbers are current: corpus v2 and policy p99 688 µs. The ledger claim is worded as the
   WP2.2 review required: a refusal before recording, and a randomized simulation against a
