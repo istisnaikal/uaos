@@ -716,9 +716,10 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     external audit and legal review.
 - **The nightly kill lane fits its time again, with the same proof.** After payloads joined the
   kill harness (PR-1), one job of 10,000 kills overran GitHub's 6 h cap on Windows (run
-  39219569263, cancelled; macOS took 3.5 h). The cost is reading every acknowledged payload
-  back: about 12 ms for the first read of a freshly written chunk on the reference machine,
-  0.3 ms for later reads.
+  39219569263, cancelled; macOS took 3.5 h). On CI runners the cost is the writer itself, now
+  that every record carries a payload: its puts and its recovery at boot (serially, 10,000
+  Windows kills take about 6.8 h). On the reference machine, reading payloads back costs more
+  (about 12 ms for the first read of a freshly written chunk, from its file-system filters).
   - **Sharded:** the nightly runs 8 shards of 1,250 kills per OS with distinct seeds: the same
     10,000 kills and the same checks after each, in parallel, each shard under a 100 min timeout,
     so a slowdown fails loudly instead of being cancelled.
@@ -727,8 +728,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     acknowledged since the last writer that finished its open, and every payload of a directory
     before it is retired. A loss never heals in the harness, so the same losses are caught; only
     the iteration that reports one can differ.
-  - **New kill point:** about one kill in six lands before the writer prints `start`, during
-    store open and journal recovery. Before, every kill waited for the open to finish.
+  - **New kill point:** about one kill in six is aimed before the writer prints `start`, at a
+    random point of a boot as long as the last one, during store open and journal recovery
+    (15–20% of kills landed there locally). Before, every kill waited for the open to finish.
   - **Bounded disk:** a directory is deleted as soon as it is retired. Before, a 10,000-kill run
     kept about 4 million files until it ended.
   - **Phase timings:** each run prints where its time went (boot, run, journal verification,
