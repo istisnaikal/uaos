@@ -166,12 +166,6 @@ const _: () = assert!(
     "spans mark the run scratch with bit 31, so inputs must stay below 2^31 bytes"
 );
 
-/// The bench's copy of the fingerprint, compiled here so the unit tests can hold it to the real
-/// one (review WP3.A2, second round, M2).
-#[cfg(test)]
-#[path = "../benches/support/fingerprint_copy.rs"]
-mod fingerprint_copy;
-
 impl<'a> Parser<'a> {
     fn new(bytes: &'a [u8], limits: Limits) -> Result<Self, JsonError> {
         // About one node per 128 input bytes for real transcripts (12,280 nodes in 1.70 MB),
@@ -1009,9 +1003,10 @@ impl fmt::Debug for Tape<'_> {
 mod tests {
     use std::fmt::Write as _;
 
-    use super::{Fingerprint, Parser, fingerprint, fingerprint_copy, fingerprint_decoded};
+    use super::{Fingerprint, Parser, fingerprint, fingerprint_decoded};
     use crate::decode::UNESCAPED;
     use crate::error::ErrorKind;
+    use crate::fingerprint_copy;
     use crate::{Limits, parse, to_u32};
 
     /// `tests/grammar.rs` (`distinct_keys_sharing_a_fingerprint_are_accepted`) relies on these

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! A copy of `Fingerprint` in `src/tape.rs`, for the bench, which cannot reach the crate's private
-//! fingerprint. The crate compiles this file into its unit tests and holds it to the real one
-//! (`the_bench_copy_is_the_fingerprint`), so a drift fails a test instead of turning the bench's
-//! crafted rows into a second control (review WP3.A2, second round, M2).
+//! A copy of `Fingerprint` in `tape.rs`, for the bench, which cannot reach the crate's private
+//! fingerprint and includes this file. The crate compiles it into its unit tests only, and holds
+//! it to the real one (`the_bench_copy_is_the_fingerprint`), so a drift fails a test instead of
+//! turning the bench's crafted rows into a second control (review WP3.A2, second round, M2). It
+//! lives in `src/` and the bench reaches it, not the other way round: a `#[path]` module is
+//! allowed only where `clippy::disallowed_methods` may be (arch.toml `[allow_audit]`).
 
 const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 const MULTIPLIER: u64 = 0x517C_C1B7_2722_0A95;

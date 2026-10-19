@@ -208,7 +208,7 @@ fn adversarial(label: &str, input: &[u8], limits: &Limits) {
 }
 
 /// The fingerprint, copied; the crate's unit tests hold the copy to the real one.
-#[path = "support/fingerprint_copy.rs"]
+#[path = "../src/fingerprint_copy.rs"]
 mod fingerprint;
 
 /// An object of keys spelled with every byte escaped: `prefix_len` bytes of `p`, then an 8-byte

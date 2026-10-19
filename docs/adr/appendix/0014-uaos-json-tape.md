@@ -387,7 +387,7 @@ of 2026-10-20):
 both escaped keys again; the review measured 1,009.9 ms and 1,297.8 ms for these two shapes, 12
 and 15 times their controls. With each escaped key decoded once into the run scratch, a crafted
 body costs 1.4 and 1.6 times its control. The bench crafts its keys with a copy of the fingerprint run backwards
-(`benches/support/fingerprint_copy.rs`). The crate compiles the same file into its unit tests, which hold
+(`src/fingerprint_copy.rs`). The crate compiles the same file into its unit tests, which hold
 it to the real fingerprint at every length and craft their own collisions with it, so a drift
 fails a test; the bench also asserts that every crafted key collides under the copy before it
 measures. A unit test bounds the decoding a crafted run costs, so the per-comparison decoding
