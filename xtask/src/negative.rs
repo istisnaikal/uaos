@@ -318,6 +318,40 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "lost or changed",
         },
         Case {
+            id: "journal-first-open-bricks",
+            gate: "journal-durability",
+            tool: None,
+            // A first open killed before its manifest is stored leaves an empty segment; refusing
+            // it makes the directory unopenable forever (kill harness, nightly 39330543607).
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "        if !fs.read(path).map_err(storage)?.is_empty() {\n",
+                "        if fs.read(path).is_ok() {\n",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "journal", "a_first_open_killed_before_its_manifest_is_stored_starts_cleanly"],
+            },
+            expect: "left the journal unopenable",
+        },
+        Case {
+            id: "journal-new-history-over-records",
+            gate: "journal-durability",
+            tool: None,
+            // Segments of a real history, whose manifest is gone, taken for a crashed first open:
+            // a new history would hide that the old one is lost (T12).
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "        if !fs.read(path).map_err(storage)?.is_empty() {\n",
+                "        if fs.read(path).map_err(storage)?.is_empty() && false {\n",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "journal", "manifest"],
+            },
+            expect: "a new history started over",
+        },
+        Case {
             id: "recovery-drops-old-payload",
             gate: "journal-durability",
             tool: None,

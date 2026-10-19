@@ -332,7 +332,51 @@ fn missing_manifest_with_existing_segments_is_refused() {
     w.fs.crash();
     drop(j);
     w.fs.remove_file(&Manifest::path(&w.dir())).unwrap();
-    assert!(matches!(w.open(LAZY), Err(JournalError::Corrupt(_))));
+    assert!(
+        matches!(w.open(LAZY), Err(JournalError::Corrupt(_))),
+        "a new history started over a journal whose records lost their manifest"
+    );
+}
+
+/// What a writer killed inside its first open leaves (the kill harness found it, nightly
+/// 39330543607): the first segment created, its directory entry flushed, the manifest never
+/// stored. Nothing was written, so the next open sets the file aside and starts.
+#[test]
+fn a_first_open_killed_before_its_manifest_is_stored_starts_cleanly() {
+    let w = World::new(13);
+    w.fs.create_dir_all(&w.dir()).unwrap();
+    let first = w.dir().join("seg-00000000000000000000-000001.jsonl");
+    drop(w.fs.open_append(&first).unwrap());
+    let mut j = w
+        .open(LAZY)
+        .unwrap_or_else(|e| panic!("a crashed first open left the journal unopenable: {e}"));
+    j.append(draft(0)).unwrap();
+    assert_eq!(w.records().len(), 1);
+    let names: Vec<String> =
+        w.fs.list_dir(&w.dir())
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.file_name()?.to_str().map(str::to_owned))
+            .collect();
+    assert!(
+        names
+            .iter()
+            .any(|n| n == "seg-00000000000000000000-000001.jsonl.orphan-g0"),
+        "the empty segment was not set aside: {names:?}"
+    );
+}
+
+/// One byte in a segment without a manifest is a history, however torn: refused.
+#[test]
+fn a_missing_manifest_over_any_byte_is_refused() {
+    let w = World::new(14);
+    w.fs.create_dir_all(&w.dir()).unwrap();
+    let torn = w.dir().join("seg-00000000000000000000-000001.jsonl");
+    w.fs.open_append(&torn).unwrap().append(b"{").unwrap();
+    assert!(
+        matches!(w.open(LAZY), Err(JournalError::Corrupt(_))),
+        "a new history started over a segment holding bytes"
+    );
 }
 
 #[test]

@@ -227,6 +227,8 @@ negative = [
   "shred-of-quarantined-payload-skipped",
   "loss-cause-overwritten",
   "recovery-drops-old-payload",
+  "journal-first-open-bricks",
+  "journal-new-history-over-records",
 ]
 
 [[gate]]

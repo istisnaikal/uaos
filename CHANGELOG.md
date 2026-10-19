@@ -687,6 +687,19 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   (Contributor Covenant 2.1), GOVERNANCE, RELEASING, ADR-0001–0005, threat model v0, privacy
   data flow v0, vision traceability matrix.
 
+### Fixed
+
+- **A crash during the journal's very first open no longer bricks the data directory.** A writer
+  killed between creating the first segment and storing the manifest left an empty segment and
+  no manifest, and every later open refused it ("refusing to start a new history"), so the
+  directory could never be opened again. No acknowledged record was ever at risk (nothing is
+  acknowledged before open completes); the directory's availability was. Now segment files that
+  are all empty are set aside as orphans and the history starts; one byte in any of them is
+  still refused. Found by the kill harness's new kills during boot (nightly 39330543607, macOS).
+  New tests `a_first_open_killed_before_its_manifest_is_stored_starts_cleanly` and
+  `a_missing_manifest_over_any_byte_is_refused`; seeded violations `journal-first-open-bricks`
+  and `journal-new-history-over-records`.
+
 ### Changed
 
 - **Seven locales above a language-neutral kernel (ADR-0020, Proposed; D-36).**
