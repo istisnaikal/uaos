@@ -89,6 +89,8 @@ struct Phases {
     /// Spawn to `start`: process start, store open, journal open and recovery.
     boot: Duration,
     boot_max: Duration,
+    /// The last writer's boot: a kill before `start` waits a random part of it.
+    last_boot: Duration,
     /// `start` to the kill.
     run: Duration,
     /// The kill to the writer's last line.
@@ -221,8 +223,11 @@ fn run_writer(
     let mut run_began = None;
 
     if kill == Kill::BeforeStart {
-        let longest_boot = u64::try_from(phases.boot_max.as_millis()).unwrap_or(u64::MAX);
-        std::thread::sleep(Duration::from_millis(random_below(rng, longest_boot + 1)));
+        // A random point of a boot as long as the last one, which grows with the directory: the
+        // longest boot so far would put most of these kills after `start` (nightly 39319600117:
+        // 2-7% of kills landed in a boot, not one in six).
+        let last_boot = u64::try_from(phases.last_boot.as_micros()).unwrap_or(u64::MAX);
+        std::thread::sleep(Duration::from_micros(random_below(rng, last_boot + 1)));
     } else {
         let mut first = String::new();
         reader.read_line(&mut first).unwrap();
@@ -231,6 +236,7 @@ fn run_writer(
         let boot = spawned.elapsed();
         phases.boot += boot;
         phases.boot_max = phases.boot_max.max(boot);
+        phases.last_boot = boot;
         run_began = Some(Instant::now());
         if kill == Kill::AfterDelay {
             std::thread::sleep(Duration::from_millis(random_below(rng, 40)));
