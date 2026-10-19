@@ -28,6 +28,11 @@ mod node;
 mod number;
 mod tape;
 
+/// The bench's copy of the fingerprint (`benches/tape.rs` includes this file), compiled into the
+/// unit tests so they can hold it to the real one (review WP3.A2, second round, M2).
+#[cfg(test)]
+mod fingerprint_copy;
+
 pub use decode::{Decoded, decode, decode_mapped};
 pub use encode::encode_str;
 pub use error::{ErrorKind, JsonError, LimitsError, Violation};
