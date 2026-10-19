@@ -144,13 +144,14 @@ test and is not this crate's limit.
 | Tape | 24 B × capacity. The first reserve is `clamp((len / 128 + 1).next_power_of_two(), 16, max_nodes)`, and it grows with `try_reserve_exact` to `min(2 × capacity, max_nodes)` | 384 KiB reserved (288 KiB used) | 24 MiB steady; at most 36 MiB while the last growth copies |
 | Depth stack | 4 B × `max_depth`, reserved up front | 512 B | 512 B |
 | Duplicate-key side stack | 8 B per member key of the objects still open: a 32-bit fingerprint of the decoded key and the member's node id. It grows like the tape, to at most `max_nodes` entries. Object marks: 4 B × `max_depth`, reserved up front | under 1 KiB | 8 MiB steady; at most 12 MiB while the last growth copies |
-| Run scratch | only for members that share a fingerprint, reused for every run: 12 B per member of the largest run, plus that run's escaped keys decoded, which is at most their raw length | 0 (no collisions) | 12 MiB, plus at most the input's length |
+| Run scratch | only for members that share a fingerprint, reused for every run and reserved exactly once per run: 12 B per member of the largest run, plus that run's escaped keys decoded, which is at most their raw length | 0 (no shared fingerprints) | 12 MiB, plus at most the input's length |
 | String decode | lazy: borrowed when the string has no escape, otherwise the decoded length, reserved exactly | 0 until asked | caller-driven |
 | Offset map | 4 B × (decoded length + 1), reserved exactly, half of `uaos-redact`'s 8 B per byte | on demand | caller-driven |
 
 - **Per parse,** at the defaults: at most 24 MiB + 8 MiB + 1 KiB steady when no keys share a
-  fingerprint. A run of shared fingerprints, which takes keys crafted to collide, adds at most
-  12 MiB plus the input's length. The input belongs to the caller.
+  fingerprint. A run forms whenever keys do: a repeated key (refused once its run is compared),
+  keys crafted to collide, or a rare natural collision (about 116 pairs in a million random
+  keys). A run adds at most 12 MiB plus the input's length. The input belongs to the caller.
 - **Eight concurrent Operations:** about 3 MiB at the reference size; at most 8 × 33 MiB without
   collisions, and 8 × 77 MiB with crafted ones.
 - **Time.**
@@ -205,7 +206,10 @@ test and is not this crate's limit.
   - `DuplicateKey`: at the later key's opening quote;
   - `DepthExceeded`: at the bracket that opens one level too many;
   - `TooManyNodes`: at the first byte of the value that would exceed the limit. Only a byte that
-    starts a value counts: any other byte is the grammar error it is, whatever the node count.
+    starts a value counts: any other byte is the grammar error it is, whatever the node count;
+  - `OutOfMemory`: in `parse`, at the byte being read when the allocation was refused (the value,
+    or the opening quote of the first key of the run being compared); in `decode` and
+    `decode_mapped`, at the first backslash; `encode_str` has no input offset and reports 0.
 - **A repeated key is found when its object closes,** not where the repeat is read. The error
   names the first object that closes with a repeat, at its earliest second occurrence; an
   object inside a repeated member closes first, so its repeat is the one reported. An error the
@@ -234,9 +238,11 @@ test and is not this crate's limit.
 
   Its output is byte-identical to `serde_json::to_string` for every string, and a test proves
   that.
-- **Memory outside `parse`.** `decode`, `decode_mapped` and `encode_str` reserve the exact length
-  they will write before writing it, and return `OutOfMemory` instead of aborting when it is
-  refused; `encode_str` then leaves its output unchanged.
+- **Memory outside `parse`.** `decode` and `decode_mapped` reserve exactly the decoded length,
+  counted first with `memchr` over plain runs. `encode_str` asks for room for the exact encoded
+  length (`try_reserve`, so the vector may round its capacity up). All three return
+  `OutOfMemory` instead of aborting when that is refused; `encode_str` then leaves its output
+  unchanged.
 - **`parse_u64` and `parse_i64`** read integer number text with checked arithmetic. Fraction,
   exponent, `-0` and out-of-range values return `None`. Every other number stays text (ADR-0014
   Decision 6).
@@ -293,7 +299,7 @@ test and is not this crate's limit.
 
 **Seeded violations** (`cargo xtask negative`):
 - `arch-json-io-dependency`: the arch gate;
-- 13 `json-*` cases for the test gate:
+- 14 `json-*` cases for the test gate:
   - one per fail-closed rule: `json-duplicate-key-unchecked`,
     `json-escaped-duplicate-compared-raw`, `json-depth-off-by-one`,
     `json-lone-surrogate-accepted`, `json-trailing-data-accepted`, `json-bom-stripped` and
@@ -301,7 +307,8 @@ test and is not this crate's limit.
   - one for the oracle, `json-decode-escape-wrong`, which proves that serde_json bites;
   - five for the fingerprinted check: `json-fingerprint-raw-bytes`,
     `json-fingerprint-collision-accepts`, `json-fingerprint-collision-rejects`,
-    `json-fingerprint-word-order` and `json-pairwise-skips-shared-fingerprint`.
+    `json-fingerprint-word-order` and `json-pairwise-skips-shared-fingerprint`;
+  - one for the run scratch's bound, `json-run-scratch-doubles`.
 
 **Bench:** `benches/tape.rs` at about 1.70 MB records p50, p95 and p99, the UTF-8 stage alone,
 throughput, heap, and the adversarial rows of §6.
@@ -331,6 +338,10 @@ least 0.85 GB/s.
   one run of 2.163 ms among five, while other builds ran on the same machine; the five runs above
   were taken with nothing else running. No CI runner judges this stage yet; which machine does
   is open decision D-33, and `perf-smoke` stays pending until WP3.8.
+- **After the second review round** the parse path is unchanged: round 2 touched the collision
+  path, the decoder and tests only. Four reruns on the same machine with a background process
+  using a core gave p50 1.82–1.84 ms and p95 1.87–2.54 ms. They show how much an unquiet machine
+  moves this tail, not a change in the stage; the quiet runs above remain the stage's numbers.
 - **Where the time went.** Bisected with stubs that were measurements only, never committed:
   - the old check cost about 0.3 ms, spent per object rather than in sorting large ones;
   - with fingerprints, sorting objects of two to four members still cost about 0.26 ms;
@@ -367,17 +378,20 @@ of 2026-10-20):
 | a string of escapes to the size limit | 33.6 MB | 131.7 ms | 123.0–123.6 ms | accepted, one node |
 | number text to the size limit | 33.6 MB | 15.9 ms | 8.5–8.6 ms | accepted, one node |
 | whitespace around one value, to the size limit | 33.6 MB | 16.1 ms | 15.9–16.2 ms | accepted, one node |
-| 16,000 keys crafted to share one fingerprint (320 escaped bytes + 8 each) | 31.6 MB | — | 126.9–127.3 ms | accepted |
+| 16,000 keys crafted to share one fingerprint (328 bytes each, all escaped) | 31.6 MB | — | 126.9–127.3 ms | accepted |
 | the same shape, keys that do not collide (control) | 31.6 MB | — | 88.7–89.2 ms | accepted |
-| 100,000 keys crafted to share one fingerprint (40 escaped bytes + 8 each) | 29.7 MB | — | 139.9–140.7 ms | accepted |
+| 100,000 keys crafted to share one fingerprint (48 bytes each, all escaped) | 29.7 MB | — | 139.9–140.7 ms | accepted |
 | the same shape, keys that do not collide (control) | 29.7 MB | — | 86.3–86.9 ms | accepted |
 
 **Crafted collisions** (review WP3.A2 M1). Before the fix, every exact comparison in a run decoded
 both escaped keys again; the review measured 1,009.9 ms and 1,297.8 ms for these two shapes, 12
 and 15 times their controls. With each escaped key decoded once into the run scratch, a crafted
-body costs 1.4 and 1.6 times its control. The bench crafts its keys with a copy of the fingerprint run backwards;
-it checks that copy against the pair the crate's unit tests pin, and asserts that every crafted
-key collides before it measures.
+body costs 1.4 and 1.6 times its control. The bench crafts its keys with a copy of the fingerprint run backwards
+(`benches/support/fingerprint_copy.rs`). The crate compiles the same file into its unit tests, which hold
+it to the real fingerprint at every length and craft their own collisions with it, so a drift
+fails a test; the bench also asserts that every crafted key collides under the copy before it
+measures. A unit test bounds the decoding a crafted run costs, so the per-comparison decoding
+cannot come back unnoticed.
 
 **Coverage-guided fuzzing.** Nightly run 39146599664 on `316513d`, ubuntu-latest, with
 AddressSanitizer:

@@ -170,8 +170,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `serde_json` read strictly, property fuzzing, and no payload in `Debug`. A one-off
     20,000-document differential found 0 disagreements; 13 numbers outside the f64 range were
     accepted by the tape only, which is the known divergence.
-  - **Seeded violations:** `arch-json-io-dependency` and thirteen `json-*` cases: one per
-    fail-closed rule, one for the oracle, and five for the fingerprinted duplicate check.
+  - **Seeded violations:** `arch-json-io-dependency` and fourteen `json-*` cases: one per
+    fail-closed rule, one for the oracle, five for the fingerprinted duplicate check and one for
+    its run scratch's bound.
   - **Duplicate keys are fingerprinted.**
     - Each key is fingerprinted over its **decoded** bytes as it is read, so an escaped and an
       unescaped spelling of a key always share a fingerprint.
@@ -187,8 +188,8 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       checks every spelling against an exact oracle.
     - The control-byte check runs branch-free over each run of string bytes.
     - The side stack takes 8 bytes per key of the open objects, at most 8 MiB.
-  - **The V1 review** (`docs/reviews/WP3.A2-json.md`): 0 High, 4 Medium, 9 Low, all resolved
-    there. Beyond the collisions: a repeat is found when its object closes, now stated and
+  - **The V1 review** (`docs/reviews/WP3.A2-json.md`): 0 High, 4 Medium, 9 Low, and a scoped
+    second round over the fixes, 0 High, 2 Medium, 4 Low, all resolved there. Beyond the collisions: a repeat is found when its object closes, now stated and
     pinned; the offset map and the decoded text are reserved exactly; the node limit no longer
     hides a grammar error; `decode`, `decode_mapped` and `encode_str` return `OutOfMemory`
     instead of aborting, so `encode_str` now returns a `Result`.

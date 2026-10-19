@@ -161,6 +161,17 @@ struct RunScratch {
 /// Marks a span in [`RunScratch::decoded`]; the input and the scratch stay below 2^31 bytes.
 const IN_DECODED: u32 = 1 << 31;
 
+const _: () = assert!(
+    Limits::MAX_BYTES_CEILING < IN_DECODED,
+    "spans mark the run scratch with bit 31, so inputs must stay below 2^31 bytes"
+);
+
+/// The bench's copy of the fingerprint, compiled here so the unit tests can hold it to the real
+/// one (review WP3.A2, second round, M2).
+#[cfg(test)]
+#[path = "../benches/support/fingerprint_copy.rs"]
+mod fingerprint_copy;
+
 impl<'a> Parser<'a> {
     fn new(bytes: &'a [u8], limits: Limits) -> Result<Self, JsonError> {
         // About one node per 128 input bytes for real transcripts (12,280 nodes in 1.70 MB),
@@ -377,7 +388,8 @@ impl<'a> Parser<'a> {
     }
 
     /// Refuses the closing object if its members share a key once decoded. Its members are the
-    /// top segment of `keys`, fingerprinted as they were read: O(m log m), no allocation.
+    /// top segment of `keys`, fingerprinted as they were read: O(m log m), allocating only into
+    /// the reused side stack and run scratch.
     fn check_duplicate_keys(&mut self) -> Result<(), JsonError> {
         let mark = self.marks.pop().map_or(self.keys.len(), to_usize);
         let found = self.keys.get_mut(mark..).map_or(Ok(()), |members| {
@@ -438,8 +450,17 @@ fn repeat_in_run(
     };
     let oom = |at: u32| JsonError::new(ErrorKind::OutOfMemory, to_usize(at));
     let first_key = node(0).map_or(0, |n| n.key_start);
-    spans.try_reserve(run.len()).map_err(|_| oom(first_key))?;
-    order.try_reserve(run.len()).map_err(|_| oom(first_key))?;
+    // Exact reservations, one per run after `clear`: the scratch holds at most what the largest
+    // run needs, 12 B per member plus its escaped keys, which decode to at most their raw length
+    // (contract §6; review WP3.A2, second round, M1).
+    let escaped: usize = (0..to_u32(run.len()))
+        .filter_map(node)
+        .filter(|member| member.flags & KEY_ESCAPED != 0)
+        .map(|member| usize::from(member.key_len))
+        .sum();
+    spans.try_reserve_exact(run.len()).map_err(|_| oom(first_key))?;
+    order.try_reserve_exact(run.len()).map_err(|_| oom(first_key))?;
+    decoded.try_reserve_exact(escaped).map_err(|_| oom(first_key))?;
     for position in 0..to_u32(run.len()) {
         let Some(member) = node(position) else {
             spans.push((0, 0));
@@ -450,9 +471,8 @@ fn repeat_in_run(
         if member.flags & KEY_ESCAPED == 0 {
             spans.push((member.key_start + 1, u32::from(member.key_len)));
         } else {
-            // An escaped key decodes to at most its raw length.
+            // Within the reservation above: an escaped key decodes to at most its raw length.
             let start = decoded.len();
-            decoded.try_reserve(content.len()).map_err(|_| oom(member.key_start))?;
             let mut unescaped = Unescape::new(content);
             decoded.extend(unescaped.by_ref());
             if unescaped.broken() {
@@ -989,9 +1009,8 @@ impl fmt::Debug for Tape<'_> {
 mod tests {
     use std::fmt::Write as _;
 
-    use super::{
-        FINGERPRINT_MULTIPLIER, FMIX_FIRST, FMIX_SECOND, Fingerprint, Parser, fingerprint, fingerprint_decoded,
-    };
+    use super::{Fingerprint, Parser, fingerprint, fingerprint_copy, fingerprint_decoded};
+    use crate::decode::UNESCAPED;
     use crate::error::ErrorKind;
     use crate::{Limits, parse, to_u32};
 
@@ -1085,50 +1104,20 @@ mod tests {
         }
     }
 
-    fn inverse(odd: u64) -> u64 {
-        // Newton's iteration for the inverse modulo 2^64: each step doubles the correct bits.
-        let mut x = odd;
-        for _ in 0..6 {
-            x = x.wrapping_mul(2_u64.wrapping_sub(odd.wrapping_mul(x)));
-        }
-        x
-    }
-
-    /// Suffix words that, after `prefix`, give the decoded key a fingerprint of `target`: the
-    /// fingerprint run backwards, as the review crafted them (WP3.A2 M1). Every byte is below
-    /// 0x80, so each can be spelled as an escape that decodes to itself.
-    fn colliding_suffixes(prefix: &[u8], target: u32, count: usize) -> Vec<[u8; 8]> {
-        assert!(prefix.len().is_multiple_of(8));
-        let mut fp = Fingerprint::new();
-        for &byte in prefix {
-            fp.push(byte);
-        }
-        let state = fp.hash;
-        let len = u64::try_from(prefix.len() + 8).unwrap();
-        let (unmultiply, unfirst, unsecond) = (
-            inverse(FINGERPRINT_MULTIPLIER),
-            inverse(FMIX_FIRST),
-            inverse(FMIX_SECOND),
-        );
-        let mut found = Vec::with_capacity(count);
-        for low in 0_u64.. {
-            let mut k = (u64::from(target) << 32) | low;
-            k ^= k >> 33;
-            k = k.wrapping_mul(unsecond);
-            k ^= k >> 33;
-            k = k.wrapping_mul(unfirst);
-            k ^= k >> 33;
-            let folded = k ^ len;
-            let mixed = folded ^ (folded >> 29) ^ (folded >> 58);
-            let word = (mixed.wrapping_mul(unmultiply) ^ state).to_le_bytes();
-            if word.iter().all(|&b| b < 0x80) {
-                found.push(word);
-                if found.len() == count {
-                    break;
-                }
+    /// The bench crafts its collision rows with a copy of the fingerprint: the copy must be the
+    /// fingerprint, raw and decoded, at every length (review WP3.A2, second round, M2).
+    #[test]
+    fn the_bench_copy_is_the_fingerprint() {
+        for len in 0..=40 {
+            for seed in 0..32 {
+                let content = bytes_of(seed * 53 + u64::try_from(len).unwrap(), len);
+                assert_eq!(
+                    fingerprint_copy::of(&content),
+                    fingerprint(&content),
+                    "the bench's fingerprint copy drifted at length {len}"
+                );
             }
         }
-        found
     }
 
     /// Keys crafted to share one fingerprint are accepted, and a repeat among them, spelled
@@ -1137,7 +1126,7 @@ mod tests {
     fn crafted_collisions_are_compared_exactly() {
         let target = 0x5eed_0019;
         let prefix = [b'p'; 40];
-        let suffixes = colliding_suffixes(&prefix, target, 2_000);
+        let suffixes = fingerprint_copy::colliding_suffixes(&prefix, target, 2_000);
         let mut text = String::from("{");
         for (i, suffix) in suffixes.iter().enumerate() {
             if i > 0 {
@@ -1154,9 +1143,19 @@ mod tests {
             write!(text, "\"{key}\":{i}").unwrap();
         }
         text.push('}');
+        // Each key is decoded once to fingerprint it and once in its run. Decoding again at every
+        // comparison, as before the first review's M1 fix, would cost about log2(2,000) = 11
+        // times as much (second round, L1).
+        UNESCAPED.with(|n| n.set(0));
         assert!(
             parse(text.as_bytes(), &Limits::DEFAULT).is_ok(),
             "crafted colliding keys refused"
+        );
+        let decoded_bytes = 2_000 * u64::try_from(prefix.len() + 8).unwrap();
+        let produced = UNESCAPED.with(std::cell::Cell::get);
+        assert!(
+            produced <= 3 * decoded_bytes,
+            "a crafted run decoded {produced} bytes, more than once per key ({decoded_bytes})"
         );
 
         text.pop();
@@ -1209,6 +1208,41 @@ mod tests {
         assert!(
             parser.keys.capacity() <= 1_000,
             "the side stack passed a node limit of 1,000"
+        );
+    }
+
+    /// The run scratch holds at most what the largest run needs: one exact reservation per run,
+    /// never doubling past the escaped keys' raw length (contract §6; second round, M1).
+    #[test]
+    fn the_run_scratch_stays_within_its_bound() {
+        let target = 0x5eed_0020;
+        let prefix = [b'p'; 4096];
+        let suffixes = fingerprint_copy::colliding_suffixes(&prefix, target, 33);
+        let mut text = String::from("{");
+        let mut raw_escaped = 0;
+        for (i, suffix) in suffixes.iter().enumerate() {
+            if i > 0 {
+                text.push(',');
+            }
+            let mut key = String::new();
+            let decoded: Vec<u8> = prefix.iter().chain(suffix.iter()).copied().collect();
+            // Only the first byte escaped: the raw key is barely longer than its decoded form.
+            spell(&decoded, |position, _| position == 0, &mut key);
+            raw_escaped += key.len();
+            write!(text, "\"{key}\":{i}").unwrap();
+        }
+        text.push('}');
+        let mut parser = Parser::new(text.as_bytes(), Limits::DEFAULT).unwrap();
+        parser.run().unwrap();
+        let scratch = &parser.run;
+        assert!(
+            scratch.decoded.capacity() <= raw_escaped,
+            "run scratch {} bytes, its escaped keys {raw_escaped}",
+            scratch.decoded.capacity()
+        );
+        assert!(
+            scratch.spans.capacity() <= 33 && scratch.order.capacity() <= 33,
+            "run scratch grew past the run"
         );
     }
 }

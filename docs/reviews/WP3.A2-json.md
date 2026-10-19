@@ -7,7 +7,8 @@ scratchpad copy on Windows 10 with its own scratch tests. **Reviewed:** `cc8f7ba
 reachable.
 **Resolution:** every Medium fixed, each with a regression test and, where a seeded bug can show
 the test bites, a seeded violation. Every Low fixed or, where it is documentation by nature,
-written into the contract. The fixes have not been reviewed again.
+written into the contract. A scoped second round over the fixes (`cc8f7ba..97f16e3`) found 0 High,
+2 Medium and 4 Low, resolved below; those fixes have not been reviewed again.
 
 ## Findings as reported
 
@@ -95,3 +96,18 @@ environment variables taking effect; the bench's rows matching §10.
 - the one-off 20,000-document differential (0 disagreements; the 13 known out-of-range numbers);
 - all 14 seeded violations of the crate PROVEN;
 - `cargo xtask clippy` clean.
+
+## Second round, scoped to the fixes (2026-10-20)
+
+**Reviewer:** a fresh-context agent, read-only on `97f16e3`, scoped to the diff `cc8f7ba..97f16e3`
+and every invariant and caller it touches, probing a scratchpad copy. **Result:** 0 High ·
+2 Medium · 4 Low. No fail-open, no reachable panic, no wrong kind or offset.
+
+| Finding | What was wrong | What changed | Proof |
+|---|---|---|---|
+| M1 | The run scratch reserved per escaped key with `try_reserve`, which doubles, so it could hold about twice its decoded keys and keep that across runs: 56.66 MiB on a 29.39 MiB crafted input against §6's 12 MiB plus the input. Plain repeats and natural collisions also form runs, which §6 did not say | One exact reservation per run after `clear`, sized from the run's escaped keys; `spans` and `order` reserved exactly too. §6 says when a run forms | `the_run_scratch_stays_within_its_bound` (33 crafted keys of 4 KiB, first byte escaped: capacity at most the escaped keys' raw length); new negative `json-run-scratch-doubles` restores the doubling, measured at 264,256 bytes against 135,937, **PROVEN** |
+| M2 | The bench's drift guard compared its fingerprint copy with itself, so it could not fail; the crafted rows could silently become a second control | The copy moved to `benches/support/fingerprint_copy.rs`, which the crate also compiles into its unit tests; the crate's own crafted-collision test now crafts with the copy | `the_bench_copy_is_the_fingerprint` (every length 0–40), and `crafted_collisions_are_compared_exactly` asserts every key crafted with the copy collides under the real fingerprint |
+| L1 | Nothing failed if decoding at every comparison came back | A test-only count of the bytes `Unescape` produces | `crafted_collisions_are_compared_exactly` asserts a crafted run of 2,000 keys decodes at most three times its keys' bytes; once per comparison would be about eleven |
+| L2 | The exact-size count walked the rest of the string a byte at a time before decoding | Counted with `memchr` over plain runs, escapes by their UTF-8 length, stopping where decoding stops | The decode properties, the map property and the 100,000-case fuzz run |
+| L3 | Stale text: "no allocation", the decode module doc, "exact length" for `encode_str`, no `OutOfMemory` offset in §7, §10's row labels | All corrected | Contract and doc text |
+| L4 | `IN_DECODED` (bit 31) relied on the input ceiling staying below 2^31 without a check | A compile-time assertion | `const _: () = assert!(Limits::MAX_BYTES_CEILING < IN_DECODED, …)` |

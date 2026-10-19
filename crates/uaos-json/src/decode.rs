@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! String decoding (contract §8). One escape core, [`unescape_at`], serves the strict decoder,
-//! the decoder with an offset map and the allocation-free key comparison of the duplicate-key
-//! check, so all three read an escape the same way. Nothing falls back silently: a malformed
+//! the decoder with an offset map and the duplicate-key check (its fingerprints and its run
+//! scratch), so all of them read an escape the same way. Nothing falls back silently: a malformed
 //! escape is an error, never U+FFFD.
 
 use std::borrow::Cow;
@@ -110,7 +110,7 @@ fn decode_inner(content: &str, mapped: bool) -> Result<Decoded<'_>, JsonError> {
         // a text and a map sized exactly from the decoded length (contract §6), or the decode is
         // refused with `OutOfMemory` when that much cannot be had.
         if out.is_none() {
-            let decoded = i + Unescape::new(bytes.get(i..).unwrap_or_default()).count();
+            let decoded = i + decoded_len(bytes, i);
             let oom = || JsonError::new(ErrorKind::OutOfMemory, i);
             let mut buf = Vec::new();
             buf.try_reserve_exact(decoded).map_err(|_| oom())?;
@@ -245,10 +245,42 @@ impl<'a> Unescape<'a> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times `Unescape` was asked for a byte on this thread: lets a unit test bound how
+    /// much decoding a run of colliding keys costs (review WP3.A2, second round, L1).
+    pub(crate) static UNESCAPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The decoded length of `bytes[from..]`, up to its first escape that does not decode, which is
+/// where decoding stops with an error: plain runs found with `memchr`, each escape counted by its
+/// UTF-8 length (review WP3.A2, second round, L2).
+fn decoded_len(bytes: &[u8], from: usize) -> usize {
+    let mut len = 0;
+    let mut i = from;
+    loop {
+        let rest = bytes.get(i..).unwrap_or_default();
+        let Some(at) = memchr::memchr(b'\\', rest) else {
+            return len + rest.len();
+        };
+        len += at;
+        i += at;
+        match unescape_at(bytes, i) {
+            Ok((ch, consumed)) => {
+                len += ch.len_utf8();
+                i += consumed;
+            }
+            Err(_) => return len,
+        }
+    }
+}
+
 impl Iterator for Unescape<'_> {
     type Item = u8;
 
     fn next(&mut self) -> Option<u8> {
+        #[cfg(test)]
+        UNESCAPED.with(|n| n.set(n.get() + 1));
         if self.pending_at < self.pending_len {
             let byte = self.pending.get(self.pending_at).copied();
             self.pending_at += 1;

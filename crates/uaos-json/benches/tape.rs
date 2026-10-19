@@ -207,79 +207,9 @@ fn adversarial(label: &str, input: &[u8], limits: &Limits) {
     );
 }
 
-/// A copy of `Fingerprint` in `src/tape.rs`, which the bench cannot reach. `main` checks it on
-/// the colliding pair the crate's unit tests pin, so a drift fails loudly instead of measuring
-/// keys that no longer collide.
-mod fingerprint {
-    const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
-    const MULTIPLIER: u64 = 0x517C_C1B7_2722_0A95;
-    const FMIX_FIRST: u64 = 0xFF51_AFD7_ED55_8CCD;
-    const FMIX_SECOND: u64 = 0xC4CE_B9FE_1A85_EC53;
-
-    fn mix(hash: u64, word: u64) -> u64 {
-        let mixed = (hash ^ word).wrapping_mul(MULTIPLIER);
-        mixed ^ (mixed >> 29)
-    }
-
-    pub(crate) fn of(bytes: &[u8]) -> u32 {
-        let mut hash = SEED;
-        let (words, rest) = bytes.as_chunks::<8>();
-        for &word in words {
-            hash = mix(hash, u64::from_le_bytes(word));
-        }
-        if !rest.is_empty() {
-            let mut word = [0_u8; 8];
-            word.get_mut(..rest.len()).unwrap().copy_from_slice(rest);
-            hash = mix(hash, u64::from_le_bytes(word));
-        }
-        let mut k = hash ^ u64::try_from(bytes.len()).unwrap();
-        k ^= k >> 33;
-        k = k.wrapping_mul(FMIX_FIRST);
-        k ^= k >> 33;
-        k = k.wrapping_mul(FMIX_SECOND);
-        k ^= k >> 33;
-        u32::try_from(k >> 32).unwrap()
-    }
-
-    fn inverse(odd: u64) -> u64 {
-        let mut x = odd;
-        for _ in 0..6 {
-            x = x.wrapping_mul(2_u64.wrapping_sub(odd.wrapping_mul(x)));
-        }
-        x
-    }
-
-    /// `count` 8-byte suffixes, every byte below 0x80, that give `prefix` + suffix the
-    /// fingerprint `target`: the fingerprint run backwards (the V1 review's method, M1).
-    pub(crate) fn colliding_suffixes(prefix: &[u8], target: u32, count: usize) -> Vec<[u8; 8]> {
-        assert!(prefix.len().is_multiple_of(8));
-        let mut state = SEED;
-        for &word in prefix.as_chunks::<8>().0 {
-            state = mix(state, u64::from_le_bytes(word));
-        }
-        let len = u64::try_from(prefix.len() + 8).unwrap();
-        let (unmultiply, unfirst, unsecond) = (inverse(MULTIPLIER), inverse(FMIX_FIRST), inverse(FMIX_SECOND));
-        let mut found = Vec::with_capacity(count);
-        for low in 0_u64.. {
-            let mut k = (u64::from(target) << 32) | low;
-            k ^= k >> 33;
-            k = k.wrapping_mul(unsecond);
-            k ^= k >> 33;
-            k = k.wrapping_mul(unfirst);
-            k ^= k >> 33;
-            let folded = k ^ len;
-            let mixed = folded ^ (folded >> 29) ^ (folded >> 58);
-            let word = (mixed.wrapping_mul(unmultiply) ^ state).to_le_bytes();
-            if word.iter().all(|&b| b < 0x80) {
-                found.push(word);
-                if found.len() == count {
-                    break;
-                }
-            }
-        }
-        found
-    }
-}
+/// The fingerprint, copied; the crate's unit tests hold the copy to the real one.
+#[path = "support/fingerprint_copy.rs"]
+mod fingerprint;
 
 /// An object of keys spelled with every byte escaped: `prefix_len` bytes of `p`, then an 8-byte
 /// suffix. `crafted` suffixes all share one fingerprint; otherwise they count up and collide
@@ -316,11 +246,6 @@ fn escaped_keys(prefix_len: usize, count: usize, crafted: bool) -> String {
 }
 
 fn main() {
-    assert_eq!(
-        fingerprint::of(b"k4312"),
-        fingerprint::of(b"k27385"),
-        "the bench's fingerprint copy drifted from src/tape.rs"
-    );
     let body = transcript();
     let bytes = body.as_bytes();
     let limits = Limits::DEFAULT;
@@ -404,7 +329,10 @@ fn main() {
 
     // Keys crafted offline to share one fingerprint (review WP3.A2 M1), each against a control
     // of the same shape whose keys do not collide.
-    for (prefix, count, shape) in [(320, 16_000, "320 escapes + 8"), (40, 100_000, "40 escapes + 8")] {
+    for (prefix, count, shape) in [
+        (320, 16_000, "328 escaped bytes each"),
+        (40, 100_000, "48 escaped bytes each"),
+    ] {
         let crafted = escaped_keys(prefix, count, true);
         adversarial(
             &format!("{count} keys crafted to collide ({shape})"),

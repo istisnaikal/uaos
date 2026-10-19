@@ -768,6 +768,30 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "word path differs",
         },
         Case {
+            id: "json-run-scratch-doubles",
+            gate: "test",
+            tool: None,
+            // Contract §6: the run scratch reserved per key instead of once per run, so it grows
+            // by doubling past its bound (review WP3.A2, second round, M1).
+            seed: both(
+                replace(
+                    "crates/uaos-json/src/tape.rs",
+                    "    decoded.try_reserve_exact(escaped).map_err(|_| oom(first_key))?;\n",
+                    "    let _ = escaped;\n",
+                ),
+                replace(
+                    "crates/uaos-json/src/tape.rs",
+                    "            let start = decoded.len();\n",
+                    "            let start = decoded.len();\n            decoded.try_reserve(content.len()).map_err(|_| oom(member.key_start))?;\n",
+                ),
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-json", "--lib", "the_run_scratch_stays_within_its_bound"],
+            },
+            expect: "run scratch",
+        },
+        Case {
             id: "json-pairwise-skips-shared-fingerprint",
             gate: "test",
             tool: None,
