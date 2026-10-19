@@ -714,6 +714,28 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - Four open decisions join the register: D-31 review convergence, D-32 the chunk storage
     format before the freeze, D-33 which machine judges stage budgets, and D-34 booking the
     external audit and legal review.
+- **The nightly kill lane fits its time again, with the same proof.** After payloads joined the
+  kill harness (PR-1), one job of 10,000 kills overran GitHub's 6 h cap on Windows (run
+  39219569263, cancelled; macOS took 3.5 h). The cost is reading every acknowledged payload
+  back: about 12 ms for the first read of a freshly written chunk on the reference machine,
+  0.3 ms for later reads.
+  - **Sharded:** the nightly runs 8 shards of 1,250 kills per OS with distinct seeds: the same
+    10,000 kills and the same checks after each, in parallel, each shard under a 100 min timeout,
+    so a slowdown fails loudly instead of being cancelled.
+  - **Payload sweeps (`UAOS_CRASH_SWEEP`):** the merge lane still reads every payload back after
+    every kill. The nightly lane (`rotation`) reads back, after each kill, the payloads
+    acknowledged since the last writer that finished its open, and every payload of a directory
+    before it is retired. A loss never heals in the harness, so the same losses are caught; only
+    the iteration that reports one can differ.
+  - **New kill point:** about one kill in six lands before the writer prints `start`, during
+    store open and journal recovery. Before, every kill waited for the open to finish.
+  - **Bounded disk:** a directory is deleted as soon as it is retired. Before, a 10,000-kill run
+    kept about 4 million files until it ended.
+  - **Phase timings:** each run prints where its time went (boot, run, journal verification,
+    store opens, payload reads, retiring), so the next slowdown names its cost centre.
+  - **New seeded violation** `recovery-drops-old-payload`: a recovery that deletes a payload
+    acknowledged several runs earlier is caught by the sweep before retirement, with the harness
+    in its nightly configuration.
 - README and roadmap describe the real state. The phase is P3. Scoped credentials exist. The
   numbers are current: corpus v2 and policy p99 688 µs. The ledger claim is worded as the
   WP2.2 review required: a refusal before recording, and a randomized simulation against a

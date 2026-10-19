@@ -318,6 +318,38 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "lost or changed",
         },
         Case {
+            id: "recovery-drops-old-payload",
+            gate: "journal-durability",
+            tool: None,
+            // A recovery that loses a payload acknowledged several runs earlier, outside the
+            // per-kill window the nightly lane reads back. The harness runs in its nightly
+            // configuration (sweep before retiring a directory only), so this proves that the
+            // sweep the 10,000-kill lane relies on still catches an old loss.
+            seed: both(
+                both(
+                    replace(
+                        "crates/uaos-state/src/chunks/mod.rs",
+                        "    pub(crate) fn shred_now(",
+                        "    pub(crate) fn drop_data(&self, pocket: PocketId, chunk: ChunkRef) {\n        let _gone = self.fs.remove_file(&self.chunk_path(pocket, chunk));\n    }\n\n    pub(crate) fn shred_now(",
+                    ),
+                    replace(
+                        "crates/uaos-state/src/journal/writer.rs",
+                        "    let first_unproven = durable.map_or(0, |seq| seq + 1);\n",
+                        // The journal's first payload, once it is both 1,500 records and 5
+                        // seconds behind the newest record: several runs back on any machine.
+                        "    let first_unproven = durable.map_or(0, |seq| seq + 1);\n    if let (Some(first), Some(last)) = (records.first(), records.last())\n        && records.len() > 1500\n        && last.envelope.ts.wall.unix_millis_saturating() > first.envelope.ts.wall.unix_millis_saturating() + 5000\n        && let (Some(pocket), Some(chunk)) = (first.envelope.pocket_id, first.envelope.payload_ref)\n    {\n        store.drop_data(pocket, chunk);\n    }\n",
+                    ),
+                ),
+                replace(
+                    "crates/uaos-testkit/tests/kill.rs",
+                    "        Some(\"rotation\") => Some(Sweep::Rotation),\n        Some(\"every-kill\") | None => Some(Sweep::EveryKill),\n",
+                    "        Some(\"rotation\") | None => Some(Sweep::Rotation),\n        Some(\"every-kill\") => Some(Sweep::EveryKill),\n",
+                ),
+            ),
+            runner: Runner::Program { program: "cargo", args: &["test", "-p", "uaos-testkit", "--test", "kill"] },
+            expect: "sweep before retiring",
+        },
+        Case {
             id: "egress-dials-private-range",
             gate: "test",
             tool: None,
