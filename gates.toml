@@ -226,6 +226,7 @@ negative = [
   "shredded-content-reads-as-lost",
   "shred-of-quarantined-payload-skipped",
   "loss-cause-overwritten",
+  "recovery-drops-old-payload",
 ]
 
 [[gate]]
