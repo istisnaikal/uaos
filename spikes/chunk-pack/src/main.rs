@@ -18,6 +18,9 @@
 //! * **segmented pack**: as `pack`, but each group goes to a fresh pair of segment files; a
 //!   group flush flushes the pair just closed while the next group appends to the new pair, so
 //!   appends never wait on a flush of the file they write. Two files per group.
+//! * **prepared segments**: as `segmented pack`, but the next pair is created, and a 16-byte
+//!   header written to each, one group ahead and off the put path, as a coordinator would; a put
+//!   never writes first to a file created moments before.
 //!
 //! Not measured: the AEAD seal and the keyed reference (the same work in both layouts), torn-tail
 //! recovery of a pack, compaction, and shred re-wraps. RESULTS.md states what each would cost.
@@ -73,6 +76,7 @@ enum Layout {
     Files,
     Pack,
     Segmented,
+    Prepared,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -148,6 +152,17 @@ fn run(root: &Path, layout: Layout, flusher: Flusher, puts: usize, group: usize)
         (Some(open(data_dir.join("data-0.pack"))), Some(open(key_dir.join("keys-0.pack"))))
     };
     let mut segment = 0_u64;
+    let header = |mut f: File| {
+        f.write_all(b"uaos.pack/0\0\0\0\0\0").expect("header");
+        f
+    };
+    // Prepared layout: the pair for the next group, created and headed ahead of time.
+    let mut ready = (layout == Layout::Prepared).then(|| {
+        (
+            header(open(data_dir.join("data-1.pack"))),
+            header(open(key_dir.join("keys-1.pack"))),
+        )
+    });
     // (segment, offset, size) of every chunk, for reads.
     let mut located: Vec<(u64, u64, usize)> = Vec::with_capacity(puts);
     let mut data_pack = data_pack;
@@ -187,7 +202,7 @@ fn run(root: &Path, layout: Layout, flusher: Flusher, puts: usize, group: usize)
                 group_paths.push(data_path);
                 group_paths.push(key_path);
             }
-            Layout::Pack | Layout::Segmented => {
+            Layout::Pack | Layout::Segmented | Layout::Prepared => {
                 let data = data_pack.as_mut().expect("pack");
                 data.write_all(&(size as u32).to_le_bytes()).expect("append");
                 data.write_all(&buf[..size]).expect("append");
@@ -204,6 +219,21 @@ fn run(root: &Path, layout: Layout, flusher: Flusher, puts: usize, group: usize)
                     data_pack.as_ref().expect("pack").try_clone().expect("clone"),
                     key_pack.as_ref().expect("pack").try_clone().expect("clone"),
                 ),
+                Layout::Prepared => {
+                    // Switch to the pair made ready one group ago, and make the next one ready.
+                    segment += 1;
+                    pack_len = 16;
+                    files_created += 2;
+                    let (next_data, next_keys) = ready.take().expect("ready pair");
+                    ready = Some((
+                        header(open(data_dir.join(format!("data-{}.pack", segment + 1)))),
+                        header(open(key_dir.join(format!("keys-{}.pack", segment + 1)))),
+                    ));
+                    FlushJob::Pack(
+                        data_pack.replace(next_data).expect("pack"),
+                        key_pack.replace(next_keys).expect("pack"),
+                    )
+                }
                 Layout::Segmented => {
                     // Seal this pair, open the next: the flush never touches a file being appended.
                     segment += 1;
@@ -249,7 +279,7 @@ fn run(root: &Path, layout: Layout, flusher: Flusher, puts: usize, group: usize)
                 File::open(&key_path).and_then(|mut f| f.read_to_end(&mut out)).expect("read key");
                 File::open(data).and_then(|mut f| f.read_to_end(&mut out)).expect("read data");
             }
-            Layout::Pack | Layout::Segmented => {
+            Layout::Pack | Layout::Segmented | Layout::Prepared => {
                 // A cold open, as a reader in another process would: the honest upper bound.
                 let (seg, offset, size) = located[pick];
                 let name = if layout == Layout::Pack { 0 } else { seg };
@@ -279,6 +309,7 @@ fn main() {
         (Layout::Files, "one file per chunk (today)"),
         (Layout::Pack, "one pack per pocket"),
         (Layout::Segmented, "a pack segment per group"),
+        (Layout::Prepared, "prepared segments"),
     ] {
         for (flusher, how) in [(Flusher::Inline, "between groups"), (Flusher::Background, "on a second thread")] {
             let r = run(&root, layout, flusher, puts, group);
