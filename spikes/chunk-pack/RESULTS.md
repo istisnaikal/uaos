@@ -22,8 +22,8 @@ cadence of one flush per 50 ms window; the product's cadence is not measured her
 | Runner | Today | Prepared segments | Meets 0.5 ms |
 |---|---|---|---|
 | macos-latest | 2.14–6.18 ms | 0.18–0.29 ms | yes, segments only |
-| ubuntu-latest | 0.43–0.56 ms | 0.02 ms | yes, segments; today only at p95 |
-| windows-latest | 1.35–1.83 ms | 0.48–0.69 ms | no: 1 run of 3 |
+| ubuntu-latest | 0.43–0.56 ms | 0.02 ms | segments yes; today in 1 run of 3 |
+| windows-latest | 1.35–1.83 ms | 0.48–0.69 ms | no: segments in 1 run of 3, today in none |
 | Reference machine (Windows, NVMe) | 1.46 ms | 0.13 ms | yes, segments only |
 
 - **On Windows CI the remaining tail is the volume, not the layout.** With flushes between groups
