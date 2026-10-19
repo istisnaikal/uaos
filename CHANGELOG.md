@@ -170,12 +170,22 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `serde_json` read strictly, property fuzzing, and no payload in `Debug`. A one-off
     20,000-document differential found 0 disagreements; 13 numbers outside the f64 range were
     accepted by the tape only, which is the known divergence.
-  - **Seeded violations:** `arch-json-io-dependency` and eight `json-*` cases, one per
-    fail-closed rule and one for the oracle.
+  - **Seeded violations:** `arch-json-io-dependency` and twelve `json-*` cases: one per
+    fail-closed rule, one for the oracle, and four for the fingerprinted duplicate check.
+  - **Duplicate keys are fingerprinted.**
+    - Each key is fingerprinted over its **decoded** bytes as it is read, so an escaped and an
+      unescaped spelling of a key always share a fingerprint.
+    - When an object closes, objects of up to 8 members compare fingerprints pairwise, and
+      larger ones sort them. Only members that share a fingerprint are compared exactly.
+    - A collision costs an exact comparison, never a wrong answer. A test pins a real colliding
+      pair, and a property checks every spelling against an exact oracle.
+    - The control-byte check runs branch-free over each run of string bytes.
+    - The side stack takes 8 bytes per key of the open objects, at most 8 MiB.
   - **Measured** on the reference machine, recorded in the contract's §10:
-    - parse p95 is 2.187 ms at 1.70 MB, or 0.78 GB/s. That is **over the 2 ms stage budget by
-      about 9%**. The duplicate-key check costs about 0.3 ms of it, and the fix is owed in this
-      stage before Train B;
+    - parse p95 is **1.882 ms and 1.888 ms in two runs** at 1.70 MB, or 0.90 GB/s: within the
+      2 ms stage budget, with 6% headroom on this machine only. The first version measured
+      2.187 ms, 9% over; the fix stayed within the stage;
+    - one object of a million members now parses in 51 ms instead of 166 ms;
     - the tape takes 384 KiB for that body;
     - every adversarial input is bounded.
   - **First coverage-guided run:** 10,872,985 runs of `parse` and 79,948,806 of `decode` in

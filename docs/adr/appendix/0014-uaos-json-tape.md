@@ -283,19 +283,33 @@ throughput, heap, and the adversarial rows of §6.
 
 | Stage | p50 | p95 | p99 | GB/s at p95 |
 |---|---|---|---|---|
-| parse, the whole stage | 2.158 ms | 2.187 ms | 2.259 ms | 0.78 |
-| UTF-8 check alone | 0.509 ms | 0.538 ms | 0.593 ms | 3.16 |
+| parse, first version (`ab6d92f`) | 2.158 ms | 2.187 ms | 2.259 ms | 0.78 |
+| parse, fingerprinted duplicate check, run 1 (2026-10-19) | 1.851 ms | 1.882 ms | 1.982 ms | 0.90 |
+| parse, fingerprinted duplicate check, run 2 | 1.850 ms | 1.888 ms | 1.917 ms | 0.90 |
+| UTF-8 check alone | 0.510 ms | 0.525 ms | 0.534 ms | 3.24 |
 
-**Over budget.** The budget is parse p95 ≤ 2 ms at 1.7 MB, that is at least 0.85 GB/s. The
-measured p95 is 2.187 ms, about 9% over.
-- **Where the time goes:** with the duplicate-key check switched off, p95 is 1.883 ms
-  (0.90 GB/s). That was a measurement only, never committed. So the check costs about 0.3 ms,
-  spent per object rather than in sorting.
-- **Tried and not kept:** a pair-by-pair check for objects of up to 8 members saved 0.02 ms,
-  too little for a second code path.
-- **The rule:** the master plan fixes a stage in place, never by borrowing another stage's
-  budget, and the Move 1 checkpoint requires the fix before Train B starts. The spike's 1.87 ms
-  p95 was measured on its own transcript and does not compare directly.
+**Within budget, after a fix in place.** The budget is parse p95 ≤ 2 ms at 1.7 MB, that is at
+least 0.85 GB/s.
+- **The first version measured 2.187 ms, about 9% over.** The master plan fixes a stage in place,
+  never by borrowing another stage's budget, and Train B could not start before the fix.
+- **Now 1.882 ms and 1.888 ms in two runs: 6% headroom, on this machine only.** No CI runner
+  judges this stage yet; `perf-smoke` stays pending until WP3.8.
+- **Where the time went.** Bisected with stubs that were measurements only, never committed:
+  - the old check cost about 0.3 ms, spent per object rather than in sorting large ones;
+  - with fingerprints, sorting objects of two to four members still cost about 0.26 ms;
+  - taking the fingerprints costs about 0.035 ms.
+- **What fixed it, in order:**
+  1. Fingerprints over decoded keys, taken as keys are read (§6), with objects of up to 8
+     members compared pairwise on fingerprints alone: p95 1.975 ms.
+  2. The control-byte check branch-free over each run of string bytes, so it vectorizes:
+     p95 1.882–1.888 ms.
+- **Tried and not kept:**
+  - the first version's pair-by-pair check of up to 8 members' **keys** saved only 0.02 ms,
+    because comparing keys reads the input again;
+  - a plain multiply as the fingerprint collided about 200 times the ideal rate on `key-N` keys.
+    The kept mixer (multiply, fold the high bits down, murmur3's `fmix64`) is within 11% of
+    ideal on six structured key sets of up to a million keys each.
+- The spike's 1.87 ms p95 was measured on its own transcript and does not compare directly.
 
 **Memory.**
 - That body reserves its tape once: 16,384 node slots, 384 KiB, of which 9,459 slots are used.
@@ -303,17 +317,17 @@ measured p95 is 2.187 ms, about 9% over.
   about one node per 128 bytes. That is inside the §6 bound, but wasteful for scalar-heavy
   input.
 
-**Adversarial inputs** (p50 of 5 runs):
+**Adversarial inputs** (p50 of 5 runs; first version, then the fingerprinted check, run 1):
 
-| Input | Size | p50 | Outcome |
-|---|---|---|---|
-| `[0,0,…]` to the size limit | 33.6 MB | 16.7 ms | refused: `too_many_nodes` |
-| one object of 1,000,001 members | 11.9 MB | 166.1 ms | accepted, 24 MiB of tape |
-| 4,001 keys sharing a 4 KiB prefix | 16.4 MB | 16.1 ms | accepted, 3 MiB |
-| 129 levels | — | under 0.1 ms | refused: `depth_exceeded` |
-| a string of escapes to the size limit | 33.6 MB | 131.7 ms | accepted, one node |
-| number text to the size limit | 33.6 MB | 15.9 ms | accepted, one node |
-| whitespace around one value, to the size limit | 33.6 MB | 16.1 ms | accepted, one node |
+| Input | Size | p50, first version | p50 now | Outcome |
+|---|---|---|---|---|
+| `[0,0,…]` to the size limit | 33.6 MB | 16.7 ms | 16.7 ms | refused: `too_many_nodes` |
+| one object of 1,000,001 members | 11.9 MB | 166.1 ms | 50.9 ms | accepted, 24 MiB of tape |
+| 4,001 keys sharing a 4 KiB prefix | 16.4 MB | 16.1 ms | 3.7 ms | accepted, 3 MiB |
+| 129 levels | — | under 0.1 ms | under 0.1 ms | refused: `depth_exceeded` |
+| a string of escapes to the size limit | 33.6 MB | 131.7 ms | 130.8 ms | accepted, one node |
+| number text to the size limit | 33.6 MB | 15.9 ms | 16.1 ms | accepted, one node |
+| whitespace around one value, to the size limit | 33.6 MB | 16.1 ms | 12.2 ms | accepted, one node |
 
 **Coverage-guided fuzzing.** Nightly run 39146599664 on `316513d`, ubuntu-latest, with
 AddressSanitizer:
