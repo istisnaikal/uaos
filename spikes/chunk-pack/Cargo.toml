@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPIKE (plan "Spine to RC-1", Stage 0c; open decision D-32). Throwaway measurement code: not part
+# of the workspace, not product code. It answers one question: does an append-only pack file per
+# pocket bring balanced chunk put p99 under ADR-0018's 0.5 ms on the runners where one file per
+# chunk does not (macOS 6.85 ms, Windows 0.87 ms, run 38869000900)? Its verdict feeds D-32; any
+# product change goes through an ADR-0018 and ADR-0007 amendment with full tests in `uaos-state`.
+[package]
+name = "spike-chunk-pack"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+
+[profile.release]
+debug = false

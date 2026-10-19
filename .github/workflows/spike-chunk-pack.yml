@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# SPIKE (plan "Spine to RC-1", Stage 0c; open decision D-32): one file per chunk against pack
+# files, on the three CI runners. Lives on `spike/chunk-pack` only and is never merged.
+
+name: spike-chunk-pack
+
+on:
+  push:
+    branches: [spike/chunk-pack]
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show active-toolchain || rustup toolchain install
+      - name: Measure (three runs)
+        shell: bash
+        env:
+          RUNNER_LABEL: ${{ matrix.os }}
+        run: |
+          for run in 1 2 3; do
+            cargo run -q --release --manifest-path spikes/chunk-pack/Cargo.toml -- "$RUNNER_TEMP/chunk-pack" 5000 64 | tee "run-$run.md"
+            { echo "### $RUNNER_LABEL, run $run"; echo; cat "run-$run.md"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          done
