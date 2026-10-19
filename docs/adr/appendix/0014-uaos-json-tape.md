@@ -143,18 +143,27 @@ test and is not this crate's limit.
 |---|---|---|---|
 | Tape | 24 B × capacity. The first reserve is `clamp((len / 128 + 1).next_power_of_two(), 16, max_nodes)`, and it grows with `try_reserve_exact` to `min(2 × capacity, max_nodes)` | 384 KiB reserved (288 KiB used) | 24 MiB steady; at most 36 MiB while the last growth copies |
 | Depth stack | 4 B × `max_depth`, reserved up front | 512 B | 512 B |
-| Duplicate-key scratch | one `Vec<u32>` of member indices, reused for every object | under 1 KiB | 4 MiB |
+| Duplicate-key side stack | 8 B per member key of the objects still open: a 32-bit fingerprint of the decoded key and the member's node id. It grows like the tape, to at most `max_nodes` entries. Object marks: 4 B × `max_depth`, reserved up front | under 1 KiB | 8 MiB steady; at most 12 MiB while the last growth copies |
 | String decode | lazy: borrowed when the string has no escape, otherwise at most the content's length | 0 until asked | caller-driven |
 | Offset map | 4 B × (decoded length + 1), half of `uaos-redact`'s 8 B per byte | on demand | caller-driven |
 
-- **Per parse,** at the defaults: at most 24 MiB + 4 MiB + 512 B steady. The input belongs to the
+- **Per parse,** at the defaults: at most 24 MiB + 8 MiB + 1 KiB steady. The input belongs to the
   caller.
-- **Eight concurrent Operations:** about 3 MiB at the reference size, and at most 8 × 28.5 MiB.
+- **Eight concurrent Operations:** about 3 MiB at the reference size, and at most 8 × 33 MiB.
 - **Time.**
   - The scan is O(n) and nothing recurses.
-  - Each object adds an O(m log m) duplicate check: member indices are sorted and neighbours
-    compared. Keys without escapes are compared as bytes. Escaped keys are streamed through the
-    decoder, with no allocation.
+  - Each object adds an O(m log m) duplicate check.
+    - **When a key is read,** while its bytes are hot, it is fingerprinted over its **decoded**
+      bytes, so an escaped and an unescaped spelling of the same key always share a fingerprint.
+      Keys without escapes are hashed eight bytes at a time; escaped keys are streamed through
+      the decoder, with no allocation.
+    - **When the object closes,** objects with fewer than two members are skipped. Objects of up
+      to 8 members compare their fingerprints pairwise, at most 28 integer comparisons; larger
+      ones sort them. Only members that share a fingerprint are compared exactly: keys without
+      escapes as bytes, escaped keys through the decoder.
+    - **A fingerprint collision costs an exact comparison, never a wrong answer.** Colliding
+      members are sorted exactly before neighbours are compared, so even an object whose keys
+      all collide stays O(m log m).
 - **Adversarial inputs.** The bench measures each of these, and the tests assert the outcome:
   - 32 MiB of `[0,0,…]`: `TooManyNodes`, with at most 24 MiB allocated;
   - one object with about a million members;
