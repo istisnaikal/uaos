@@ -229,6 +229,8 @@ negative = [
   "recovery-drops-old-payload",
   "journal-first-open-bricks",
   "journal-new-history-over-records",
+  "journal-new-history-checks-first-segment-only",
+  "journal-new-history-over-a-marker",
 ]
 
 [[gate]]

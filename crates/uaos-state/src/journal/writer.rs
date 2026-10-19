@@ -17,8 +17,10 @@
 //!
 //! Recovery on [`Journal::open`] verifies the whole chain, quarantines segment files the
 //! manifest does not list, and starts a new segment. Without a manifest it starts a new history
-//! only over segment files that are all empty, which is what a first open killed before storing
-//! its manifest leaves; any byte in them is refused. It never appends after a possibly torn
+//! only over what a first open killed before storing its manifest leaves: segment files that are
+//! all empty, and no marker naming a record. A directory's first manifest is stored before any
+//! segment is written, and is then only ever replaced atomically; any byte in a segment, or a
+//! marker naming a record, is refused. It never appends after a possibly torn
 //! tail, and it never flushes the previous run's segment again: after a failed flush (in that
 //! run, or in an open that failed since) a new flush of the same file can report success
 //! without writing anything, and a failing one drops what the OS held. The records after the
@@ -1128,18 +1130,28 @@ struct CarriedTail {
     obsolete: Option<String>,
 }
 
-/// The manifest of a journal that does not exist yet, with a fresh random identifier. Refuses
-/// to start a new history over segment files whose manifest is missing, unless every one of them
-/// is empty.
+/// The manifest of a journal that does not exist yet, with a fresh random identifier.
 ///
-/// A first open killed between creating its segment and storing the manifest leaves exactly
-/// that: empty segment files and no manifest. Nothing is written to a segment before its
-/// manifest is stored, let alone acknowledged, so those files are set aside as orphans and the
-/// history starts; before, the directory could never be opened again (found by the kill
-/// harness's kills during boot, nightly 39330543607). A single byte in any segment file is a
+/// Without a manifest, a new history starts only over what a first open killed before storing
+/// its manifest can leave: segment files that are all empty, and a `FLUSHED` marker that is
+/// absent or names no record. A directory's first manifest is stored before anything is written
+/// to any of its segments, and once stored a manifest is only ever replaced atomically, never
+/// removed; so such segments never held a record (found by the kill harness's kills during boot,
+/// nightly 39330543607). They are renamed to `<name>.orphan-g0`. A second interrupted first open
+/// leaves another empty file of the same name, which replaces the first: only the last is kept,
+/// and every one of them is empty. One byte in any segment, or a marker that names a record, is a
 /// history whose manifest is missing, and is refused: a new history over it would hide that the
-/// history is gone.
+/// history is gone (T12).
 fn new_manifest(fs: &dyn Fs, dir: &Path, rng: &dyn Rng) -> Result<Manifest, JournalError> {
+    let refuse = |why: &str| JournalError::Corrupt(format!("{why}; refusing to start a new history over it"));
+    let none = format!("{MARKER_PREFIX} {MARKER_NONE}\n");
+    match fs.read(&dir.join(FLUSH_MARKER)) {
+        Ok(bytes) if bytes.as_slice() != none.as_bytes() => {
+            return Err(refuse("the manifest is missing but a durable point is recorded"));
+        }
+        Ok(_) | Err(FsError::NotFound { .. }) => {}
+        Err(e) => return Err(storage(e)),
+    }
     let segments: Vec<PathBuf> = fs
         .list_dir(dir)
         .map_err(storage)?
@@ -1147,10 +1159,10 @@ fn new_manifest(fs: &dyn Fs, dir: &Path, rng: &dyn Rng) -> Result<Manifest, Jour
         .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(is_segment_file_name))
         .collect();
     for path in &segments {
-        if !fs.read(path).map_err(storage)?.is_empty() {
-            return Err(JournalError::Corrupt(
-                "segment files exist but the manifest is missing; refusing to start a new history over them".to_owned(),
-            ));
+        // The length, not the content: a stray large file is refused without being read.
+        let len = fs.open_append(path).and_then(|file| file.os_len()).map_err(storage)?;
+        if len != 0 {
+            return Err(refuse("segment files exist but the manifest is missing"));
         }
     }
     for path in &segments {
@@ -1160,6 +1172,7 @@ fn new_manifest(fs: &dyn Fs, dir: &Path, rng: &dyn Rng) -> Result<Manifest, Jour
         }
     }
     if !segments.is_empty() {
+        // Belt and braces: creating the first segment below flushes this directory as well.
         fs.sync_dir(dir).map_err(storage)?;
     }
     let mut id = [0u8; 16];

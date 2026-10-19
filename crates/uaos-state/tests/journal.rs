@@ -36,7 +36,7 @@ use uaos_platform::sim::{SimClock, SimRng};
 use uaos_platform::{Clock, Rng};
 use uaos_state::journal::manifest::{Manifest, SegmentStatus};
 use uaos_state::journal::{
-    EventDraft, FlushPolicy, JOURNAL_DIR, Journal, JournalError, JournalHealth, read_verified, verify,
+    EventDraft, FLUSH_MARKER, FlushPolicy, JOURNAL_DIR, Journal, JournalError, JournalHealth, read_verified, verify,
 };
 
 const DATA: &str = "/data";
@@ -363,6 +363,54 @@ fn a_first_open_killed_before_its_manifest_is_stored_starts_cleanly() {
             .iter()
             .any(|n| n == "seg-00000000000000000000-000001.jsonl.orphan-g0"),
         "the empty segment was not set aside: {names:?}"
+    );
+}
+
+/// The usual shape of a real history: opened once before any record (the first segment sealed
+/// empty), then records in the next segment. Its manifest lost, it is refused, and nothing is
+/// renamed (V1 review of the first-open fix, M1).
+#[test]
+fn a_lost_manifest_behind_an_empty_first_segment_is_refused() {
+    let w = World::new(15);
+    drop(w.open(LAZY).unwrap());
+    w.fs.crash();
+    let mut j = w.open(LAZY).unwrap();
+    j.append(draft(0)).unwrap();
+    j.sync().unwrap();
+    drop(j);
+    w.fs.crash();
+    // The marker check is separate; this test is about the segments.
+    w.fs.remove_file(&Manifest::path(&w.dir())).unwrap();
+    let _marker_gone = w.fs.remove_file(&w.dir().join(FLUSH_MARKER));
+    let names = |w: &World| -> Vec<String> {
+        let mut names: Vec<String> =
+            w.fs.list_dir(&w.dir())
+                .unwrap()
+                .iter()
+                .filter_map(|p| p.file_name()?.to_str().map(str::to_owned))
+                .collect();
+        names.sort();
+        names
+    };
+    let before = names(&w);
+    assert!(
+        matches!(w.open(LAZY), Err(JournalError::Corrupt(_))),
+        "a new history started over records behind an empty first segment"
+    );
+    assert_eq!(names(&w), before, "a refused open renamed files");
+}
+
+/// Without a manifest, a marker naming a record proves a history existed: refused.
+#[test]
+fn a_missing_manifest_with_a_recorded_durable_point_is_refused() {
+    let w = World::new(16);
+    w.fs.create_dir_all(&w.dir()).unwrap();
+    let marker = format!("uaos.flushed/1 4 {}\n", "0".repeat(64));
+    w.fs.write_atomic(&w.dir().join(FLUSH_MARKER), marker.as_bytes())
+        .unwrap();
+    assert!(
+        matches!(w.open(LAZY), Err(JournalError::Corrupt(_))),
+        "a new history started over a recorded durable point"
     );
 }
 

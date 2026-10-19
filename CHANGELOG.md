@@ -693,12 +693,19 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   killed between creating the first segment and storing the manifest left an empty segment and
   no manifest, and every later open refused it ("refusing to start a new history"), so the
   directory could never be opened again. No acknowledged record was ever at risk (nothing is
-  acknowledged before open completes); the directory's availability was. Now segment files that
-  are all empty are set aside as orphans and the history starts; one byte in any of them is
-  still refused. Found by the kill harness's new kills during boot (nightly 39330543607, macOS).
-  New tests `a_first_open_killed_before_its_manifest_is_stored_starts_cleanly` and
-  `a_missing_manifest_over_any_byte_is_refused`; seeded violations `journal-first-open-bricks`
-  and `journal-new-history-over-records`.
+  acknowledged before open completes); the directory's availability was. Found by the kill
+  harness's new kills during boot (nightly 39330543607, macOS).
+  - **Now** segment files that are all empty, with no marker naming a record, are set aside as
+    orphans and the history starts. One byte in any segment, or a `FLUSHED` marker that names a
+    record, is still refused: a new history must never hide a lost one (T12).
+  - **Proof:** tests for a crashed first open, for a torn byte, for a real history whose first
+    segment is empty, and for a recorded durable point; seeded violations
+    `journal-first-open-bricks`, `journal-new-history-over-records`,
+    `journal-new-history-checks-first-segment-only` and `journal-new-history-over-a-marker`.
+  - **A merge-lane cut harness** (`crates/uaos-state/tests/boot_cuts.rs`, from the fix's V1
+    review): every boot is cut before each filesystem step, then crashed or powered off and
+    reopened twice; no cut may leave a directory unopenable or lose a record it must keep.
+    Review record: `docs/reviews/S0a-journal-first-open.md`.
 
 ### Changed
 

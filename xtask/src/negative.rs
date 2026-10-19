@@ -325,8 +325,8 @@ pub(crate) fn cases() -> Vec<Case> {
             // it makes the directory unopenable forever (kill harness, nightly 39330543607).
             seed: replace(
                 "crates/uaos-state/src/journal/writer.rs",
-                "        if !fs.read(path).map_err(storage)?.is_empty() {\n",
-                "        if fs.read(path).is_ok() {\n",
+                "        if len != 0 {\n",
+                "        if len != u64::MAX {\n",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -342,14 +342,47 @@ pub(crate) fn cases() -> Vec<Case> {
             // a new history would hide that the old one is lost (T12).
             seed: replace(
                 "crates/uaos-state/src/journal/writer.rs",
-                "        if !fs.read(path).map_err(storage)?.is_empty() {\n",
-                "        if fs.read(path).map_err(storage)?.is_empty() && false {\n",
+                "        if len != 0 {\n",
+                "        if len != 0 && false {\n",
             ),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-state", "--test", "journal", "manifest"],
             },
             expect: "a new history started over",
+        },
+        Case {
+            id: "journal-new-history-checks-first-segment-only",
+            gate: "journal-durability",
+            tool: None,
+            // Only the first segment checked: a real history whose first segment is empty would
+            // be renamed away and a new history started over its records (V1 review, M1).
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "    for path in &segments {\n        // The length, not the content",
+                "    for path in segments.iter().take(1) {\n        // The length, not the content",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "journal", "a_lost_manifest_behind_an_empty_first_segment_is_refused"],
+            },
+            expect: "a new history started over records behind an empty first segment",
+        },
+        Case {
+            id: "journal-new-history-over-a-marker",
+            gate: "journal-durability",
+            tool: None,
+            // A marker naming a record ignored without a manifest (V1 review, L4).
+            seed: replace(
+                "crates/uaos-state/src/journal/writer.rs",
+                "        Ok(bytes) if bytes.as_slice() != none.as_bytes() => {\n",
+                "        Ok(bytes) if false && bytes.as_slice() != none.as_bytes() => {\n",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "journal", "a_missing_manifest_with_a_recorded_durable_point_is_refused"],
+            },
+            expect: "a new history started over a recorded durable point",
         },
         Case {
             id: "recovery-drops-old-payload",
