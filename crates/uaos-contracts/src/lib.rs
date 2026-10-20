@@ -24,6 +24,7 @@ pub mod credential;
 pub mod digest;
 pub mod error;
 pub mod event;
+pub mod grant;
 pub mod id;
 pub mod limits;
 pub mod money;

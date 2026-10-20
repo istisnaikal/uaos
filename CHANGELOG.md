@@ -253,6 +253,16 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     decision cites it.
   - **M5:** `uaos.grant/1` becomes the exact wire form of the engine's grant, with conversions both
     ways.
+  - **Built (moved from PR-4 unchanged):**
+    - `uaos.grant/1` (`schemas/grant.v1.json`): a grant entry, issued or revoked. Its record
+      validates its expiry and its bounds. It also checks that an injection policy appears
+      exactly on `memory.read` grants on a pocket, and that such a grant never names its own
+      pocket.
+    - The Cedar schema gains `entity Pocket` and the action `memory.read`; the model gains
+      `Action::MemoryRead` and `Resource::Pocket`.
+    - A read of another pocket is allowed only by a grant. A permit alone only asks, a read of
+      the own pocket follows policy, and a forbid still wins over a grant
+      (`cross_pocket_memory_reads_need_a_grant`, `a_permit_alone_only_asks_for_a_cross_pocket_read`).
 - P3 Move 1, PR-2 (WP3.A2): `uaos-json`, the one structural tokenizer (ADR-0014). Nothing calls
   it yet; `uaos-redact` and its final scan are untouched.
   - **The crate:**

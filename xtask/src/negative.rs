@@ -2859,6 +2859,42 @@ The journal is tamper-proof.
             },
             expect: "a failure policy that cannot deny was loaded",
         },
+        Case {
+            id: "grant-memory-read-off-a-pocket",
+            gate: "test",
+            tool: None,
+            // V1 review L4: a memory.read grant is on a pocket, and only memory.read grants are.
+            seed: replace("crates/uaos-contracts/src/grant.rs", "if memory_read != source.is_some() {", "if false && memory_read != source.is_some() {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-contracts", "--lib", "memory_reads_and_pockets_go_together"],
+            },
+            expect: "a memory.read grant off a pocket validated",
+        },
+        Case {
+            id: "cedar-cross-pocket-without-grant",
+            gate: "test",
+            tool: None,
+            // V1 review M1, contract §6.2: only a grant, which carries consent, allows a cross-pocket read.
+            seed: replace("crates/uaos-policy/src/engine.rs", "if asking.is_empty() && cross_pocket {", "if false && asking.is_empty() && cross_pocket {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-policy", "--test", "policy", "a_permit_alone_only_asks_for_a_cross_pocket_read"],
+            },
+            expect: "a permit allowed a cross-pocket read without consent",
+        },
+        Case {
+            id: "cedar-own-pocket-read-asks",
+            gate: "test",
+            tool: None,
+            // PR-4 scoped review F3: a read of the requesting pocket follows policy; no consent loop.
+            seed: replace("crates/uaos-policy/src/engine.rs", "request.action == Action::MemoryRead && request.resource != Resource::Pocket(request.pocket);", "request.action == Action::MemoryRead;"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-policy", "--test", "policy", "a_permit_alone_only_asks_for_a_cross_pocket_read"],
+            },
+            expect: "a read of the own pocket asked for consent",
+        },
     ]
 }
 
