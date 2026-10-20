@@ -161,6 +161,7 @@ fn resource_uid(r: &Resource) -> Result<EntityUid, String> {
         Resource::Tool(name) => uid("Tool", name.as_str()),
         Resource::Pool(pool) => uid("Pool", &pool.to_string()),
         Resource::ConfigKey(name) => uid("ConfigKey", name.as_str()),
+        Resource::Pocket(pocket) => uid("Pocket", &pocket.to_string()),
     }
 }
 

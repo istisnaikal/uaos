@@ -65,17 +65,21 @@ pub enum Action {
     BudgetTransfer,
     /// A configuration change.
     ConfigChange,
+    /// Reading another pocket's memory (C-44): default deny, allowed only by a grant or a policy
+    /// that names the source pocket (module socket contract §6.2).
+    MemoryRead,
 }
 
 impl Action {
     /// Every action, in schema order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::ModelCall,
         Self::CountTokens,
         Self::ToolCall,
         Self::Exec,
         Self::BudgetTransfer,
         Self::ConfigChange,
+        Self::MemoryRead,
     ];
 
     /// Cedar action identifier.
@@ -88,6 +92,7 @@ impl Action {
             Self::Exec => "exec",
             Self::BudgetTransfer => "budget.transfer",
             Self::ConfigChange => "config.change",
+            Self::MemoryRead => "memory.read",
         }
     }
 
@@ -134,6 +139,8 @@ pub enum Resource {
     Pool(PoolId),
     /// A configuration key.
     ConfigKey(Name),
+    /// A pocket whose memory is read; the reading pocket is the request's `pocket`.
+    Pocket(PocketId),
 }
 
 /// One authorization question.
