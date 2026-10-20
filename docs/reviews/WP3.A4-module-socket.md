@@ -119,3 +119,12 @@ A final fresh full review of the whole PR followed (round 3, below).
 
 Under D-31, the PR leaves draft only when no High or Medium remains: M4 and M5 must be fixed here
 or split out. A further fresh full review follows the fixes.
+
+## The grant path moves to its own PR (2026-10-21)
+
+M4 and M5 change the policy engine's request and the grant contract. At the maintainer's
+choice they leave this PR, and so does the code they change. PR-4b (`p3/a4b-grant-path`, from
+main) takes the whole grant path: `uaos.grant/1`, the Cedar `Pocket` entity, `memory.read`
+with its consent rule, and their tests and seeded violations. That covers the findings M1 of
+round 1, F3 and F4 of round 2, and L4, M4 and M5. PR-4 keeps the module socket, `AgentId`
+and the contract text. PR-4b's own reviews are recorded in `docs/reviews/WP3.A4b-grant-path.md`.

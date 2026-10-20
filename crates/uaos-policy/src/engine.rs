@@ -161,7 +161,6 @@ fn resource_uid(r: &Resource) -> Result<EntityUid, String> {
         Resource::Tool(name) => uid("Tool", name.as_str()),
         Resource::Pool(pool) => uid("Pool", &pool.to_string()),
         Resource::ConfigKey(name) => uid("ConfigKey", name.as_str()),
-        Resource::Pocket(pocket) => uid("Pocket", &pocket.to_string()),
     }
 }
 
@@ -489,18 +488,6 @@ impl PolicyEngine {
                     .map(|id| self.label(id))
                     .collect();
                 asking.sort();
-                // A cross-pocket read needs consent (C-44, contract §6.2): a grant, which carries the
-                // injection policy. A permit alone, however broad, at most asks for that consent; the
-                // Ask names the permits, and its approval issues the grant. A read of the requesting
-                // pocket itself crosses nothing and follows the policies as any action does.
-                let cross_pocket =
-                    request.action == Action::MemoryRead && request.resource != Resource::Pocket(request.pocket);
-                if asking.is_empty() && cross_pocket {
-                    return match grants.first() {
-                        Some(grant) => self.decision(Effect::Allow, Basis::Granted, vec![grant.label.clone()]),
-                        None => self.decision(Effect::Ask, Basis::ApprovalRequired, labels),
-                    };
-                }
                 if asking.is_empty() {
                     return self.decision(Effect::Allow, Basis::Permitted, labels);
                 }

@@ -178,24 +178,14 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **`uaos.adapter/1` (draft):** the dialect codec's endpoints, roles through ADR-0014's
     selectors only, frames and usage.
   - **Kernel additions, all additive:** `AgentId` and an optional `agent_id` on the envelope,
-    `uaos.grant/1`, the Cedar `Pocket` entity and `memory.read` action, the event-naming rule.
+    and the event-naming rule. `uaos.grant/1`, the Cedar `Pocket` entity and the `memory.read`
+    action are specified here and built in PR-4b (`p3/a4b-grant-path`).
     `uaos.approval/1` moves to M3 with the presence ceremony (ADR-0012).
   - Open decision D-35: how closed enums grow in draft contracts.
   - **Built: the contract additions.** `AgentId` (`agt_…`) and an optional `agent_id` on the
     envelope and the journal's draft (absent, it is not written, so existing records keep their
     exact bytes; a lost-payload record inherits the agent of the record it reports).
-    `uaos.grant/1` (`schemas/grant.v1.json`): a grant entry, issued or revoked, whose record
-    validates its expiry, its bounds, an injection policy present exactly on a `memory.read` grant
-    on a pocket, and that such a grant never names its own pocket. `schemas/event.v1.json` gains
-    the optional `agent_id`, a non-breaking change.
-  - **Built: cross-pocket reads in policy.** The Cedar schema gains `entity Pocket` and the action
-    `memory.read` on it; the policy model gains `Action::MemoryRead` and `Resource::Pocket`. Such a
-    read is denied by default and allowed only by a grant that names its holder, the source
-    pocket and the reading pocket while it lives. A permit alone, named or blanket, only asks
-    for that consent (a read of the own pocket follows policy as any action does), and a forbid still wins over a grant
-    (`cross_pocket_memory_reads_need_a_grant`, `a_permit_alone_only_asks_for_a_cross_pocket_read`).
-    `uaos.grant/1` refuses a `memory.read` grant off a pocket and a pocket grant for any other
-    action.
+    `schemas/event.v1.json` gains the optional `agent_id`, a non-breaking change.
   - **Built: the socket crate, `uaos-module-api` (Ring 0, no I/O, `forbid(unsafe_code)`).**
     - The manifest and its builder, validated whole: one refusal per reason, each with a stable
       code.
