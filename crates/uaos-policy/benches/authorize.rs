@@ -90,6 +90,7 @@ fn request(i: usize) -> Request {
         action,
         resource,
         pocket: PocketId::from_parts(1, [1; 10]),
+        grant: None,
         risk_tier: RiskTier::new(u8::try_from(i % 4).unwrap()).unwrap(),
         data_classes,
         now_ms: NOW,

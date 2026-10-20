@@ -37,6 +37,8 @@ use cedar_policy::{
     ResourceConstraint, RestrictedExpression, Schema, ValidationMode, Validator,
 };
 
+use uaos_contracts::id::GrantId;
+
 use crate::model::{Action, Basis, Decision, Effect, Grant, Principal, Request, Resource};
 
 const SCHEMA_SRC: &str = include_str!("uaos.cedarschema");
@@ -94,6 +96,7 @@ type GrantKey = (Action, String, String, String);
 /// A live grant in the index, with what its approval covered.
 #[derive(Debug)]
 struct GrantEntry {
+    id: GrantId,
     label: String,
     expires_at_ms: u64,
     max_risk_tier: u8,
@@ -291,6 +294,7 @@ impl PolicyEngine {
                 problem,
             })?;
             index.entry(key).or_default().push(GrantEntry {
+                id: grant.id,
                 label,
                 expires_at_ms: grant.expires_at_ms,
                 max_risk_tier: grant.max_risk_tier.get(),
@@ -379,6 +383,10 @@ impl PolicyEngine {
             &request.pocket.to_string(),
         )?;
         let tier = request.risk_tier.get();
+        // A cross-pocket read is allowed only by the grant it names (M4): naming none, it has none.
+        if request.crosses_pockets() && request.grant.is_none() {
+            return Ok(Vec::new());
+        }
         Ok(self
             .grants
             .get(&key)
@@ -389,6 +397,7 @@ impl PolicyEngine {
                         now_ms < g.expires_at_ms
                             && tier <= g.max_risk_tier
                             && request.data_classes.iter().all(|c| g.data_classes.contains(c.as_str()))
+                            && request.grant.is_none_or(|carried| g.id == carried)
                     })
                     .collect()
             })
@@ -493,8 +502,7 @@ impl PolicyEngine {
                 // injection policy. A permit alone, however broad, at most asks for that consent; the
                 // Ask names the permits, and its approval issues the grant. A read of the requesting
                 // pocket itself crosses nothing and follows the policies as any action does.
-                let cross_pocket =
-                    request.action == Action::MemoryRead && request.resource != Resource::Pocket(request.pocket);
+                let cross_pocket = request.crosses_pockets();
                 if asking.is_empty() && cross_pocket {
                     return match grants.first() {
                         Some(grant) => self.decision(Effect::Allow, Basis::Granted, vec![grant.label.clone()]),

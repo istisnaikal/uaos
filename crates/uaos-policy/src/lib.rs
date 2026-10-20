@@ -24,6 +24,8 @@
 
 mod engine;
 mod model;
+mod wire;
 
 pub use engine::{CLOCK_TOLERANCE_MS, PolicyEngine, PolicyError};
 pub use model::{Action, Basis, Decision, Effect, Grant, Name, NameError, Principal, Request, Resource};
+pub use wire::{WireError, grant_record};

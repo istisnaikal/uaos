@@ -33,11 +33,15 @@
     },
     "DataClass": {
       "type": "string",
-      "pattern": "^[a-z0-9_]{1,32}$"
+      "pattern": "^[A-Za-z0-9._:/-]{1,128}$"
     },
     "GrantId": {
       "type": "string",
       "pattern": "^grt_[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "GrantName": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:/-]{1,128}$"
     },
     "GrantOp": {
       "description": "What a grant entry records.",
@@ -122,6 +126,34 @@
             "kind",
             "name"
           ]
+        },
+        {
+          "description": "A human, through a user-present channel.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "human"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "The kernel itself.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "system"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
         }
       ]
     },
@@ -141,7 +173,7 @@
           "description": "`@id`s of the ask policies the grant was issued to satisfy.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/PatternValue"
+            "$ref": "#/$defs/PolicyId"
           },
           "maxItems": 8,
           "uniqueItems": true
@@ -156,7 +188,7 @@
           "uniqueItems": true
         },
         "expires_at": {
-          "description": "From this instant on it no longer applies.",
+          "description": "From this instant on it no longer applies. The engine keeps whole milliseconds, so a\nfiner expiry floors: a reloaded grant ends early, never late.",
           "$ref": "#/$defs/WallTime"
         },
         "id": {
@@ -214,7 +246,7 @@
       "description": "What a grant allows its action on.",
       "oneOf": [
         {
-          "description": "A model, by exact name.",
+          "description": "A model of a provider, by exact names.",
           "type": "object",
           "properties": {
             "kind": {
@@ -223,12 +255,17 @@
             },
             "name": {
               "description": "The model's name.",
-              "$ref": "#/$defs/PatternValue"
+              "$ref": "#/$defs/GrantName"
+            },
+            "provider": {
+              "description": "The provider, e.g. `anthropic`.",
+              "$ref": "#/$defs/GrantName"
             }
           },
           "additionalProperties": false,
           "required": [
             "kind",
+            "provider",
             "name"
           ]
         },
@@ -242,7 +279,7 @@
             },
             "name": {
               "description": "The tool's name.",
-              "$ref": "#/$defs/PatternValue"
+              "$ref": "#/$defs/GrantName"
             }
           },
           "additionalProperties": false,
@@ -280,7 +317,7 @@
             },
             "name": {
               "description": "The key.",
-              "$ref": "#/$defs/PatternValue"
+              "$ref": "#/$defs/GrantName"
             }
           },
           "additionalProperties": false,
@@ -345,13 +382,13 @@
       "maxLength": 64,
       "pattern": "^[a-z][a-z0-9-]*$"
     },
-    "PatternValue": {
-      "type": "string",
-      "pattern": "^[!-~]{1,64}$"
-    },
     "PocketId": {
       "type": "string",
       "pattern": "^pkt_[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+    },
+    "PolicyId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,128}$"
     },
     "PoolId": {
       "type": "string",

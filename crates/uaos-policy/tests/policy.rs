@@ -16,10 +16,13 @@ use std::collections::BTreeSet;
 
 use proptest::prelude::*;
 use uaos_contracts::event::ModuleName;
-use uaos_contracts::id::{CredentialId, GrantId, PocketId, TypedId};
+use uaos_contracts::grant::{DataClass, GrantError, GrantName, InjectionPolicy};
+use uaos_contracts::id::{ApprovalId, CredentialId, GrantId, PocketId, TypedId};
 use uaos_contracts::operation::RiskTier;
+use uaos_contracts::time::WallTime;
 use uaos_policy::{
     Action, Basis, CLOCK_TOLERANCE_MS, Effect, Grant, Name, PolicyEngine, PolicyError, Principal, Request, Resource,
+    WireError, grant_record,
 };
 
 const NOW: u64 = 1_760_000_000_000;
@@ -45,6 +48,7 @@ fn request(principal: Principal, action: Action, resource: Resource) -> Request 
         action,
         resource,
         pocket: pocket(1),
+        grant: None,
         risk_tier: RiskTier::new(1).unwrap(),
         data_classes: BTreeSet::new(),
         now_ms: NOW,
@@ -648,10 +652,12 @@ proptest! {
         r.risk_tier = RiskTier::new(req.4 % 4).unwrap();
         r.data_classes = any_classes(req.4 >> 2);
         let (n, c) = (native.authorize(&r), compiled.authorize(&r));
-        if r.action == Action::MemoryRead && r.resource != Resource::Pocket(r.pocket) {
-            prop_assert_eq!(n.effect == Effect::Deny, c.effect == Effect::Deny);
-            prop_assert!(n.effect != Effect::Allow || n.basis == Basis::Granted, "a cross-pocket read allowed without a grant");
+        if r.crosses_pockets() {
+            // The request names no grant, so neither form may allow; where the compiled form
+            // denies, nothing native allows either (the named-grant property covers the rest).
+            prop_assert!(n.effect != Effect::Allow, "a cross-pocket read naming no grant was allowed");
             prop_assert!(c.effect != Effect::Allow, "a permit allowed a cross-pocket read");
+            prop_assert!(c.effect != Effect::Deny || n.effect == Effect::Deny);
         } else {
             prop_assert_eq!(n.effect, c.effect);
         }
@@ -820,6 +826,7 @@ fn cross_pocket_memory_reads_need_a_grant() {
     let notes = Principal::Module(ModuleName::new("mod-notes").unwrap());
     let read = |source: u8, reader: u8| Request {
         pocket: pocket(reader),
+        grant: Some(GrantId::from_parts(1, [7; 10])),
         ..request(notes.clone(), Action::MemoryRead, Resource::Pocket(pocket(source)))
     };
     let none = PolicyEngine::load("", &[], NOW).unwrap();
@@ -926,10 +933,137 @@ fn a_permit_alone_only_asks_for_a_cross_pocket_read() {
         approves: BTreeSet::new(),
     };
     let consented = PolicyEngine::load(blanket, std::slice::from_ref(&grant), NOW).unwrap();
-    let d = consented.authorize(&read(1, 2));
+    let mut carrying = read(1, 2);
+    carrying.grant = Some(grant.id);
+    let d = consented.authorize(&carrying);
     assert_eq!(
         (d.effect, d.basis),
         (Effect::Allow, Basis::Granted),
         "the grant is the consent"
     );
+}
+
+fn memory_grant(n: u8, expires_at_ms: u64) -> Grant {
+    Grant {
+        id: GrantId::from_parts(u64::from(n) + 1, [n; 10]),
+        principal: Principal::Module(ModuleName::new("mod-notes").unwrap()),
+        action: Action::MemoryRead,
+        resource: Resource::Pocket(pocket(1)),
+        pocket: pocket(2),
+        expires_at_ms,
+        max_risk_tier: RiskTier::new(3).unwrap(),
+        data_classes: BTreeSet::new(),
+        approves: BTreeSet::new(),
+    }
+}
+
+/// `mod-notes` in pocket 2 reads pocket 1, carrying `grant`.
+fn reading_with(grant: Option<GrantId>) -> Request {
+    Request {
+        pocket: pocket(2),
+        grant,
+        ..request(
+            Principal::Module(ModuleName::new("mod-notes").unwrap()),
+            Action::MemoryRead,
+            Resource::Pocket(pocket(1)),
+        )
+    }
+}
+
+/// Final review M4: two live grants for the same read, as after a renewal. The one the request
+/// carries decides, and the decision cites it.
+#[test]
+fn only_the_carried_grant_allows_a_cross_pocket_read() {
+    let (first, second) = (memory_grant(1, NOW + 60_000), memory_grant(2, NOW + 120_000));
+    let e = PolicyEngine::load("", &[first.clone(), second.clone()], NOW).unwrap();
+    for carried in [&first, &second] {
+        let d = e.authorize(&reading_with(Some(carried.id)));
+        assert_eq!(d.effect, Effect::Allow);
+        assert_eq!(
+            d.policies,
+            vec![format!("grant:{}", carried.id)],
+            "the decision cited a grant the request did not carry"
+        );
+    }
+    assert_eq!(
+        e.authorize(&reading_with(None)).effect,
+        Effect::Deny,
+        "a cross-pocket read naming no grant was allowed"
+    );
+    let unknown = GrantId::from_parts(99, [9; 10]);
+    assert_eq!(e.authorize(&reading_with(Some(unknown))).effect, Effect::Deny);
+    let asking = PolicyEngine::load(
+        r#"@id("notes-all") permit(principal, action, resource);"#,
+        std::slice::from_ref(&first),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        asking.authorize(&reading_with(None)).effect,
+        Effect::Ask,
+        "a permit only asks"
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    /// Final review M4: over random grants, permits and named grants, a cross-pocket read is
+    /// allowed exactly when the grant it names is live and covers it.
+    #[test]
+    fn a_cross_pocket_read_is_allowed_only_by_the_grant_it_names(
+        lives in prop::collection::vec((0_u64..3, 0_u8..4, any::<u8>()), 0..4),
+        named in prop::option::of(0_usize..5),
+        permitted in any::<bool>(),
+        req in (0_u64..90_000, 0_u8..4, any::<u8>()),
+    ) {
+        let grants: Vec<Grant> = lives
+            .iter()
+            .enumerate()
+            .map(|(i, (life, tier, classes))| Grant {
+                expires_at_ms: NOW + life * 30_000,
+                max_risk_tier: RiskTier::new(*tier).unwrap(),
+                data_classes: any_classes(*classes),
+                ..memory_grant(u8::try_from(i).unwrap(), 0)
+            })
+            .collect();
+        let policies = if permitted { r#"@id("notes-all") permit(principal, action, resource);"# } else { "" };
+        let e = PolicyEngine::load(policies, &grants, NOW).unwrap();
+        let named_id = named.map(|k| grants.get(k).map_or(GrantId::from_parts(99, [9; 10]), |g| g.id));
+        let mut r = reading_with(named_id);
+        r.now_ms = NOW + req.0;
+        r.risk_tier = RiskTier::new(req.1).unwrap();
+        r.data_classes = any_classes(req.2);
+        let covering = named.and_then(|k| grants.get(k)).is_some_and(|g| {
+            r.now_ms < g.expires_at_ms
+                && r.risk_tier.get() <= g.max_risk_tier.get()
+                && r.data_classes.is_subset(&g.data_classes)
+        });
+        let expected = if covering { Effect::Allow } else if permitted { Effect::Ask } else { Effect::Deny };
+        prop_assert_eq!(e.authorize(&r).effect, expected, "the named grant did not decide the read");
+    }
+
+    /// Final review M5: every engine grant goes to a `uaos.grant/1` record and back unchanged.
+    #[test]
+    fn every_engine_grant_round_trips_through_the_wire(
+        seed in (any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>()),
+        asks in prop::collection::btree_set("[a-f][a-z0-9._-]{0,12}", 0..3),
+    ) {
+        let mut grant = random_grant(seed);
+        grant.approves = asks;
+        let injection = matches!(grant.resource, Resource::Pocket(_)).then_some(InjectionPolicy::Ask);
+        let issued_at = WallTime::from_unix_nanos(i128::from(grant.expires_at_ms - 1) * 1_000_000).unwrap();
+        match grant_record(&grant, ApprovalId::from_parts(1, [3; 10]), issued_at, injection) {
+            Ok(record) => prop_assert_eq!(Grant::try_from(&record).unwrap(), grant, "a grant changed through the wire"),
+            // The one refusal the generator can reach: a memory.read grant naming its own pocket.
+            Err(e) => prop_assert!(matches!(e, WireError::Invalid(GrantError::SamePocket)), "unexpected refusal {e:?}"),
+        }
+    }
+
+    /// The two crates' name grammars accept exactly the same strings.
+    #[test]
+    fn grant_names_agree_with_engine_names(s in "[A-Za-z0-9._:/ \"é-]{0,130}") {
+        prop_assert_eq!(Name::new(s.clone()).is_ok(), GrantName::new(s.clone()).is_ok());
+        prop_assert_eq!(Name::new(s.clone()).is_ok(), DataClass::new(s).is_ok());
+    }
 }
