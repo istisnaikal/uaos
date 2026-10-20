@@ -50,6 +50,10 @@ pub enum GrantError {
     /// An injection policy on a grant other than `memory.read` on a pocket, or none on one.
     #[error("an injection policy belongs exactly to `memory.read` grants on a pocket")]
     InjectionMismatch,
+    /// A `memory.read` grant on something other than a pocket, or a pocket resource on another
+    /// action.
+    #[error("a `memory.read` grant is on a pocket, and only `memory.read` grants are")]
+    ResourceMismatch,
     /// A `memory.read` grant naming the pocket it applies in.
     #[error("a `memory.read` grant must name another pocket than the one it applies in")]
     SamePocket,
@@ -198,7 +202,10 @@ impl GrantRecord {
             GrantResource::Pocket { id } => Some(*id),
             _ => None,
         };
-        if (memory_read && source.is_some()) != self.injection.is_some() {
+        if memory_read != source.is_some() {
+            return Err(GrantError::ResourceMismatch);
+        }
+        if memory_read != self.injection.is_some() {
             return Err(GrantError::InjectionMismatch);
         }
         if memory_read && source == Some(self.pocket) {
@@ -324,6 +331,23 @@ mod tests {
         assert_eq!(model_call.validate(), Err(GrantError::InjectionMismatch));
         model_call.injection = None;
         assert_eq!(model_call.validate(), Ok(()));
+    }
+
+    #[test]
+    fn memory_reads_and_pockets_go_together() {
+        let mut on_a_model = reading(pocket(1), pocket(2));
+        on_a_model.resource = GrantResource::Model {
+            name: PatternValue::new("claude-sonnet-5-5").unwrap(),
+        };
+        assert_eq!(
+            on_a_model.validate(),
+            Err(GrantError::ResourceMismatch),
+            "a memory.read grant off a pocket validated"
+        );
+        let mut other_action = reading(pocket(1), pocket(2));
+        other_action.action = ActionName::new("model.call").unwrap();
+        other_action.injection = None;
+        assert_eq!(other_action.validate(), Err(GrantError::ResourceMismatch));
     }
 
     #[test]

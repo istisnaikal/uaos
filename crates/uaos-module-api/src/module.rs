@@ -15,8 +15,10 @@ use crate::manifest::{HookPoint, Manifest};
 use crate::state::ModuleState;
 use crate::view::StructuralView;
 
-/// What a hook may know about its Operation: identifiers and metadata, never content.
+/// What a hook may know about its Operation: identifiers and metadata, never content. Built by
+/// the host; `#[non_exhaustive]` so it grows additively (contract §9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OpMeta {
     /// The Operation.
     pub operation: OperationId,
@@ -28,6 +30,27 @@ pub struct OpMeta {
     pub risk_tier: RiskTier,
     /// The agent that asked, if known.
     pub agent: Option<AgentId>,
+}
+
+impl OpMeta {
+    /// The metadata of an Operation, with no agent known.
+    #[must_use]
+    pub const fn new(operation: OperationId, kind: OperationKind, pocket: PocketId, risk_tier: RiskTier) -> Self {
+        Self {
+            operation,
+            kind,
+            pocket,
+            risk_tier,
+            agent: None,
+        }
+    }
+
+    /// Names the agent that asked.
+    #[must_use]
+    pub const fn with_agent(mut self, agent: AgentId) -> Self {
+        self.agent = Some(agent);
+        self
+    }
 }
 
 /// A route candidate's breaker state, so a module can prefer a healthy upstream (C-52).
@@ -45,11 +68,20 @@ pub enum CircuitState {
 /// One candidate route `route.decide` offers: already permitted by policy and pinned to the
 /// Session's account (I-16).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Candidate {
     /// Its position in the offer.
     pub id: CandidateId,
     /// Its upstream's breaker.
     pub circuit: CircuitState,
+}
+
+impl Candidate {
+    /// A candidate.
+    #[must_use]
+    pub const fn new(id: CandidateId, circuit: CircuitState) -> Self {
+        Self { id, circuit }
+    }
 }
 
 /// What one hook call sees. Built by the host; every field is a borrow that ends with the call.
@@ -142,8 +174,11 @@ impl<'c> HookCx<'c> {
     }
 }
 
-/// One journaled event of a pocket, delivered in journal order (contract §5).
+/// One journaled event of a pocket, delivered in journal order (contract §5). Built by the host;
+/// `#[non_exhaustive]`, so what replay needs (a module event's values, a child outcome's
+/// correlation tag) is added without a break when the host defines it (PR-8).
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct EventView<'e> {
     /// Its pocket.
     pub pocket: PocketId,
@@ -153,6 +188,19 @@ pub struct EventView<'e> {
     pub event_type: &'e EventType,
     /// The Operation it belongs to, if any.
     pub operation: Option<OperationId>,
+}
+
+impl<'e> EventView<'e> {
+    /// An event of `pocket` at `seq`.
+    #[must_use]
+    pub const fn new(pocket: PocketId, seq: Seq, event_type: &'e EventType, operation: Option<OperationId>) -> Self {
+        Self {
+            pocket,
+            seq,
+            event_type,
+            operation,
+        }
+    }
 }
 
 /// A module (`uaos.module/1`): trusted code with minimized authority. It describes; the kernel

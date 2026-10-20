@@ -28,10 +28,16 @@ pub struct StateError {
 
 /// One module's state for one pocket: opaque bytes, at most the manifest's `state_bytes`, itself at
 /// most [`MAX_STATE_BYTES`] (64 KiB).
+///
+/// **All or nothing per call** (contract §5). Each change is atomic, and a refused one also marks
+/// the state [`exceeded`](Self::exceeded). The host runs every call on a copy and keeps the copy
+/// only if it is not exceeded and its declarations pass; otherwise the call is a strike
+/// ([`crate::Strike::StateExceeded`]) and the state stays as it was before the call.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ModuleState {
     bytes: Vec<u8>,
     limit: u32,
+    exceeded: bool,
 }
 
 impl ModuleState {
@@ -41,6 +47,7 @@ impl ModuleState {
         Self {
             bytes: Vec::new(),
             limit: limit.min(MAX_STATE_BYTES),
+            exceeded: false,
         }
     }
 
@@ -56,15 +63,23 @@ impl ModuleState {
         Ok(state)
     }
 
-    fn check(&self, wanted: usize) -> Result<(), StateError> {
+    fn check(&mut self, wanted: usize) -> Result<(), StateError> {
         if u32::try_from(wanted).is_ok_and(|n| n <= self.limit) {
             Ok(())
         } else {
+            self.exceeded = true;
             Err(StateError {
                 limit: self.limit,
                 wanted,
             })
         }
+    }
+
+    /// Whether a change was refused since this state was created or restored: the call that did
+    /// it must not be kept.
+    #[must_use]
+    pub const fn exceeded(&self) -> bool {
+        self.exceeded
     }
 
     /// The bytes.
@@ -112,6 +127,7 @@ impl fmt::Debug for ModuleState {
         f.debug_struct("ModuleState")
             .field("len", &self.bytes.len())
             .field("limit", &self.limit)
+            .field("exceeded", &self.exceeded)
             .finish()
     }
 }
@@ -148,13 +164,14 @@ impl PocketCursor {
         self.through.is_none_or(|through| seq.0 > through.0)
     }
 
-    /// Moves the cursor to `seq`, which must be after it: events reach a module in journal order,
-    /// each once per state lineage.
+    /// Moves the cursor to the event at `seq` of `pocket`, which must be this cursor's pocket and
+    /// after it: events reach a module in journal order, each once per state lineage, and never
+    /// from another pocket.
     ///
     /// # Errors
-    /// The cursor, unchanged, if `seq` is not after it.
-    pub fn advance(&mut self, seq: Seq) -> Result<(), Self> {
-        if self.is_after(seq) {
+    /// The cursor, unchanged, if `pocket` is another pocket or `seq` is not after it.
+    pub fn advance(&mut self, pocket: PocketId, seq: Seq) -> Result<(), Self> {
+        if pocket == self.pocket && self.is_after(seq) {
             self.through = Some(seq);
             Ok(())
         } else {

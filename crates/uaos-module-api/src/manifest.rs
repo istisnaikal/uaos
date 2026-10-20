@@ -10,6 +10,7 @@ use uaos_contracts::event::ModuleName;
 use uaos_json::{Kind, Limits};
 
 use crate::code::Code;
+use crate::decl::MAX_EVENT_VALUES;
 
 /// The largest per-pocket state a module may keep (contract §5).
 pub const MAX_STATE_BYTES: u32 = 64 * 1024;
@@ -203,6 +204,14 @@ impl HookPoint {
         }
     }
 
+    /// Whether a hook here may act ([`HookMode::Act`]). `stream.observe` and `response.post` only
+    /// observe; `error.translate`'s additive annotation has no declaration yet, so it observes
+    /// too until one is added.
+    #[must_use]
+    pub const fn acts(self) -> bool {
+        !matches!(self, Self::StreamObserve | Self::ResponsePost | Self::ErrorTranslate)
+    }
+
     /// The feature a module must require to hook this point, if any.
     #[must_use]
     pub const fn required_feature(self) -> Option<KernelFeature> {
@@ -373,13 +382,17 @@ pub enum EventClass {
     Journaled,
 }
 
-/// An event code a module may emit.
+/// An event code a module may emit, and the names of the values it may carry (at most
+/// [`MAX_EVENT_VALUES`]): a value under any other name is a strike, so an event can never carry
+/// words taken from content (contract §2 rule 4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventDecl {
     /// The code.
     pub code: Code,
     /// Its class.
     pub class: EventClass,
+    /// The value names it may carry.
+    pub fields: BTreeSet<Code>,
 }
 
 /// A module's configuration schema: a JSON object of at most [`MAX_CONFIG_SCHEMA_BYTES`].
@@ -459,6 +472,12 @@ pub enum ManifestError {
     /// A grant for a kind of child Operation the manifest does not request.
     #[error("a grant for a child Operation the manifest does not declare")]
     GrantWithoutAction,
+    /// A grant whose reason is not one of the manifest's reason codes.
+    #[error("the grant reason `{0}` is not a declared reason")]
+    UndeclaredCode(Code),
+    /// An acting hook at a point that only observes.
+    #[error("the point `{}` only observes", .0.code())]
+    ModeUnavailable(HookPoint),
     /// Enabled by default although it reaches outside the request.
     #[error("a module that requests child Operations is off by default")]
     DefaultOnReachesOutside,
@@ -473,11 +492,14 @@ impl ManifestError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::DuplicateHook(_) => "duplicate_hook",
-            Self::Deadline { .. } => "deadline",
             Self::FeatureNotRequired(_) => "feature_not_required",
-            Self::StateTooLarge { .. } | Self::Decls { .. } | Self::TooManyCodes { .. } => "bound_exceeded",
+            Self::Deadline { .. } | Self::StateTooLarge { .. } | Self::Decls { .. } | Self::TooManyCodes { .. } => {
+                "bound_exceeded"
+            }
             Self::DuplicateEvent(_) => "duplicate_event",
             Self::GrantWithoutAction => "grant_without_action",
+            Self::UndeclaredCode(_) => "undeclared_code",
+            Self::ModeUnavailable(_) => "point_unavailable",
             Self::DefaultOnReachesOutside => "default_on_reaches_outside",
             Self::ConfigSchema => "config_schema",
         }
@@ -497,6 +519,7 @@ pub struct Manifest {
     reasons: BTreeSet<Code>,
     labels: BTreeSet<Code>,
     events: Vec<EventDecl>,
+    targets: BTreeSet<Code>,
     config_schema: Option<ConfigSchema>,
     state_bytes: u32,
     max_decls: u16,
@@ -519,6 +542,7 @@ impl Manifest {
             reasons: BTreeSet::new(),
             labels: BTreeSet::new(),
             events: Vec::new(),
+            targets: BTreeSet::new(),
             config_schema: None,
             state_bytes: 0,
             max_decls: 8,
@@ -589,7 +613,19 @@ impl Manifest {
     /// The class of the event `code`, if declared.
     #[must_use]
     pub fn event_class(&self, code: &Code) -> Option<EventClass> {
-        self.events.iter().find(|e| &e.code == code).map(|e| e.class)
+        self.event(code).map(|e| e.class)
+    }
+
+    /// The declaration of the event `code`, if any.
+    #[must_use]
+    pub fn event(&self, code: &Code) -> Option<&EventDecl> {
+        self.events.iter().find(|e| &e.code == code)
+    }
+
+    /// Whether `code` names a tool or a configuration key its child Operations may name.
+    #[must_use]
+    pub fn declares_target(&self, code: &Code) -> bool {
+        self.targets.contains(code)
     }
 
     /// Its configuration schema, if any.
@@ -671,6 +707,13 @@ impl ManifestBuilder {
         self
     }
 
+    /// Declares a tool or a configuration key its child Operations may name.
+    #[must_use]
+    pub fn target(mut self, code: Code) -> Self {
+        self.0.targets.insert(code);
+        self
+    }
+
     /// Sets the configuration schema.
     #[must_use]
     pub fn config_schema(mut self, schema: ConfigSchema) -> Self {
@@ -721,6 +764,9 @@ impl ManifestBuilder {
             {
                 return Err(ManifestError::FeatureNotRequired(feature));
             }
+            if hook.mode == HookMode::Act && !hook.point.acts() {
+                return Err(ManifestError::ModeUnavailable(hook.point));
+            }
         }
         for kind in &m.actions {
             if let Some(feature) = kind.required_features().into_iter().find(|f| !m.requires.contains(f)) {
@@ -730,14 +776,29 @@ impl ManifestBuilder {
         if m.grants.iter().any(|g| !m.actions.contains(&g.kind)) {
             return Err(ManifestError::GrantWithoutAction);
         }
+        if let Some(grant) = m.grants.iter().find(|g| !m.reasons.contains(&g.why)) {
+            return Err(ManifestError::UndeclaredCode(grant.why.clone()));
+        }
         if m.state_bytes > MAX_STATE_BYTES {
             return Err(ManifestError::StateTooLarge { max: MAX_STATE_BYTES });
         }
         if m.max_decls == 0 || m.max_decls > MAX_DECLS {
             return Err(ManifestError::Decls { max: MAX_DECLS });
         }
-        if m.reasons.len() > MAX_CODES || m.labels.len() > MAX_CODES || m.events.len() > MAX_CODES {
+        if [
+            m.reasons.len(),
+            m.labels.len(),
+            m.events.len(),
+            m.targets.len(),
+            m.grants.len(),
+        ]
+        .into_iter()
+        .any(|n| n > MAX_CODES)
+        {
             return Err(ManifestError::TooManyCodes { max: MAX_CODES });
+        }
+        if m.events.iter().any(|e| e.fields.len() > MAX_EVENT_VALUES) {
+            return Err(ManifestError::TooManyCodes { max: MAX_EVENT_VALUES });
         }
         let mut seen = BTreeSet::new();
         for event in &m.events {
@@ -789,8 +850,9 @@ impl Refusal {
     }
 }
 
-/// What a running kernel offers: its module API and its features. Modules-off and degraded
-/// kernels offer fewer features, so the same check refuses what they cannot honour.
+/// What a running kernel offers: its module API and its features. A degraded kernel offers
+/// fewer features, so the same check refuses what it cannot honour. A modules-off kernel
+/// (`empty-kernel`, I-12) admits no module at all: the host never calls [`KernelOffer::admit`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelOffer {
     api: ModuleApiVersion,

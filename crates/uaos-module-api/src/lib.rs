@@ -21,7 +21,8 @@
 //!   pocket's journaled events.
 //! - A [`GrantRef`] only names a grant: authority is the live grant, which the host re-checks at
 //!   every use.
-//! - [`StructuralView`] shows content with every detected secret masked.
+//! - [`StructuralView`] shows content with every detected secret masked, in values and in keys
+//!   ([`Mask`]).
 //!
 //! **Language-neutral (ADR-0020).** Content in any language is bytes: nothing here normalizes,
 //! case-folds or reorders it, and no type names a locale. What a person reads is a [`Code`] a
@@ -47,7 +48,7 @@ pub use codec::{
 };
 pub use decl::{
     AppendSlot, CandidateId, ChildBody, ChildOpRequest, Decl, DeclError, Decls, MAX_EVENT_VALUES, MAX_MODULE_TEXT,
-    ModuleEvent, ModuleText, Strike, TextError, check_decls, is_explicit_bidi,
+    MAX_RANK, ModuleEvent, ModuleText, Strike, TextError, check_decls, is_explicit_bidi,
 };
 pub use grant_ref::GrantRef;
 pub use manifest::{
@@ -56,6 +57,9 @@ pub use manifest::{
     ManifestError, ModuleApiVersion, ModuleVersion, OnFailure, Refusal, ViewKind,
 };
 pub use module::{Candidate, CircuitState, EventView, HookCx, Module, OpMeta};
-pub use selector::{MAX_PREDICATE_DEPTH, MAX_SELECTOR_STEPS, Predicate, Selector, SelectorError, Step};
+pub use selector::{
+    MAX_PREDICATE_DEPTH, MAX_PREDICATE_VALUES, MAX_SELECTOR_STEPS, MAX_SELECTOR_TEXT, Predicate, Selector,
+    SelectorError, Step,
+};
 pub use state::{ModuleState, PocketCursor, StateCheckpoint, StateError};
-pub use view::{StructuralView, ViewNode, ViewText};
+pub use view::{Mask, StructuralView, ViewNode, ViewText};

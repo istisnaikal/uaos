@@ -190,9 +190,12 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     the optional `agent_id`, a non-breaking change.
   - **Built: cross-pocket reads in policy.** The Cedar schema gains `entity Pocket` and the action
     `memory.read` on it; the policy model gains `Action::MemoryRead` and `Resource::Pocket`. Such a
-    read is denied by default, allowed by a grant that names its holder, the source pocket and the
-    reading pocket while it lives, or by a policy that names the source pocket; a forbid still
-    wins over a grant (`cross_pocket_memory_reads_need_a_grant`).
+    read is denied by default and allowed only by a grant that names its holder, the source
+    pocket and the reading pocket while it lives. A permit alone, named or blanket, only asks
+    for that consent, and a forbid still wins over a grant
+    (`cross_pocket_memory_reads_need_a_grant`, `a_permit_alone_only_asks_for_a_cross_pocket_read`).
+    `uaos.grant/1` refuses a `memory.read` grant off a pocket and a pocket grant for any other
+    action.
   - **Built: the socket crate, `uaos-module-api` (Ring 0, no I/O, `forbid(unsafe_code)`).**
     - The manifest and its builder, validated whole: one refusal per reason, each with a stable
       code.
@@ -200,13 +203,22 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       a set.
     - The nine hook points with their deadline ceilings.
     - Declarations checked against the manifest and the point (`check_decls`, one strike per
-      reason).
-    - Pocket-scoped `ModuleState`, bounded at 64 KiB and all or nothing, with an ordered
-      `PocketCursor`.
-    - The redacted structural view and ADR-0014's selectors. A masked value never matches a
-      predicate.
+      reason). Nothing is declared at a point the module did not hook. Event value names,
+      tools and configuration keys must be declared, and a child Operation's correlation tag
+      is a number, so no word from content reaches journal metadata.
+    - Pocket-scoped `ModuleState`, bounded at 64 KiB. A refused change marks the state
+      `exceeded`, so the host keeps a call whole or strikes it whole. The `PocketCursor` moves
+      forward and only on its own pocket's events.
+    - The redacted structural view and ADR-0014's selectors, with bounded predicates.
+      Detection's mask covers keys and numbers as well as strings. Masked text is unknown: it
+      equals no value and matches no name, so no predicate's answer depends on it.
+    - Endpoint path patterns match canonical paths by whole segments.
     - Role maps, and the `uaos.adapter/1` codec trait.
-    - Every `Debug` shows sizes and identifiers only.
+    - Every `Debug` shows sizes and identifiers only, selectors and stream frames included.
+    - The inputs a module receives (`OpMeta`, `Candidate`, `EventView`) are `#[non_exhaustive]`
+      with constructors, so they grow without a break.
+    - V1 review (`docs/reviews/WP3.A4-module-socket.md`): 2 High, 8 Medium and 8 Low,
+      resolved or assigned to the host (PR-8). 16 seeded violations.
     - **Language-neutral (ADR-0020).** No type names a locale. `ModuleText` keeps any language
       byte for byte and refuses explicit bidi controls (U+202A–U+202E, U+2066–U+2069). A
       seven-locale corpus (EN, TR, DE, FR, ES, IT, AR) crosses five stages with 0 byte

@@ -26,7 +26,8 @@ use std::fmt::Write as _;
 use proptest::prelude::*;
 use uaos_json::{Limits, NodeId, parse};
 use uaos_module_api::{
-    Code, ModuleState, ModuleText, Predicate, Selector, Step, StructuralView, TextError, ViewText, is_explicit_bidi,
+    Code, Mask, ModuleState, ModuleText, Predicate, Selector, Step, StructuralView, TextError, ViewText,
+    is_explicit_bidi,
 };
 
 /// One sample per GA locale. Invisible and combining characters are written as escapes.
@@ -88,7 +89,7 @@ fn content_ids(view: &StructuralView<'_, '_>) -> Vec<NodeId> {
 /// The decoded content of a one-message request, through parse, view and selector.
 fn through_the_view(body: &str) -> String {
     let tape = parse(body.as_bytes(), &Limits::DEFAULT).unwrap();
-    let none = BTreeSet::new();
+    let none = Mask::new();
     let view = StructuralView::new(&tape, &none);
     let ids = content_ids(&view);
     assert_eq!(ids.len(), 1);
@@ -101,7 +102,7 @@ fn through_the_view(body: &str) -> String {
 /// How many messages a `MemberIn` on `content` selects in `body`.
 fn content_matches(body: &str, value: &str) -> usize {
     let tape = parse(body.as_bytes(), &Limits::DEFAULT).unwrap();
-    let none = BTreeSet::new();
+    let none = Mask::new();
     let view = StructuralView::new(&tape, &none);
     Selector::new(vec![
         Step::Key("messages".into()),
@@ -259,7 +260,11 @@ proptest! {
     #[test]
     fn any_module_text_is_kept_or_refused_whole(s in any::<String>()) {
         match ModuleText::new(s.clone()) {
-            Ok(text) => prop_assert_eq!(text.as_str().as_bytes(), s.as_bytes()),
+            Ok(text) => {
+                prop_assert_eq!(text.as_str().as_bytes(), s.as_bytes());
+                let refused = |c: char| (c.is_control() && c != '\n' && c != '\t') || is_explicit_bidi(c);
+                prop_assert!(!s.chars().any(refused), "accepted text holds a refused character");
+            }
             Err(TextError::Control) => prop_assert!(s.chars().any(|c| c.is_control() && c != '\n' && c != '\t')),
             Err(TextError::Bidi) => prop_assert!(s.chars().any(is_explicit_bidi)),
             Err(other) => prop_assert!(false, "unexpected refusal {other:?}"),

@@ -489,6 +489,14 @@ impl PolicyEngine {
                     .map(|id| self.label(id))
                     .collect();
                 asking.sort();
+                // A cross-pocket read needs consent (C-44, contract §6.2): a grant, which carries the
+                // injection policy. A permit alone, however broad, at most asks for that consent.
+                if asking.is_empty() && request.action == Action::MemoryRead {
+                    return match grants.first() {
+                        Some(grant) => self.decision(Effect::Allow, Basis::Granted, vec![grant.label.clone()]),
+                        None => self.decision(Effect::Ask, Basis::ApprovalRequired, labels),
+                    };
+                }
                 if asking.is_empty() {
                     return self.decision(Effect::Allow, Basis::Permitted, labels);
                 }

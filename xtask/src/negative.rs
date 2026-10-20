@@ -2483,6 +2483,198 @@ The journal is tamper-proof.
             runner: Runner::History(crate::docs_sync::check, docs_sync_history),
             expect: "CHANGELOG",
         },
+        Case {
+            id: "module-unknown-feature-loaded",
+            gate: "test",
+            tool: None,
+            // Contract §3: admission compares every required feature with the kernel's offer.
+            seed: replace("crates/uaos-module-api/src/manifest.rs", "match manifest.requires().iter().find(|f| !self.features.contains(f)) {", "match manifest.requires().iter().find(|_| false) {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "admission_compares_every_required_feature"],
+            },
+            expect: "a missing feature was admitted",
+        },
+        Case {
+            id: "module-act-at-observe-point",
+            gate: "test",
+            tool: None,
+            // Contract §2 rule 7: an acting hook at a point that only observes is refused at load.
+            seed: replace("crates/uaos-module-api/src/manifest.rs", "if hook.mode == HookMode::Act && !hook.point.acts() {", "if false && hook.mode == HookMode::Act && !hook.point.acts() {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "a_manifest_is_refused_whole_for_each_reason"],
+            },
+            expect: "was not refused",
+        },
+        Case {
+            id: "module-state-unbounded",
+            gate: "test",
+            tool: None,
+            // Contract §5: module state never grows past its bound.
+            seed: replace("crates/uaos-module-api/src/state.rs", "if u32::try_from(wanted).is_ok_and(|n| n <= self.limit) {", "if u32::try_from(wanted).is_ok() {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "state_is_bounded_and_unchanged_on_refusal"],
+            },
+            expect: "state grew past its bound",
+        },
+        Case {
+            id: "module-state-call-kept",
+            gate: "test",
+            tool: None,
+            // Contract §5: a call that outgrew its state is struck whole, not kept in part.
+            seed: replace("crates/uaos-module-api/src/state.rs", "self.exceeded = true;", ""),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "a_call_that_outgrows_its_state_is_struck_whole"],
+            },
+            expect: "an outgrown call was kept",
+        },
+        Case {
+            id: "module-decls-at-unhooked-point",
+            gate: "test",
+            tool: None,
+            // V1 review M2: a point the manifest does not hook takes no declaration.
+            seed: replace("crates/uaos-module-api/src/decl.rs", "Some(p) => manifest.hook(p).ok_or(Strike::NotHooked)?.mode() == HookMode::Observe,", "Some(p) => manifest.hook(p).is_none_or(|h| h.mode() == HookMode::Observe),"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "nothing_is_declared_at_a_point_the_module_did_not_hook"],
+            },
+            expect: "declarations accepted at an unhooked point",
+        },
+        Case {
+            id: "module-event-value-undeclared",
+            gate: "test",
+            tool: None,
+            // V1 review H2: a module event carries only the value names its manifest declares.
+            seed: replace("crates/uaos-module-api/src/decl.rs", "declared.fields.contains(name)", "declared.fields.contains(name) || name.as_str().is_ascii()"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "an_event_carries_only_declared_value_names"],
+            },
+            expect: "an undeclared value name was emitted",
+        },
+        Case {
+            id: "module-text-accepts-bidi-override",
+            gate: "test",
+            tool: None,
+            // ADR-0020 rule 5: module text refuses explicit bidirectional controls.
+            seed: replace("crates/uaos-module-api/src/decl.rs", "if text.chars().any(is_explicit_bidi) {", "if text.chars().any(|_| false) {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "language_neutrality", "module_text_refuses_explicit_bidi_controls"],
+            },
+            expect: "explicit bidi accepted",
+        },
+        Case {
+            id: "view-masked-key-readable",
+            gate: "test",
+            tool: None,
+            // V1 review H1: a key detection flagged reads as masked.
+            seed: replace("crates/uaos-module-api/src/view.rs", "let masked = self.mask.masks_key(self.node.id());", "let masked = false;"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "masked_keys_and_numbers_read_as_masked"],
+            },
+            expect: "a masked key was readable",
+        },
+        Case {
+            id: "view-masked-key-found-by-name",
+            gate: "test",
+            tool: None,
+            // V1 review H1: a member whose key is masked is never found by name.
+            seed: replace("crates/uaos-module-api/src/view.rs", ".filter(|n| !self.mask.masks_key(n.id()))", ".filter(|_| true)"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "masked_keys_and_numbers_read_as_masked"],
+            },
+            expect: "a masked key was found by name",
+        },
+        Case {
+            id: "selector-predicate-unbounded",
+            gate: "test",
+            tool: None,
+            // V1 review M5: a predicate lists a bounded number of values.
+            seed: replace("crates/uaos-module-api/src/selector.rs", "if values.len() > MAX_PREDICATE_VALUES {", "if values.len() > usize::MAX - 1 {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_selector_is_bounded"],
+            },
+            expect: "an unbounded predicate was accepted",
+        },
+        Case {
+            id: "selector-folds-case",
+            gate: "test",
+            tool: None,
+            // ADR-0020 rule 2: selectors compare bytes and never fold case.
+            seed: replace("crates/uaos-module-api/src/selector.rs", "Some(ViewText::Plain(text)) => Ok(values.contains(text.as_ref())),", "Some(ViewText::Plain(text)) => Ok(values.iter().any(|v| v.to_lowercase() == text.to_lowercase())),"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "language_neutrality", "selectors_never_fold_case"],
+            },
+            expect: "folded case",
+        },
+        Case {
+            id: "path-pattern-crosses-segment",
+            gate: "test",
+            tool: None,
+            // V1 review M6: a prefix pattern matches by whole segments.
+            seed: replace("crates/uaos-module-api/src/codec.rs", ".is_some_and(|rest| rest.is_empty() || prefix.ends_with('/') || rest.starts_with('/')),", ".is_some(),"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "path_patterns_match_canonical_paths_by_segment"],
+            },
+            expect: "matched a pattern it should not",
+        },
+        Case {
+            id: "path-not-canonical",
+            gate: "test",
+            tool: None,
+            // V1 review M6: a path that is not canonical never matches.
+            seed: replace("crates/uaos-module-api/src/codec.rs", "if !canonical(path) {", "if false && !canonical(path) {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "path_patterns_match_canonical_paths_by_segment"],
+            },
+            expect: "matched a pattern it should not",
+        },
+        Case {
+            id: "agent-id-serialized-when-absent",
+            gate: "test",
+            tool: None,
+            // Contract §8: an envelope without an agent keeps its exact bytes (the journal hashes them).
+            seed: replace("crates/uaos-contracts/src/event.rs", "#[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub agent_id: Option<AgentId>,", "#[serde(default)]\n    pub agent_id: Option<AgentId>,"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-contracts", "--lib", "an_absent_agent_id_is_not_written"],
+            },
+            expect: "an absent agent_id was written",
+        },
+        Case {
+            id: "grant-memory-read-off-a-pocket",
+            gate: "test",
+            tool: None,
+            // V1 review L4: a memory.read grant is on a pocket, and only memory.read grants are.
+            seed: replace("crates/uaos-contracts/src/grant.rs", "if memory_read != source.is_some() {", "if false && memory_read != source.is_some() {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-contracts", "--lib", "memory_reads_and_pockets_go_together"],
+            },
+            expect: "a memory.read grant off a pocket validated",
+        },
+        Case {
+            id: "cedar-cross-pocket-without-grant",
+            gate: "test",
+            tool: None,
+            // V1 review M1, contract §6.2: only a grant, which carries consent, allows a cross-pocket read.
+            seed: replace("crates/uaos-policy/src/engine.rs", "if asking.is_empty() && request.action == Action::MemoryRead {", "if false && asking.is_empty() && request.action == Action::MemoryRead {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-policy", "--test", "policy", "a_permit_alone_only_asks_for_a_cross_pocket_read"],
+            },
+            expect: "a permit allowed a cross-pocket read without consent",
+        },
     ]
 }
 

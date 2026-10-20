@@ -530,6 +530,9 @@ mod tests {
     fn an_absent_agent_id_is_not_written() {
         let json = serde_json::to_string(&sample()).unwrap();
         assert!(!json.contains("agent_id"), "an absent agent_id was written: {json}");
+        // The exact bytes `uaos.event/1` wrote for this envelope before `agent_id` existed.
+        let golden = r#"{"schema":"uaos.event/1","id":"evt_0199c82cc00071018101010101010101","seq":"18446744073709551615","ts":{"wall":"2025-10-09T08:53:20.123456789Z","mono_ns":"18446744073709551614"},"session_id":"ses_00000000000172028202020202020202","operation_id":"op_00000000000173038303030303030303","correlation_id":"cor_00000000000174048404040404040404","actor":{"kind":"agent","credential":"cred_00000000000175058505050505050505"},"type":"op.reserved_intent","payload_ref":"hmac-sha256:0909090909090909090909090909090909090909090909090909090909090909","payload_inline":{"model":"m"},"cost_estimate":"1234","compensable":false,"side_effect_class":"external","risk_tier":2,"durability":"critical","config_version":"42","prev_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}"#;
+        assert_eq!(json, golden, "an envelope without an agent changed its bytes");
     }
 
     #[test]

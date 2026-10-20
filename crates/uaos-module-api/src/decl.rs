@@ -16,6 +16,8 @@ use crate::selector::Selector;
 pub const MAX_MODULE_TEXT: usize = 8 * 1024;
 /// The most values one module event may carry.
 pub const MAX_EVENT_VALUES: usize = 8;
+/// The most candidates one [`Decl::Rank`] may name.
+pub const MAX_RANK: usize = 64;
 
 /// Text that does not fit [`ModuleText`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -107,7 +109,8 @@ impl CandidateId {
     }
 }
 
-/// An event a module emits: a declared code and at most [`MAX_EVENT_VALUES`] bounded numbers.
+/// An event a module emits: a declared code and at most [`MAX_EVENT_VALUES`] numbers, each under
+/// a value name its [`crate::EventDecl`] declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleEvent {
     code: Code,
@@ -127,9 +130,9 @@ impl ModuleEvent {
     /// Adds a named value.
     ///
     /// # Errors
-    /// The event, unchanged, once it holds [`MAX_EVENT_VALUES`] values.
+    /// The event, unchanged, once it holds [`MAX_EVENT_VALUES`] values or already holds `name`.
     pub fn value(mut self, name: Code, value: i64) -> Result<Self, Self> {
-        if self.values.len() >= MAX_EVENT_VALUES {
+        if self.values.len() >= MAX_EVENT_VALUES || self.values.iter().any(|(n, _)| *n == name) {
             return Err(self);
         }
         self.values.push((name, value));
@@ -196,15 +199,16 @@ pub struct ChildOpRequest {
     kind: ChildKind,
     body: ChildBody,
     grant: Option<GrantRef>,
-    correlate: Code,
+    correlate: u16,
 }
 
 impl ChildOpRequest {
-    /// A request of `kind` carrying `body`, tagged `correlate` so the outcome can be matched.
+    /// A request of `kind` carrying `body`, tagged `correlate` so the outcome can be matched. The
+    /// tag is a number, never a word: it reaches the journal's metadata.
     ///
     /// # Errors
     /// The body back if it does not fit the kind.
-    pub fn new(kind: ChildKind, body: ChildBody, correlate: Code) -> Result<Self, ChildBody> {
+    pub fn new(kind: ChildKind, body: ChildBody, correlate: u16) -> Result<Self, ChildBody> {
         if !body.fits(kind) {
             return Err(body);
         }
@@ -241,10 +245,10 @@ impl ChildOpRequest {
         self.grant
     }
 
-    /// Its correlation code.
+    /// Its correlation tag.
     #[must_use]
-    pub const fn correlate(&self) -> &Code {
-        &self.correlate
+    pub const fn correlate(&self) -> u16 {
+        self.correlate
     }
 }
 
@@ -267,7 +271,7 @@ pub enum Decl {
     Cancel(Code),
     /// Adds a label; risk only rises.
     Label(Code),
-    /// Ranks, or narrows, the route candidates offered.
+    /// Ranks, or narrows, the route candidates offered: at most [`MAX_RANK`], none twice.
     Rank(Vec<CandidateId>),
     /// Emits an event.
     Emit(ModuleEvent),
@@ -315,6 +319,15 @@ pub enum Strike {
     /// More declarations than the manifest's `max_decls`.
     #[error("more declarations than the manifest allows")]
     TooMany,
+    /// Declarations at a point the manifest does not hook.
+    #[error("declarations at a point the manifest does not hook")]
+    NotHooked,
+    /// A declaration past a bound: a ranking longer than [`MAX_RANK`] or naming a candidate twice.
+    #[error("a declaration past its bound")]
+    BoundExceeded,
+    /// The call grew the module's state past its bound ([`crate::ModuleState::exceeded`]).
+    #[error("the call grew the module's state past its bound")]
+    StateExceeded,
     /// A declaration the point, or the hook's mode, does not allow.
     #[error("a declaration this point or mode does not allow")]
     NotAllowedHere,
@@ -335,6 +348,9 @@ impl Strike {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::TooMany => "too_many",
+            Self::NotHooked => "not_hooked",
+            Self::BoundExceeded => "bound_exceeded",
+            Self::StateExceeded => "state_exceeded",
             Self::NotAllowedHere => "not_allowed_here",
             Self::UndeclaredCode => "undeclared_code",
             Self::UndeclaredAction => "undeclared_action",
@@ -344,7 +360,8 @@ impl Strike {
 }
 
 /// Checks one call's declarations against the manifest and the point (`None` for `on_event`).
-/// All or nothing: the first refusal refuses the whole call.
+/// All or nothing: the first refusal refuses the whole call. The host also refuses a call whose
+/// state copy is [`crate::ModuleState::exceeded`] ([`Strike::StateExceeded`]).
 ///
 /// # Errors
 /// The [`Strike`].
@@ -352,9 +369,10 @@ pub fn check_decls(manifest: &Manifest, point: Option<HookPoint>, decls: &[Decl]
     if decls.len() > usize::from(manifest.max_decls()) {
         return Err(Strike::TooMany);
     }
-    let observing = point
-        .and_then(|p| manifest.hook(p))
-        .is_none_or(|hook| hook.mode() == HookMode::Observe);
+    let observing = match point {
+        None => true,
+        Some(p) => manifest.hook(p).ok_or(Strike::NotHooked)?.mode() == HookMode::Observe,
+    };
     for decl in decls {
         if !decl.allowed_at(point) || (observing && !decl.observes()) {
             return Err(Strike::NotAllowedHere);
@@ -364,12 +382,29 @@ pub fn check_decls(manifest: &Manifest, point: Option<HookPoint>, decls: &[Decl]
                 return Err(Strike::UndeclaredCode);
             }
             Decl::Label(code) if !manifest.declares_label(code) => return Err(Strike::UndeclaredCode),
-            Decl::Emit(event) if manifest.event_class(event.code()).is_none() => {
-                return Err(Strike::UndeclaredCode);
+            Decl::Emit(event) => {
+                let declared = manifest.event(event.code()).ok_or(Strike::UndeclaredCode)?;
+                if !event.values().iter().all(|(name, _)| declared.fields.contains(name)) {
+                    return Err(Strike::UndeclaredCode);
+                }
+            }
+            Decl::Rank(ranked) => {
+                let distinct: std::collections::BTreeSet<_> = ranked.iter().collect();
+                if ranked.len() > MAX_RANK || distinct.len() != ranked.len() {
+                    return Err(Strike::BoundExceeded);
+                }
             }
             Decl::Request(request) => {
                 if !manifest.actions().contains(&request.kind()) {
                     return Err(Strike::UndeclaredAction);
+                }
+                let target = match request.body() {
+                    ChildBody::ToolCall { tool, .. } => Some(tool),
+                    ChildBody::ConfigChange { key, .. } => Some(key),
+                    ChildBody::Prompt(_) | ChildBody::MemoryQuery { .. } => None,
+                };
+                if target.is_some_and(|t| !manifest.declares_target(t)) {
+                    return Err(Strike::UndeclaredCode);
                 }
                 if let Some(feature) = request
                     .kind()
