@@ -689,6 +689,20 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Changed
 
+- **Seven locales above a language-neutral kernel (ADR-0020, Proposed; D-36).**
+  - CLAUDE.md now names seven GA locales: EN, TR, DE, FR, ES, IT and AR (right-to-left). It
+    replaces "TR/EN initial".
+  - Two new architectural invariants:
+    - **Language neutrality.** The kernel treats content as bytes: no Unicode normalization,
+      no case folding outside ASCII, no bidi reordering, no split code points. No Ring 0 or
+      Ring 1 type names a locale.
+    - **Prefix-stable rendering.** Injected text is rendered once, in the locale pinned for its
+      Operation, and replayed as journaled bytes.
+  - Two new merge blockers, both registered as pending:
+    - `language-neutrality` (P3), which activates with PR-4's seven-locale corpus;
+    - `locale-catalog` (P4).
+  - The forbidden-claims lint also refuses "faultless" and "flawless" (red line 6).
+
 - **Re-baselined on 2026-10-19.**
   - The roadmap's P3 row says what is built (the network door, chunk durability), what is in
     review (`uaos-json`), what comes next, and that no request flows through UAOS yet.

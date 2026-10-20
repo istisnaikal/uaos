@@ -26,6 +26,7 @@ before their first code is merged (GOVERNANCE.md §Decisions).
 | [0017](0017-rehydration-policy-and-round-trip.md) | Rehydration: a policy-gated action with a recorded round trip | Proposed |
 | [0018](0018-chunk-durability-joins-the-journal-classes.md) | Chunk durability joins the journal's durability classes | Accepted |
 | [0019](0019-merge-integrity-with-one-maintainer.md) | Merge integrity with one maintainer | Accepted |
+| [0020](0020-seven-locales-above-a-language-neutral-kernel.md) | Seven locales above a language-neutral kernel | Proposed |
 
 Numbers 0015 and 0016 are reserved for the remaining P3 decisions named in plan v2 §2.8:
 session inference and the pricing package. Each is written before its first code.

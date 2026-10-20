@@ -30,6 +30,8 @@ const REQUIRED_GATES: &[&str] = &[
     "a11y-critical-flows",
     "perf-smoke",
     "docs-contract-sync",
+    "language-neutrality",
+    "locale-catalog",
     // Plan §4.2 additions.
     "arch-check",
     "schema-compat",
