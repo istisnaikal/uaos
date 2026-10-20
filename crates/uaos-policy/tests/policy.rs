@@ -15,6 +15,7 @@
 use std::collections::BTreeSet;
 
 use proptest::prelude::*;
+use uaos_contracts::event::ModuleName;
 use uaos_contracts::id::{CredentialId, GrantId, PocketId, TypedId};
 use uaos_contracts::operation::RiskTier;
 use uaos_policy::{
@@ -797,4 +798,81 @@ fn no_shape_within_or_beyond_the_bounds_crashes() {
         .join()
         .unwrap();
     assert!(outcome.iter().all(|ok| *ok), "{outcome:?}");
+}
+
+/// Cross-project memory (C-44, module socket contract §6.2): reading another pocket is denied
+/// unless a grant names the reader, the source pocket and the reading pocket, while it lives,
+/// and a forbid still wins over the grant.
+#[test]
+fn cross_pocket_memory_reads_need_a_grant() {
+    let notes = Principal::Module(ModuleName::new("mod-notes").unwrap());
+    let read = |source: u8, reader: u8| Request {
+        pocket: pocket(reader),
+        ..request(notes.clone(), Action::MemoryRead, Resource::Pocket(pocket(source)))
+    };
+    let none = PolicyEngine::load("", &[], NOW).unwrap();
+    assert_eq!(
+        none.authorize(&read(1, 2)).effect,
+        Effect::Deny,
+        "allowed without a grant"
+    );
+
+    let grant = Grant {
+        id: GrantId::from_parts(1, [7; 10]),
+        principal: notes.clone(),
+        action: Action::MemoryRead,
+        resource: Resource::Pocket(pocket(1)),
+        pocket: pocket(2),
+        expires_at_ms: NOW + 60_000,
+        max_risk_tier: RiskTier::new(1).unwrap(),
+        data_classes: BTreeSet::new(),
+        approves: BTreeSet::new(),
+    };
+    let e = PolicyEngine::load("", std::slice::from_ref(&grant), NOW).unwrap();
+    let d = e.authorize(&read(1, 2));
+    assert_eq!((d.effect, d.basis), (Effect::Allow, Basis::Granted));
+    assert_eq!(
+        e.authorize(&read(3, 2)).effect,
+        Effect::Deny,
+        "a grant for one source pocket read another"
+    );
+    assert_eq!(
+        e.authorize(&read(1, 4)).effect,
+        Effect::Deny,
+        "a grant for one reading pocket read from another"
+    );
+    let mut someone_else = read(1, 2);
+    someone_else.principal = agent(1);
+    assert_eq!(e.authorize(&someone_else).effect, Effect::Deny, "scoped to its holder");
+    let mut later = read(1, 2);
+    later.now_ms = NOW + 60_000;
+    assert_eq!(e.authorize(&later).effect, Effect::Deny, "inert at expiry");
+
+    let forbidden = PolicyEngine::load(
+        r#"@id("no-memory") forbid(principal, action == Uaos::Action::"memory.read", resource);"#,
+        std::slice::from_ref(&grant),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        forbidden.authorize(&read(1, 2)).effect,
+        Effect::Deny,
+        "a grant beat a forbid"
+    );
+
+    let permitted = PolicyEngine::load(
+        &format!(
+            r#"@id("notes-read") permit(principal == Uaos::Module::"mod-notes", action == Uaos::Action::"memory.read", resource == Uaos::Pocket::"{}");"#,
+            pocket(1)
+        ),
+        &[],
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        permitted.authorize(&read(1, 2)).effect,
+        Effect::Allow,
+        "a policy may name a source pocket"
+    );
+    assert_eq!(permitted.authorize(&read(3, 2)).effect, Effect::Deny);
 }

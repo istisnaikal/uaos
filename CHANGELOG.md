@@ -187,6 +187,11 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     validates its expiry, its bounds, an injection policy present exactly on a `memory.read` grant
     on a pocket, and that such a grant never names its own pocket. `schemas/event.v1.json` gains
     the optional `agent_id`, a non-breaking change.
+  - **Built: cross-pocket reads in policy.** The Cedar schema gains `entity Pocket` and the action
+    `memory.read` on it; the policy model gains `Action::MemoryRead` and `Resource::Pocket`. Such a
+    read is denied by default, allowed by a grant that names its holder, the source pocket and the
+    reading pocket while it lives, or by a policy that names the source pocket; a forbid still
+    wins over a grant (`cross_pocket_memory_reads_need_a_grant`).
 
 - P3 Move 1, PR-2 (WP3.A2): `uaos-json`, the one structural tokenizer (ADR-0014). Nothing calls
   it yet; `uaos-redact` and its final scan are untouched.
