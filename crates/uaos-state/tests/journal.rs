@@ -92,6 +92,7 @@ fn draft(n: u64) -> EventDraft {
         pocket_id: None,
         operation_id: None,
         request_id: None,
+        agent_id: None,
         correlation_id: CorrelationId::from_parts(n, [7; 10]),
         parent_id: None,
         actor: Actor::System,

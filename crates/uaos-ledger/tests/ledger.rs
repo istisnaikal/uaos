@@ -703,6 +703,7 @@ fn journal_reader_ignores_other_events_and_refuses_malformed_entries() {
         pocket_id: None,
         operation_id: None,
         request_id: None,
+        agent_id: None,
         correlation_id: CorrelationId::from_parts(1, [4; 10]),
         parent_id: None,
         actor: sys(),

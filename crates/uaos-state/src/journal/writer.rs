@@ -56,7 +56,7 @@ use std::sync::Arc;
 
 use uaos_contracts::digest::{ChunkRef, Sha256Digest};
 use uaos_contracts::event::{Actor, Durability, EventEnvelope, EventSchema, EventType, InlinePayload, Metadata, types};
-use uaos_contracts::id::{CorrelationId, EventId, OperationId, PocketId, RequestId, SessionId, TypedId};
+use uaos_contracts::id::{AgentId, CorrelationId, EventId, OperationId, PocketId, RequestId, SessionId, TypedId};
 use uaos_contracts::limits;
 use uaos_contracts::money::NanoUsd;
 use uaos_contracts::operation::{RiskTier, SideEffectClass};
@@ -149,6 +149,8 @@ pub struct EventDraft {
     pub operation_id: Option<OperationId>,
     /// Ingress request, if any.
     pub request_id: Option<RequestId>,
+    /// The agent instance, if known.
+    pub agent_id: Option<AgentId>,
     /// Correlation identifier.
     pub correlation_id: CorrelationId,
     /// Causing event, if any.
@@ -584,6 +586,7 @@ impl Journal {
                     pocket_id: Some(payload.pocket),
                     operation_id: referencing.operation_id,
                     request_id: referencing.request_id,
+                    agent_id: referencing.agent_id,
                     correlation_id: referencing.correlation_id,
                     parent_id: Some(referencing.id),
                     actor: Actor::System,
@@ -710,6 +713,7 @@ impl Journal {
             pocket_id: draft.pocket_id,
             operation_id: draft.operation_id,
             request_id: draft.request_id,
+            agent_id: draft.agent_id,
             correlation_id: draft.correlation_id,
             parent_id: draft.parent_id,
             actor: draft.actor,

@@ -23,7 +23,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::digest::{ChunkRef, Sha256Digest};
-use crate::id::{CorrelationId, CredentialId, EventId, OperationId, PocketId, RequestId, SessionId};
+use crate::id::{AgentId, CorrelationId, CredentialId, EventId, OperationId, PocketId, RequestId, SessionId};
 use crate::limits;
 use crate::money::NanoUsd;
 use crate::operation::{RiskTier, SideEffectClass};
@@ -392,6 +392,10 @@ pub struct EventEnvelope {
     /// Ingress request that caused the event, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<RequestId>,
+    /// The agent instance that caused the event, if known. Absent, it is not written, so records
+    /// without it keep exactly the bytes they had before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
     /// Correlation identifier tying together one user-visible action.
     pub correlation_id: CorrelationId,
     /// Causing event, if any.
@@ -448,6 +452,7 @@ mod tests {
             pocket_id: None,
             operation_id: Some(OperationId::from_parts(1, [3; 10])),
             request_id: None,
+            agent_id: None,
             correlation_id: CorrelationId::from_parts(1, [4; 10]),
             parent_id: None,
             actor: Actor::Agent {
@@ -517,5 +522,22 @@ mod tests {
         let big: BTreeMap<String, String> = (0..17).map(|i| (format!("k{i}"), "v".into())).collect();
         v["metadata"] = serde_json::to_value(big).unwrap();
         assert!(serde_json::from_value::<EventEnvelope>(v).is_err());
+    }
+
+    /// The journal hashes a record's exact bytes: an envelope without an agent must serialize
+    /// exactly as it did before the field existed (module socket contract §11).
+    #[test]
+    fn an_absent_agent_id_is_not_written() {
+        let json = serde_json::to_string(&sample()).unwrap();
+        assert!(!json.contains("agent_id"), "an absent agent_id was written: {json}");
+    }
+
+    #[test]
+    fn an_agent_id_round_trips() {
+        let mut envelope = sample();
+        envelope.agent_id = Some(AgentId::from_parts(1, [6; 10]));
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(json.contains("\"agent_id\":\"agt_"), "{json}");
+        assert_eq!(serde_json::from_str::<EventEnvelope>(&json).unwrap(), envelope);
     }
 }

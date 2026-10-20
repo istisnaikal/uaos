@@ -8,6 +8,17 @@
       "description": "Who caused it.",
       "$ref": "#/$defs/Actor"
     },
+    "agent_id": {
+      "description": "The agent instance that caused the event, if known. Absent, it is not written, so records\nwithout it keep exactly the bytes they had before the field existed.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AgentId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "compensable": {
       "description": "Whether the related effect can be undone by a compensating action.",
       "type": "boolean"
@@ -231,6 +242,10 @@
           ]
         }
       ]
+    },
+    "AgentId": {
+      "type": "string",
+      "pattern": "^agt_[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$"
     },
     "ChunkRef": {
       "type": "string",

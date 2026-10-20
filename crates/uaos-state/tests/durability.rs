@@ -399,6 +399,7 @@ fn draft(pocket: Option<PocketId>, chunk: Option<ChunkRef>, n: u64) -> EventDraf
         pocket_id: pocket,
         operation_id: None,
         request_id: None,
+        agent_id: None,
         correlation_id: CorrelationId::from_parts(n, random),
         parent_id: None,
         actor: Actor::System,

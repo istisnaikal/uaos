@@ -176,6 +176,12 @@ typed_id! {
     /// A named journal position that can be restored.
     CheckpointId, "chk"
 }
+typed_id! {
+    /// One agent instance under a credential: a main agent or one of its subagents. Several
+    /// agents often share a credential, so the credential alone cannot tell them apart (module
+    /// socket contract §8). Filled in by session inference (ADR-0015).
+    AgentId, "agt"
+}
 
 #[cfg(test)]
 mod tests {

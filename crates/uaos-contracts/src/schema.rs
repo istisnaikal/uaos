@@ -12,6 +12,7 @@ use crate::budget::BudgetTx;
 use crate::credential::CredentialEntry;
 use crate::error::UaosError;
 use crate::event::EventEnvelope;
+use crate::grant::GrantEntry;
 use crate::operation::Operation;
 
 /// One exported contract schema.
@@ -56,6 +57,11 @@ pub fn exported() -> Vec<ExportedSchema> {
             name: "event",
             major: 1,
             schema: schema_for!(EventEnvelope),
+        },
+        ExportedSchema {
+            name: "grant",
+            major: 1,
+            schema: schema_for!(GrantEntry),
         },
         ExportedSchema {
             name: "operation",
