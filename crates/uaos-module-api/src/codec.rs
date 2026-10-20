@@ -71,18 +71,19 @@ impl RoleMap {
         self.roles.get(&id).cloned().unwrap_or_default()
     }
 
-    /// The roles that govern `id`: its own and every ancestor's.
+    /// The roles that govern `id`: its own and every ancestor's. `None` if `id` is not in `view`:
+    /// the caller then refuses the edit, because an empty set would be the most permissive answer.
     #[must_use]
-    pub fn governing(&self, view: &StructuralView<'_, '_>, id: NodeId) -> BTreeSet<Role> {
+    pub fn governing(&self, view: &StructuralView<'_, '_>, id: NodeId) -> Option<BTreeSet<Role>> {
         let mut roles = BTreeSet::new();
-        let mut node = view.node(id);
+        let mut node = Some(view.node(id)?);
         while let Some(n) = node {
             if let Some(own) = self.roles.get(&n.id()) {
                 roles.extend(own.iter().copied());
             }
             node = n.parent();
         }
-        roles
+        Some(roles)
     }
 
     /// Every node with a role, in document order.
@@ -107,11 +108,33 @@ pub enum Method {
 
 /// A path that does not fit [`PathPattern`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("a path pattern starts with `/`, is at most 128 bytes, has no query and may end in `*`")]
+#[error(
+    "a path pattern is a canonical path of at most 128 bytes (no query, no percent-encoding, no \
+     backslash, no empty or dot segment) that may end in `*`"
+)]
 pub struct PathError;
 
-/// A path an endpoint matches: exactly, or as a prefix when it ends in `*`. Matching is on the
-/// path only, never the query string (D-28).
+/// Whether `path` is canonical: it starts with `/`, is printable ASCII, and has no query or
+/// fragment, no percent-encoding, no backslash, no `.` or `..` segment and no empty segment but
+/// a trailing one. A path that is not canonical never matches, so an encoded or dotted spelling
+/// can never reach a class meant for another endpoint.
+fn canonical(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix('/') else {
+        return false;
+    };
+    let segments: Vec<&str> = rest.split('/').collect();
+    let last = segments.len().saturating_sub(1);
+    path.bytes().all(|b| b.is_ascii_graphic())
+        && !path.contains(['?', '#', '%', '\\'])
+        && segments
+            .iter()
+            .enumerate()
+            .all(|(i, segment)| !matches!(*segment, "." | "..") && (!segment.is_empty() || i == last))
+}
+
+/// A path an endpoint matches: exactly, or by segments when it ends in `*` (`/v1/models*` matches
+/// `/v1/models` and `/v1/models/x`, never `/v1/models-x`). Matching is on the path only, never
+/// the query string (D-28), and only on canonical paths.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PathPattern(String);
 
@@ -119,23 +142,25 @@ impl PathPattern {
     /// Checks and wraps a pattern.
     ///
     /// # Errors
-    /// [`PathError`] unless it starts with `/`, is at most 128 bytes of printable ASCII, has no
-    /// `?` or `#`, and holds `*` at most once, at the end.
+    /// [`PathError`] unless it is at most 128 bytes, canonical apart from an optional final `*`,
+    /// and holds `*` at most once, at the end.
     pub fn new(pattern: impl Into<String>) -> Result<Self, PathError> {
         let pattern = pattern.into();
         let body = pattern.strip_suffix('*').unwrap_or(&pattern);
-        let ok = pattern.starts_with('/')
-            && pattern.len() <= 128
-            && pattern.bytes().all(|b| b.is_ascii_graphic())
-            && !body.contains(['?', '#', '*']);
+        let ok = pattern.len() <= 128 && canonical(body) && !body.contains('*');
         if ok { Ok(Self(pattern)) } else { Err(PathError) }
     }
 
     /// Whether `path` (without its query) matches.
     #[must_use]
     pub fn matches(&self, path: &str) -> bool {
+        if !canonical(path) {
+            return false;
+        }
         match self.0.strip_suffix('*') {
-            Some(prefix) => path.starts_with(prefix),
+            Some(prefix) => path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || prefix.ends_with('/') || rest.starts_with('/')),
             None => path == self.0,
         }
     }
@@ -180,8 +205,9 @@ pub struct SseEvent<'a> {
 
 impl std::fmt::Debug for SseEvent<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Lengths only: both fields are upstream content.
         f.debug_struct("SseEvent")
-            .field("event", &self.event)
+            .field("event_len", &self.event.map(str::len))
             .field("data_len", &self.data.len())
             .finish()
     }

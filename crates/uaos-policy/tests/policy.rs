@@ -612,7 +612,9 @@ proptest! {
 
     /// Grants are matched natively; with any policy set that has no ask policies, the result
     /// equals compiling each grant to its permit. Principals, actions, resources, pockets,
-    /// expiry, risk tiers and data classes all vary (V1 review M-3).
+    /// expiry, risk tiers and data classes all vary (V1 review M-3). `memory.read` is outside
+    /// this equivalence on purpose: a permit is never consent for a cross-pocket read, so its
+    /// compiled form only asks (`a_permit_alone_only_asks_for_a_cross_pocket_read`).
     #[test]
     fn native_grants_equal_their_permits(
         grants in prop::collection::vec((any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>()), 0..5),
@@ -859,20 +861,52 @@ fn cross_pocket_memory_reads_need_a_grant() {
         Effect::Deny,
         "a grant beat a forbid"
     );
+}
 
-    let permitted = PolicyEngine::load(
-        &format!(
-            r#"@id("notes-read") permit(principal == Uaos::Module::"mod-notes", action == Uaos::Action::"memory.read", resource == Uaos::Pocket::"{}");"#,
-            pocket(1)
-        ),
-        &[],
-        NOW,
-    )
-    .unwrap();
-    assert_eq!(
-        permitted.authorize(&read(1, 2)).effect,
-        Effect::Allow,
-        "a policy may name a source pocket"
+#[test]
+fn a_permit_alone_only_asks_for_a_cross_pocket_read() {
+    let notes = Principal::Module(ModuleName::new("mod-notes").unwrap());
+    let read = |source: u8, reader: u8| Request {
+        pocket: pocket(reader),
+        ..request(notes.clone(), Action::MemoryRead, Resource::Pocket(pocket(source)))
+    };
+    let named = format!(
+        r#"@id("notes-read") permit(principal == Uaos::Module::"mod-notes", action == Uaos::Action::"memory.read", resource == Uaos::Pocket::"{}");"#,
+        pocket(1)
     );
-    assert_eq!(permitted.authorize(&read(3, 2)).effect, Effect::Deny);
+    let blanket = r#"@id("notes-all") permit(principal == Uaos::Module::"mod-notes", action, resource);"#;
+    for text in [named.as_str(), blanket] {
+        let e = PolicyEngine::load(text, &[], NOW).unwrap();
+        let d = e.authorize(&read(1, 2));
+        assert_eq!(
+            (d.effect, d.basis),
+            (Effect::Ask, Basis::ApprovalRequired),
+            "a permit allowed a cross-pocket read without consent: {text}"
+        );
+    }
+    let named_only = PolicyEngine::load(&named, &[], NOW).unwrap();
+    assert_eq!(
+        named_only.authorize(&read(3, 2)).effect,
+        Effect::Deny,
+        "the permit names another pocket"
+    );
+
+    let grant = Grant {
+        id: GrantId::from_parts(1, [7; 10]),
+        principal: notes.clone(),
+        action: Action::MemoryRead,
+        resource: Resource::Pocket(pocket(1)),
+        pocket: pocket(2),
+        expires_at_ms: NOW + 60_000,
+        max_risk_tier: RiskTier::new(1).unwrap(),
+        data_classes: BTreeSet::new(),
+        approves: BTreeSet::new(),
+    };
+    let consented = PolicyEngine::load(blanket, std::slice::from_ref(&grant), NOW).unwrap();
+    let d = consented.authorize(&read(1, 2));
+    assert_eq!(
+        (d.effect, d.basis),
+        (Effect::Allow, Basis::Granted),
+        "the grant is the consent"
+    );
 }
