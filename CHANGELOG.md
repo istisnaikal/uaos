@@ -161,6 +161,26 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P3 Move 1, PR-4 (spec first): the module socket's contract,
+  `docs/adr/appendix/0010-module-socket.md`, before any code.
+  - **`uaos.module/1` (draft):** a manifest built through a builder, with `requires`, a closed set
+    of kernel features compared by set so that a module needing anything the kernel lacks is
+    refused at load, never loaded in part. Nine hook points with their modes, ceilings and
+    failure policies. Closed declarations; codes, never free text.
+  - **Pocket-scoped module state:** bounded per module and pocket, kept in step by an ordered
+    cursor over the pocket's journaled events, checkpointed as chunks under the pocket's key, so
+    shredding a pocket shreds its module states.
+  - **Child Operations and `GrantRef`:** every module effect is a child Operation through the full
+    pipeline, carrying a grant reference a module cannot build and the host re-checks at each
+    use. Cross-project memory is a `memory.read` child Operation on a Cedar `Pocket`, default
+    deny, with an injection policy (`auto`, `ask`, `never`) and provenance labels.
+  - **`uaos.adapter/1` (draft):** the dialect codec's endpoints, roles through ADR-0014's
+    selectors only, frames and usage.
+  - **Kernel additions, all additive:** `AgentId` and an optional `agent_id` on the envelope,
+    `uaos.grant/1`, the Cedar `Pocket` entity and `memory.read` action, the event-naming rule.
+    `uaos.approval/1` moves to M3 with the presence ceremony (ADR-0012).
+  - Open decision D-35: how closed enums grow in draft contracts.
+
 - P3 Move 1, PR-2 (WP3.A2): `uaos-json`, the one structural tokenizer (ADR-0014). Nothing calls
   it yet; `uaos-redact` and its final scan are untouched.
   - **The crate:**
@@ -235,6 +255,7 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - The nightly lane also runs the tape's property fuzzing at 1,000,000 cases per property
       and its differential at 100,000, and adds `uaos-json` to mutation testing.
     - `.github/CODEOWNERS` covers `/fuzz/`.
+||||||| parent of 45bf82e (P3 Move 1 PR-4 (spec first): the module socket's contract)
 - Maintainer decisions of 2026-10-15:
   - **Accepted ADRs:** ADR-0010 (as revised), ADR-0011, ADR-0013, ADR-0014 (as revised, after
     the WP3.0c spike), ADR-0018 and ADR-0019 (with Amendment 1). ADR-0011's code merged a day

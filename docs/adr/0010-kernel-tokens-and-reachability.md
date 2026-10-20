@@ -147,3 +147,11 @@ rules unless five holes are closed:
   - `panic-message-logged`.
 - `surface` is registered as an active gate in the change that implements it. It is never
   pending, so the pending count still only falls.
+
+## The module socket's contract
+
+The types through which modules attach, their manifest, hook points, declarations, pocket-scoped
+state, child Operations with `GrantRef`, the dialect codec and the kernel contract additions they
+need are specified in
+[`appendix/0010-module-socket.md`](appendix/0010-module-socket.md) (`uaos.module/1` and
+`uaos.adapter/1`, draft until RC-1).
