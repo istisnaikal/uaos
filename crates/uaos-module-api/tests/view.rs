@@ -17,8 +17,9 @@ use std::collections::BTreeSet;
 use proptest::prelude::*;
 use uaos_json::{Kind, Limits, NodeId, parse};
 use uaos_module_api::{
-    ConfigSchema, MAX_PREDICATE_VALUES, MAX_SELECTOR_TEXT, Mask, ModuleState, ModuleText, PathPattern, Predicate, Role,
-    RoleMap, Selector, SelectorError, SseEvent, Step, StructuralView, ViewText,
+    ConfigSchema, EndpointClass, EndpointDecl, MAX_PREDICATE_VALUES, MAX_SELECTOR_TEXT, Mask, Method, ModuleState,
+    ModuleText, PathPattern, Predicate, Role, RoleMap, Selector, SelectorError, SseEvent, Step, StructuralView,
+    ViewText, classify,
 };
 
 const DOC: &str = r#"{"system":[{"type":"text","text":"s0"}],"messages":[
@@ -285,10 +286,7 @@ fn debug_output_carries_no_content() {
         Step::Key("secret-key".into()),
         Step::Where(member_in("secret-member", &["secret-value"])),
     ]);
-    let frame = SseEvent {
-        event: Some("secret-event"),
-        data: b"{\"secret\":1}",
-    };
+    let frame = SseEvent::new(Some("secret-event"), br#"{"secret":1}"#);
     let shown = [
         format!("{view:?}"),
         format!("{:?}", view.root()),
@@ -369,5 +367,71 @@ proptest! {
         prop_assert_eq!(assigned, ids.len());
         let named: Vec<NodeId> = roles.nodes().map(|(id, _)| id).collect();
         prop_assert_eq!(named, ids);
+    }
+}
+
+#[test]
+fn a_masked_key_cannot_be_probed() {
+    // Whatever the masked key spells, even the very name a predicate asks for, the member is
+    // absent to every predicate.
+    for key in ["content", "secret", "other"] {
+        let body = format!(r#"{{"messages":[{{"role":"user","{key}":"hi"}}]}}"#);
+        let tape = parse(body.as_bytes(), &Limits::DEFAULT).unwrap();
+        let plain = Mask::new();
+        let message = sel(messages()).resolve(&StructuralView::new(&tape, &plain)).unwrap()[0];
+        let member = StructuralView::new(&tape, &plain)
+            .node(message)
+            .unwrap()
+            .children()
+            .nth(1)
+            .unwrap()
+            .id();
+        let mut mask = Mask::new();
+        mask.key(member);
+        let view = StructuralView::new(&tape, &mask);
+        let count = |p: Predicate| {
+            let mut steps = messages();
+            steps.push(Step::Where(p));
+            sel(steps).resolve(&view).unwrap().len()
+        };
+        assert_eq!(
+            count(member_in("content", &["hi"])),
+            0,
+            "a masked key was probed: {key}"
+        );
+        let not_in = Predicate::MemberNotIn {
+            key: "content".into(),
+            values: strings(&["hi"]),
+        };
+        assert_eq!(count(not_in), 1, "a masked key was probed: {key}");
+    }
+}
+
+#[test]
+fn an_endpoint_s_class_is_the_strictest_match_and_unknown_paths_are_denied() {
+    let decl = |path: &str, class| EndpointDecl {
+        method: Method::Post,
+        path: PathPattern::new(path).unwrap(),
+        class,
+    };
+    let endpoints = [
+        decl("/v1/*", EndpointClass::Metadata),
+        decl("/v1/messages", EndpointClass::Governed),
+        decl("/v1/files*", EndpointClass::Denied),
+    ];
+    for (method, path, expected) in [
+        (Method::Post, "/v1/messages", EndpointClass::Governed),
+        (Method::Post, "/v1/models", EndpointClass::Metadata),
+        (Method::Post, "/v1/files/f1", EndpointClass::Denied),
+        (Method::Post, "/v2/messages", EndpointClass::Denied),
+        (Method::Get, "/v1/messages", EndpointClass::Denied),
+        (Method::Post, "/v1//messages", EndpointClass::Denied),
+        (Method::Post, "/v1/messages/../files", EndpointClass::Denied),
+    ] {
+        assert_eq!(
+            classify(&endpoints, method, path),
+            expected,
+            "an endpoint got a weaker class: {path}"
+        );
     }
 }

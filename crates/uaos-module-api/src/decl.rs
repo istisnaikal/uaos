@@ -271,7 +271,9 @@ pub enum Decl {
     Cancel(Code),
     /// Adds a label; risk only rises.
     Label(Code),
-    /// Ranks, or narrows, the route candidates offered: at most [`MAX_RANK`], none twice.
+    /// Ranks, or narrows, the route candidates offered: 1 to [`MAX_RANK`], none twice. An empty
+    /// ranking would veto the route without a reason, so it is a strike; the host strikes an id
+    /// outside the offer.
     Rank(Vec<CandidateId>),
     /// Emits an event.
     Emit(ModuleEvent),
@@ -322,7 +324,8 @@ pub enum Strike {
     /// Declarations at a point the manifest does not hook.
     #[error("declarations at a point the manifest does not hook")]
     NotHooked,
-    /// A declaration past a bound: a ranking longer than [`MAX_RANK`] or naming a candidate twice.
+    /// A declaration past a bound: an empty ranking, one longer than [`MAX_RANK`], or one that
+    /// names a candidate twice.
     #[error("a declaration past its bound")]
     BoundExceeded,
     /// The call grew the module's state past its bound ([`crate::ModuleState::exceeded`]).
@@ -390,7 +393,7 @@ pub fn check_decls(manifest: &Manifest, point: Option<HookPoint>, decls: &[Decl]
             }
             Decl::Rank(ranked) => {
                 let distinct: std::collections::BTreeSet<_> = ranked.iter().collect();
-                if ranked.len() > MAX_RANK || distinct.len() != ranked.len() {
+                if ranked.is_empty() || ranked.len() > MAX_RANK || distinct.len() != ranked.len() {
                     return Err(Strike::BoundExceeded);
                 }
             }

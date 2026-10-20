@@ -183,6 +183,34 @@ pub enum EndpointClass {
     Denied,
 }
 
+impl EndpointClass {
+    /// How restrictive the class is: on overlapping patterns the most restrictive wins.
+    const fn strictness(self) -> u8 {
+        match self {
+            Self::Metadata => 0,
+            Self::Governed => 1,
+            Self::Denied => 2,
+        }
+    }
+}
+
+/// The class of a request to `method` and `path` (without its query), from a dialect's
+/// endpoints (D-28). A path that is not canonical, or that no endpoint matches, is
+/// [`EndpointClass::Denied`]; where several endpoints match, the most restrictive class wins.
+/// No request is ever forwarded with fewer checks than its endpoint's class asks for.
+#[must_use]
+pub fn classify(endpoints: &[EndpointDecl], method: Method, path: &str) -> EndpointClass {
+    if !canonical(path) {
+        return EndpointClass::Denied;
+    }
+    endpoints
+        .iter()
+        .filter(|e| e.method == method && e.path.matches(path))
+        .map(|e| e.class)
+        .max_by_key(|class| class.strictness())
+        .unwrap_or(EndpointClass::Denied)
+}
+
 /// One endpoint a dialect serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointDecl {
@@ -194,13 +222,23 @@ pub struct EndpointDecl {
     pub class: EndpointClass,
 }
 
-/// One server-sent event of a response stream; `data` is one complete JSON document.
+/// One server-sent event of a response stream; `data` is one complete JSON document. Built by
+/// the host; `#[non_exhaustive]` (contract §9).
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SseEvent<'a> {
     /// The `event:` field, if any.
     pub event: Option<&'a str>,
     /// The `data:` field.
     pub data: &'a [u8],
+}
+
+impl<'a> SseEvent<'a> {
+    /// An event.
+    #[must_use]
+    pub const fn new(event: Option<&'a str>, data: &'a [u8]) -> Self {
+        Self { event, data }
+    }
 }
 
 impl std::fmt::Debug for SseEvent<'_> {

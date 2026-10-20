@@ -12,7 +12,7 @@ use crate::codec::SseEvent;
 use crate::decl::{CandidateId, Decls};
 use crate::grant_ref::GrantRef;
 use crate::manifest::{HookPoint, Manifest};
-use crate::state::ModuleState;
+use crate::state::StateMut;
 use crate::view::StructuralView;
 
 /// What a hook may know about its Operation: identifiers and metadata, never content. Built by
@@ -211,11 +211,11 @@ pub trait Module: Send + Sync + 'static {
 
     /// Called at each point it hooked, within the point's deadline. Pure and bounded: it reads the
     /// context, may change its state for the Operation's pocket, and declares.
-    fn on_hook(&self, cx: &HookCx<'_>, state: &mut ModuleState, out: &mut Decls);
+    fn on_hook(&self, cx: &HookCx<'_>, state: StateMut<'_>, out: &mut Decls);
 
     /// Called, off the hot path, for each journaled event of a pocket it touches, in journal
     /// order. The default declares nothing.
-    fn on_event(&self, event: &EventView<'_>, state: &mut ModuleState, out: &mut Decls) {
+    fn on_event(&self, event: &EventView<'_>, state: StateMut<'_>, out: &mut Decls) {
         let _ = (event, state, out);
     }
 }

@@ -2632,7 +2632,11 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // V1 review M6: a path that is not canonical never matches.
-            seed: replace("crates/uaos-module-api/src/codec.rs", "if !canonical(path) {", "if false && !canonical(path) {"),
+            seed: replace(
+                "crates/uaos-module-api/src/codec.rs",
+                "if !canonical(path) {\n            return false;",
+                "if false && !canonical(path) {\n            return false;",
+            ),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-module-api", "--test", "view", "path_patterns_match_canonical_paths_by_segment"],
@@ -2668,12 +2672,48 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // V1 review M1, contract §6.2: only a grant, which carries consent, allows a cross-pocket read.
-            seed: replace("crates/uaos-policy/src/engine.rs", "if asking.is_empty() && request.action == Action::MemoryRead {", "if false && asking.is_empty() && request.action == Action::MemoryRead {"),
+            seed: replace("crates/uaos-policy/src/engine.rs", "if asking.is_empty() && cross_pocket {", "if false && asking.is_empty() && cross_pocket {"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-policy", "--test", "policy", "a_permit_alone_only_asks_for_a_cross_pocket_read"],
             },
             expect: "a permit allowed a cross-pocket read without consent",
+        },
+        Case {
+            id: "endpoint-unmatched-not-denied",
+            gate: "test",
+            tool: None,
+            // PR-4 scoped review F2: a path no endpoint matches is denied, never forwarded.
+            seed: replace("crates/uaos-module-api/src/codec.rs", ".unwrap_or(EndpointClass::Denied)", ".unwrap_or(EndpointClass::Metadata)"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "an_endpoint_s_class_is_the_strictest_match_and_unknown_paths_are_denied"],
+            },
+            expect: "an endpoint got a weaker class",
+        },
+        Case {
+            id: "cedar-own-pocket-read-asks",
+            gate: "test",
+            tool: None,
+            // PR-4 scoped review F3: a read of the requesting pocket follows policy; no consent loop.
+            seed: replace("crates/uaos-policy/src/engine.rs", "request.action == Action::MemoryRead && request.resource != Resource::Pocket(request.pocket);", "request.action == Action::MemoryRead;"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-policy", "--test", "policy", "a_permit_alone_only_asks_for_a_cross_pocket_read"],
+            },
+            expect: "a read of the own pocket asked for consent",
+        },
+        Case {
+            id: "module-rank-empty-accepted",
+            gate: "test",
+            tool: None,
+            // PR-4 scoped review F5: an empty ranking is a strike, not a silent veto.
+            seed: replace("crates/uaos-module-api/src/decl.rs", "if ranked.is_empty() || ranked.len() > MAX_RANK", "if ranked.len() > MAX_RANK"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "an_empty_ranking_is_a_strike"],
+            },
+            expect: "an empty ranking vetoed the route without a reason",
         },
     ]
 }

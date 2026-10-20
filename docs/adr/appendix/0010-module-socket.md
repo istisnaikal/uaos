@@ -47,7 +47,9 @@ waits for P5 sidecars.
    or revoked grant fails closed.
 4. **No free text** (D-2). Reasons, labels, module event value names, and the tools and
    configuration keys a child Operation names are manifest-declared codes. Event values are
-   bounded numbers, and a child Operation's correlation tag is a number. Text a module adds (`ModuleText`) is bounded, detected and final-scanned
+   bounded numbers, and a child Operation's correlation tag is a number. A `Strip` selector
+   may name keys and values a module copied from content, so the host never journals or
+   explains a selector's keys or values, only their counts. Text a module adds (`ModuleText`) is bounded, detected and final-scanned
    like any outbound byte. It refuses control characters other than newline and tab, and the
    explicit bidirectional controls U+202A–U+202E and U+2066–U+2069 (ADR-0020 rule 5).
 5. **Redacted by default.** A module sees the redacted structural view. Detection scans keys
@@ -78,7 +80,7 @@ Built only through `Manifest::builder`; fields are private and read through acce
 | `requires` | `BTreeSet<KernelFeature>` | every feature the module needs (below); the host refuses the module if one is missing |
 | `hooks` | `Vec<HookDecl>` | one per point at most: `point`, `mode` (`act` only where the point acts), `priority` (`u16`), `deadline_us`, `on_failure`. The view is the point's (§4) |
 | `actions` | `BTreeSet<ChildKind>` | the child Operation kinds it may request; each kind names its Cedar action and the features it needs |
-| `grants` | `Vec<GrantDecl>` | the grants it may hold: the child kind, and why (one of its declared reasons) |
+| `grants` | `Vec<GrantDecl>` | the grants it may hold, at most 64: the child kind, and why (one of its declared reasons) |
 | `reasons`, `labels` | `Vec<Code>` | every code it may emit: `[a-z][a-z0-9_]{1,31}`, at most 64 each |
 | `events` | `Vec<EventDecl>` | module event codes, each `ephemeral` or `journaled` (D-9), with the value names it may carry (at most 8) |
 | `targets` | `BTreeSet<Code>` | the tools and configuration keys its child Operations may name, at most 64 |
@@ -138,7 +140,7 @@ The pre-egress ceilings sum to 1.3 ms, inside the 2 ms hook budget. **Kernel rul
 | `Veto(ReasonCode)` | `tool.result` | the Operation is denied and explained |
 | `Cancel(ReasonCode)` | `stream.assert` | the stream is cancelled from the next frame |
 | `Label(Label)` | `classify` | a label added; risk only rises |
-| `Rank(Vec<CandidateId>)` | `route.decide` | a ranking or subset of the candidates offered: at most 64, none twice |
+| `Rank(Vec<CandidateId>)` | `route.decide` | a ranking or subset of the candidates offered: 1 to 64, none twice; the host strikes an id outside the offer |
 | `Emit(ModuleEvent)` | every hooked point | an event with a declared code and declared value names, each with a number; journaled ones rate-limited per module per Operation |
 | `Request(ChildOpRequest)` | every point, with `child_operations` | a child Operation (§6) |
 | `CancelOp(OperationId)` | every point | cancels one of the module's own child Operations |
@@ -154,8 +156,10 @@ A module that remembers (notes, reminders, loop counters) keeps **state per (mod
 never shared between pockets (C-18).
 
 - **`ModuleState`** is an opaque byte buffer of at most the manifest's `state_bytes`. A hook gets
-  `&mut ModuleState` for the Operation's pocket only. Each change is atomic, and a refused one
-  marks the state `exceeded`. The host runs every call on a copy and keeps the copy only if
+  a `StateMut` handle, by value and for one call, on the Operation's pocket's state only. The
+  handle offers the bounded changes and nothing else, so a module can neither swap the state
+  for another (which would clear the mark below and raise its bound) nor keep the handle. Each
+  change is atomic, and a refused one marks the state `exceeded`. The host runs every call on a copy and keeps the copy only if
   it is not exceeded and its declarations pass. Otherwise the call is a strike
   (`state_exceeded`), and the state is left as it was before the call. A cursor advances only
   on its own pocket's events.
@@ -192,7 +196,8 @@ journaled events through `on_event`, never as a return value.
 Reading another pocket's memory (notes, Obsidian index, a project's decision log) is a child
 Operation authorized by Cedar action `memory.read` on resource `Pocket::"<source>"`, with the
 requesting pocket in `context.pocket` (§8). Default deny: without a grant, it is denied and
-explained. A permit alone, however broad, never allows it: it at most turns the answer into
+explained. A read of the requesting pocket itself crosses nothing and follows policy as any
+action does. For a read of another pocket, a permit alone, however broad, never allows it: it at most turns the answer into
 an approval request, whose approval issues the grant. Only a live grant, which carries the
 injection policy, allows the read.
 
@@ -215,7 +220,7 @@ splices.
 
 | Method | Returns | Rule |
 |---|---|---|
-| `endpoints()` | `&[EndpointDecl]` | method, path pattern (path only, never the query; a final `*` matches whole segments), class `governed`, `metadata` or `denied` (D-28). A path that is not canonical (percent-encoding, a backslash, an empty or dot segment) matches no pattern |
+| `endpoints()` | `&[EndpointDecl]` | method, path pattern (path only, never the query; a final `*` matches whole segments), class `governed`, `metadata` or `denied` (D-28). A path that is not canonical (percent-encoding, a backslash, an empty or dot segment) matches no pattern. `classify` gives a request its class: `denied` when the path is not canonical or no endpoint matches, and the most restrictive class (`denied`, then `governed`, then `metadata`) when several match |
 | `roles(&StructuralView, &mut RoleMap)` | `Result<(), CodecError>` | assigns the roles of ADR-0014 through selectors only; a codec never computes a byte offset |
 | `frame(&SseEvent)` | `FrameKind` | classifies a stream frame: content, usage, ping, error, end |
 | `usage(&StructuralView)` | `Option<UsageReport>` | the billing dimensions the response reports (ADR-0016, M2) |
@@ -246,7 +251,8 @@ freeze, so the contract still freezes with the rest.
 
 ## 9. Freeze discipline (D-15)
 
-- Inputs a module receives are `#[non_exhaustive]` and read through accessors.
+- Inputs a module receives are `#[non_exhaustive]` and built by the host through
+  constructors: `OpMeta`, `Candidate`, `EventView`, `SseEvent`.
 - Types a module builds (`Manifest`, `ChildOpRequest`, `ModuleText`) are built through builders.
 - Output enums (`Decl`, `KernelFeature`, `FrameKind`) are `#[non_exhaustive]` and grow additively.
 - Paper modules (PR-10, test-only) prove that C-14, C-16, C-24, C-35, C-44, C-45, C-49, C-50, C-51,
