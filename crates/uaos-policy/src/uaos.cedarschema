@@ -23,8 +23,6 @@ namespace Uaos {
   entity Tool;
   entity Pool;
   entity ConfigKey;
-  // A pocket whose memory another pocket reads (C-44); the reading pocket is `context.pocket`.
-  entity Pocket;
 
   action "model.call", "model.count_tokens" appliesTo {
     principal: [Agent, Human, Module, System],
@@ -47,14 +45,6 @@ namespace Uaos {
   action "config.change" appliesTo {
     principal: [Agent, Human, Module, System],
     resource: [ConfigKey],
-    context: Ctx,
-  };
-
-  // Reading a pocket's memory: default deny, like everything. For another pocket, only a live
-  // grant allows the read; a policy at most asks for one (module socket contract §6.2).
-  action "memory.read" appliesTo {
-    principal: [Agent, Human, Module, System],
-    resource: [Pocket],
     context: Ctx,
   };
 }

@@ -20,8 +20,11 @@ I-12 (the kernel runs with zero modules), I-16 (session–account affinity).
   declarations, module state and `GrantRef`. It runs nothing: the host that calls modules is
   PR-8, the runtime that owns the CPU pool is PR-6.
 - **`uaos-contracts` additions** (§8): `AgentId`, an optional `agent_id` on the event envelope,
-  `uaos.grant/1`, and the event-naming rule.
-- **`uaos-policy` additions** (§8): the Cedar `Pocket` entity and the `memory.read` action.
+  and the event-naming rule.
+- **Moved to PR-4b (branch `p3/a4b-grant-path`):** `uaos.grant/1`, the Cedar `Pocket` entity, the `memory.read` action and
+  its consent rule (§6.2), with the final review's M4 (match the grant a request carries) and
+  M5 (`uaos.grant/1` as the exact wire form of the engine's grant). This contract still states
+  the rules they implement; PR-4b proves them.
 
 **Does not build** (and where it lands): the module host, ordering, deadlines, strikes and
 quarantine (PR-8); panic containment (PR-9); paper modules (PR-10); real dialect codecs (M2,
@@ -263,8 +266,8 @@ costs O(steps × nodes), whatever the document's shape.
 |---|---|---|---|
 | `uaos-contracts::id` | `AgentId`, prefix `agt` | one agent instance (a main agent or one subagent) under a credential; subagents often share one key, so a credential alone cannot tell them apart | new type |
 | `uaos.event/1` | optional `agent_id` on `EventEnvelope` and `EventDraft`, omitted when absent | CLAUDE.md §4: every request carries its agent id; per-agent spend and the task ledger (C-45, C-30) | a new optional property: non-breaking under `schema-compat` |
-| `uaos.grant/1` (new) | `Grant`: id, principal, action, resource, the pocket it applies in, expiry, highest risk tier, data classes, the ask policies it satisfies, for `memory.read` the injection policy, the approval that issued it, and when | the wire form of `uaos_policy::model::Grant`, journaled when issued and when revoked | a new contract |
-| Cedar schema | `entity Pocket;` and `action "memory.read" appliesTo { principal: [Agent, Human, Module, System], resource: [Pocket], context: Ctx }` | cross-pocket reads are authorized like every other action, default deny (ADR-0008) | additive; existing policies unchanged |
+| `uaos.grant/1` (new, PR-4b (branch `p3/a4b-grant-path`)) | `Grant`: id, principal, action, resource, the pocket it applies in, expiry, highest risk tier, data classes, the ask policies it satisfies, for `memory.read` the injection policy, the approval that issued it, and when | the wire form of `uaos_policy::model::Grant`, journaled when issued and when revoked | a new contract |
+| Cedar schema (PR-4b (branch `p3/a4b-grant-path`)) | `entity Pocket;` and `action "memory.read" appliesTo { principal: [Agent, Human, Module, System], resource: [Pocket], context: Ctx }` | cross-pocket reads are authorized like every other action, default deny (ADR-0008) | additive; existing policies unchanged |
 | Event naming | `<domain>.<event>`, lowercase, `[a-z_]` words, no `uaos.` prefix, as in the code (`op.committed`, `chunk.lost`). Reserved domains: `op`, `budget`, `chunk`, `redact`, `identity`, `kernel`, `module`, `admission`, `egress`, `bus`, `config`, `grant` | Move 1's text used `uaos.module.*`; the code never did. Constants are added by the PR that first emits them. **Module events** are not types of their own: the host journals each as `module.event`, with the module's name and the declared code as fields, so a module name with hyphens never has to fit an event type | rule only |
 
 **Who fills `agent_id`:** session inference (ADR-0015, M2) from the client's own agent markers;
@@ -318,11 +321,7 @@ selector's keys and values, a frame, state bytes or `ModuleText` (I-11).
   one confers nothing (§2 rule 3);
 - `AgentId` round-trips; an envelope without `agent_id` serializes to the exact bytes main
   writes (a golden string), because the journal's hash chain covers exact bytes;
-- `uaos.grant/1` round-trips and its schema is exported;
-- Cedar: `memory.read` across pockets is denied with no grant, allowed with a matching grant,
-  denied when the grant names another source pocket, another requesting pocket, or has expired;
-  a forbid still wins (ADR-0008 Amendment 1); a permit, named or blanket, only asks;
-- `uaos.grant/1`: a `memory.read` grant is on a pocket, and only `memory.read` grants are;
+- `uaos.grant/1` and the Cedar `memory.read` rules: PR-4b (branch `p3/a4b-grant-path`)'s proof obligations;
 - selectors resolve to the expected node ids, and on generated tapes they name only nodes of
   the view, in document order, without repeats; a role map names only the nodes it was given,
   and the roles of a node outside the view are unknown (`None`), never empty;
@@ -349,12 +348,9 @@ the `language-neutrality` gate once ADR-0020's PR registers it):
 | `path-pattern-crosses-segment` | a prefix pattern matches mid-segment | `path_patterns_match_canonical_paths_by_segment` |
 | `path-not-canonical` | non-canonical paths are matched | `path_patterns_match_canonical_paths_by_segment` |
 | `agent-id-serialized-when-absent` | `skip_serializing_if` removed | `an_absent_agent_id_is_not_written` |
-| `grant-memory-read-off-a-pocket` | the action and resource pairing skipped | `memory_reads_and_pockets_go_together` |
-| `cedar-cross-pocket-without-grant` | a permit allows `memory.read` without a grant | `a_permit_alone_only_asks_for_a_cross_pocket_read` |
 | `selector-folds-case` | predicate values compared lower-cased | `selectors_never_fold_case` |
 | `module-text-accepts-bidi-override` | the explicit bidi check skipped | `module_text_refuses_explicit_bidi_controls` |
 | `endpoint-unmatched-not-denied` | an unmatched path falls back to `metadata` | `an_endpoint_s_class_is_the_strictest_match_and_unknown_paths_are_denied` |
-| `cedar-own-pocket-read-asks` | an own-pocket read is treated as cross-pocket | `a_permit_alone_only_asks_for_a_cross_pocket_read` |
 | `module-rank-empty-accepted` | an empty ranking passes | `an_empty_ranking_is_a_strike` |
 | `view-masked-container-leaks` | a masked container no longer masks its inside | `a_masked_container_masks_everything_inside` |
 | `role-check-ancestors-only` | the role check skips the subtree | `a_strip_never_encloses_a_forbidden_role` |
