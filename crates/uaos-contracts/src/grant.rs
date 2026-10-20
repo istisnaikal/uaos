@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::credential::{ActionName, PatternValue};
+use crate::credential::ActionName;
 use crate::event::ModuleName;
 use crate::id::{ApprovalId, CredentialId, GrantId, PocketId, PoolId};
 use crate::limits;
@@ -59,7 +59,78 @@ pub enum GrantError {
     SamePocket,
 }
 
-/// A data class a grant's approved content carried: 1..=32 bytes of `[a-z0-9_]`.
+/// The longest name, data class or policy identifier a grant carries, in bytes: the policy
+/// engine's own bound.
+pub const MAX_GRANT_NAME: usize = 128;
+
+/// Whether `s` fits the policy engine's `Name` grammar: 1..=128 bytes of `[A-Za-z0-9._:/-]`,
+/// characters that need no escaping anywhere. The wire must hold every name the engine holds
+/// (module socket contract §8; ADR-0008 appendix §3).
+fn is_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_GRANT_NAME
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'/' | b'-'))
+}
+
+/// A model, provider, tool or configuration key name, in the policy engine's `Name` grammar.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GrantName(String);
+
+impl GrantName {
+    /// Validates and wraps a name.
+    ///
+    /// # Errors
+    /// [`GrantError::MalformedToken`] outside the engine's `Name` grammar.
+    pub fn new(name: impl Into<String>) -> Result<Self, GrantError> {
+        let name = name.into();
+        if is_name(&name) {
+            Ok(Self(name))
+        } else {
+            Err(GrantError::MalformedToken("name"))
+        }
+    }
+
+    /// Returns the name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+string_token_serde!(GrantName, "^[A-Za-z0-9._:/-]{1,128}$");
+
+/// An ask policy's `@id`, in the policy engine's grammar: 1..=128 bytes of `[A-Za-z0-9._:-]`,
+/// never starting with the prefix `grant:`, which names grants in explanations.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PolicyId(String);
+
+impl PolicyId {
+    /// Validates and wraps a policy identifier.
+    ///
+    /// # Errors
+    /// [`GrantError::MalformedToken`] outside the grammar or with the `grant:` prefix.
+    pub fn new(id: impl Into<String>) -> Result<Self, GrantError> {
+        let id = id.into();
+        let ok = is_name(&id) && !id.contains('/') && !id.starts_with("grant:");
+        if ok {
+            Ok(Self(id))
+        } else {
+            Err(GrantError::MalformedToken("policy id"))
+        }
+    }
+
+    /// Returns the identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+string_token_serde!(PolicyId, "^[A-Za-z0-9._:-]{1,128}$");
+
+/// A data class a grant's approved content carried (`secret.aws`, `pii.email`), in the policy
+/// engine's `Name` grammar.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DataClass(String);
 
@@ -67,15 +138,10 @@ impl DataClass {
     /// Validates and wraps a data class.
     ///
     /// # Errors
-    /// [`GrantError::MalformedToken`] if empty, longer than 32 bytes or outside `[a-z0-9_]`.
+    /// [`GrantError::MalformedToken`] outside the engine's `Name` grammar.
     pub fn new(class: impl Into<String>) -> Result<Self, GrantError> {
         let class = class.into();
-        let ok = !class.is_empty()
-            && class.len() <= 32
-            && class
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-        if ok {
+        if is_name(&class) {
             Ok(Self(class))
         } else {
             Err(GrantError::MalformedToken("data class"))
@@ -89,7 +155,7 @@ impl DataClass {
     }
 }
 
-string_token_serde!(DataClass, "^[a-z0-9_]{1,32}$");
+string_token_serde!(DataClass, "^[A-Za-z0-9._:/-]{1,128}$");
 
 /// Who holds a grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -105,21 +171,27 @@ pub enum GrantPrincipal {
         /// The module's name.
         name: ModuleName,
     },
+    /// A human, through a user-present channel.
+    Human,
+    /// The kernel itself.
+    System,
 }
 
 /// What a grant allows its action on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrantResource {
-    /// A model, by exact name.
+    /// A model of a provider, by exact names.
     Model {
+        /// The provider, e.g. `anthropic`.
+        provider: GrantName,
         /// The model's name.
-        name: PatternValue,
+        name: GrantName,
     },
     /// A tool, by exact name.
     Tool {
         /// The tool's name.
-        name: PatternValue,
+        name: GrantName,
     },
     /// A budget pool.
     Pool {
@@ -129,7 +201,7 @@ pub enum GrantResource {
     /// A configuration key, by exact name.
     ConfigKey {
         /// The key.
-        name: PatternValue,
+        name: GrantName,
     },
     /// Another pocket, for `memory.read`.
     Pocket {
@@ -168,7 +240,8 @@ pub struct GrantRecord {
     pub approval: ApprovalId,
     /// When it was issued.
     pub issued_at: WallTime,
-    /// From this instant on it no longer applies.
+    /// From this instant on it no longer applies. The engine keeps whole milliseconds, so a
+    /// finer expiry floors: a reloaded grant ends early, never late.
     pub expires_at: WallTime,
     /// The highest risk tier the approval covered; a riskier request is not covered.
     pub max_risk_tier: RiskTier,
@@ -177,7 +250,7 @@ pub struct GrantRecord {
     pub data_classes: BTreeSet<DataClass>,
     /// `@id`s of the ask policies the grant was issued to satisfy.
     #[schemars(length(max = 8))]
-    pub approves: BTreeSet<PatternValue>,
+    pub approves: BTreeSet<PolicyId>,
     /// For `memory.read` on a pocket only: what may happen to what is read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub injection: Option<InjectionPolicy>,
@@ -314,6 +387,43 @@ mod tests {
     }
 
     #[test]
+    fn grant_names_take_the_engine_grammar() {
+        for good in [
+            "secret.aws",
+            "pii.email",
+            "claude-sonnet-5-5",
+            "anthropic/x",
+            "a:b",
+            &"n".repeat(128),
+        ] {
+            assert!(GrantName::new(good).is_ok() && DataClass::new(good).is_ok(), "{good}");
+        }
+        for bad in ["", "a b", "a\"b", "é", &"n".repeat(129)] {
+            assert!(GrantName::new(bad).is_err() && DataClass::new(bad).is_err(), "{bad}");
+        }
+        assert!(PolicyId::new("ask-exec").is_ok());
+        for bad in ["grant:x", "a/b", ""] {
+            assert!(PolicyId::new(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn humans_and_the_kernel_can_hold_grants() {
+        for principal in [GrantPrincipal::Human, GrantPrincipal::System] {
+            let json = serde_json::to_string(&principal).unwrap();
+            assert_eq!(
+                serde_json::from_str::<GrantPrincipal>(&json).unwrap(),
+                principal,
+                "{json}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&GrantPrincipal::Human).unwrap(),
+            r#"{"kind":"human"}"#
+        );
+    }
+
+    #[test]
     fn a_grant_to_read_its_own_pocket_is_refused() {
         assert_eq!(reading(pocket(1), pocket(1)).validate(), Err(GrantError::SamePocket));
     }
@@ -326,7 +436,8 @@ mod tests {
         let mut model_call = reading(pocket(1), pocket(2));
         model_call.action = ActionName::new("model.call").unwrap();
         model_call.resource = GrantResource::Model {
-            name: PatternValue::new("claude-sonnet-5-5").unwrap(),
+            provider: GrantName::new("anthropic").unwrap(),
+            name: GrantName::new("claude-sonnet-5-5").unwrap(),
         };
         assert_eq!(model_call.validate(), Err(GrantError::InjectionMismatch));
         model_call.injection = None;
@@ -337,7 +448,8 @@ mod tests {
     fn memory_reads_and_pockets_go_together() {
         let mut on_a_model = reading(pocket(1), pocket(2));
         on_a_model.resource = GrantResource::Model {
-            name: PatternValue::new("claude-sonnet-5-5").unwrap(),
+            provider: GrantName::new("anthropic").unwrap(),
+            name: GrantName::new("claude-sonnet-5-5").unwrap(),
         };
         assert_eq!(
             on_a_model.validate(),
@@ -364,8 +476,11 @@ mod tests {
 
     #[test]
     fn data_classes_are_tokens() {
-        assert!(DataClass::new("secrets_v1").is_ok());
-        for bad in ["", "Upper", "with space", &"x".repeat(33)] {
+        // The engine's `Name` grammar (M5): what the engine holds, the wire must hold.
+        for good in ["secrets_v1", "secret.aws", "Upper", &"x".repeat(128)] {
+            assert!(DataClass::new(good).is_ok(), "{good:?}");
+        }
+        for bad in ["", "with space", &"x".repeat(129)] {
             assert!(DataClass::new(bad).is_err(), "{bad:?}");
         }
     }

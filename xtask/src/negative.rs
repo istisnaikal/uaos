@@ -2888,12 +2888,37 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // PR-4 scoped review F3: a read of the requesting pocket follows policy; no consent loop.
-            seed: replace("crates/uaos-policy/src/engine.rs", "request.action == Action::MemoryRead && request.resource != Resource::Pocket(request.pocket);", "request.action == Action::MemoryRead;"),
+            seed: replace("crates/uaos-policy/src/model.rs", "self.action == Action::MemoryRead && self.resource != Resource::Pocket(self.pocket)", "self.action == Action::MemoryRead"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-policy", "--test", "policy", "a_permit_alone_only_asks_for_a_cross_pocket_read"],
             },
             expect: "a read of the own pocket asked for consent",
+        },
+        Case {
+            id: "grant-carried-ignored",
+            gate: "test",
+            tool: None,
+            // ADR-0008 appendix §2 rule 4 (M4): only the grant a request carries can satisfy it.
+            seed: replace("crates/uaos-policy/src/engine.rs", "                            && request.grant.is_none_or(|carried| g.id == carried)
+", ""),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-policy", "--test", "policy", "only_the_carried_grant_allows_a_cross_pocket_read"],
+            },
+            expect: "the decision cited a grant the request did not carry",
+        },
+        Case {
+            id: "grant-wire-drops-provider",
+            gate: "test",
+            tool: None,
+            // ADR-0008 appendix §3 (M5): every engine grant goes to the wire and back unchanged.
+            seed: replace("crates/uaos-policy/src/wire.rs", "provider: wire_name(provider)?,", "provider: wire_name(model)?,"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-policy", "--test", "policy", "every_engine_grant_round_trips_through_the_wire"],
+            },
+            expect: "a grant changed through the wire",
         },
     ]
 }

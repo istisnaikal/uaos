@@ -263,6 +263,22 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - A read of another pocket is allowed only by a grant. A permit alone only asks, a read of
       the own pocket follows policy, and a forbid still wins over a grant
       (`cross_pocket_memory_reads_need_a_grant`, `a_permit_alone_only_asks_for_a_cross_pocket_read`).
+  - **Built: the carried grant (M4).** `Request` names the grant it carries (`grant`). When it
+    does, only that grant can satisfy the request. A cross-pocket read naming none is never
+    allowed, and the decision cites the grant that allowed it, so with two live grants for one
+    read, the carried one decides.
+    - Tests: `only_the_carried_grant_allows_a_cross_pocket_read`, and a property over random
+      grants, permits and named grants.
+  - **Built: the exact wire form (M5).**
+    - Model resources carry their provider.
+    - Names and data classes take the engine's `Name` grammar (`GrantName`, `DataClass`), and
+      `approves` takes its policy-identifier grammar (`PolicyId`).
+    - Humans and the kernel can hold grants.
+    - `uaos-policy::wire` converts both ways: `Grant::try_from(&GrantRecord)` and
+      `grant_record`.
+    - Properties: every engine grant round-trips through the wire, and the two crates' name
+      grammars accept the same strings.
+    - `schemas/grant.v1.json` follows; the contract is new on main, so no reader is broken.
 - P3 Move 1, PR-2 (WP3.A2): `uaos-json`, the one structural tokenizer (ADR-0014). Nothing calls
   it yet; `uaos-redact` and its final scan are untouched.
   - **The crate:**

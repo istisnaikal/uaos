@@ -155,6 +155,10 @@ pub struct Request {
     pub resource: Resource,
     /// In which pocket.
     pub pocket: PocketId,
+    /// The grant the request carries, if any: a module's `GrantRef`. When set, only that grant
+    /// can satisfy the request. A cross-pocket `memory.read` that names none is never allowed
+    /// (ADR-0008 appendix §2 rule 4).
+    pub grant: Option<GrantId>,
     /// Risk tier of the Operation.
     pub risk_tier: RiskTier,
     /// Data classes detected in the content (e.g. `secret.aws`, `pii.email`).
@@ -276,4 +280,13 @@ pub struct Grant {
     /// that fire on a request only if it lists every one of them; with none listed, it still
     /// allows on its own where no permit matches.
     pub approves: BTreeSet<String>,
+}
+
+impl Request {
+    /// Whether it reads another pocket than its own: `memory.read` on a pocket other than
+    /// `pocket`. Only consent, a grant, allows that (ADR-0008 appendix §2 rule 2).
+    #[must_use]
+    pub fn crosses_pockets(&self) -> bool {
+        self.action == Action::MemoryRead && self.resource != Resource::Pocket(self.pocket)
+    }
 }
