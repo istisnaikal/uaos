@@ -32,7 +32,8 @@ impl Mask {
         }
     }
 
-    /// Masks the value at `id`: a string or a number.
+    /// Masks the value at `id`: a string or a number. Masking a container masks everything inside
+    /// it, keys included, so a finding placed on the wrong node fails closed.
     pub fn value(&mut self, id: NodeId) {
         self.values.insert(id);
     }
@@ -135,6 +136,27 @@ impl<'v, 'a> ViewNode<'v, 'a> {
         Self { node, mask: self.mask }
     }
 
+    /// Whether a container around it was masked whole: everything inside reads as masked.
+    fn inside_masked(&self) -> bool {
+        self.node.ancestors().any(|a| self.mask.masks_value(a.id()))
+    }
+
+    /// Whether its value is masked: flagged itself, or inside a masked container.
+    fn value_masked(&self) -> bool {
+        self.mask.masks_value(self.node.id()) || self.inside_masked()
+    }
+
+    /// Whether its key is masked: flagged itself, or inside a masked container.
+    fn key_masked(&self) -> bool {
+        self.mask.masks_key(self.node.id()) || self.inside_masked()
+    }
+
+    /// The first node after its subtree: its subtree is the ids from its own up to this one.
+    #[must_use]
+    pub const fn subtree_end(&self) -> NodeId {
+        self.node.subtree_end()
+    }
+
     /// Its id on the tape.
     #[must_use]
     pub const fn id(&self) -> NodeId {
@@ -170,7 +192,7 @@ impl<'v, 'a> ViewNode<'v, 'a> {
     /// # Errors
     /// A key that does not decode, which a tape never holds.
     pub fn key(&self) -> Result<Option<ViewText<'a>>, JsonError> {
-        let masked = self.mask.masks_key(self.node.id());
+        let masked = self.key_masked();
         Ok(self
             .node
             .key()?
@@ -182,7 +204,7 @@ impl<'v, 'a> ViewNode<'v, 'a> {
     /// # Errors
     /// As [`ViewNode::key`].
     pub fn key_is(&self, name: &str) -> Result<bool, JsonError> {
-        if self.mask.masks_key(self.node.id()) {
+        if self.key_masked() {
             return Ok(false);
         }
         self.node.key_is(name)
@@ -196,7 +218,7 @@ impl<'v, 'a> ViewNode<'v, 'a> {
         Ok(self
             .node
             .member(name)?
-            .filter(|n| !self.mask.masks_key(n.id()))
+            .filter(|n| !self.wrap(*n).key_masked())
             .map(|n| self.wrap(n)))
     }
 
@@ -208,7 +230,7 @@ impl<'v, 'a> ViewNode<'v, 'a> {
         if self.node.kind() != Kind::String {
             return Ok(None);
         }
-        if self.mask.masks_value(self.node.id()) {
+        if self.value_masked() {
             return Ok(Some(ViewText::Masked));
         }
         Ok(self.node.str_value()?.map(ViewText::Plain))
@@ -218,7 +240,7 @@ impl<'v, 'a> ViewNode<'v, 'a> {
     #[must_use]
     pub fn number_text(&self) -> Option<ViewText<'a>> {
         let text = self.node.number_text()?;
-        if self.mask.masks_value(self.node.id()) {
+        if self.value_masked() {
             return Some(ViewText::Masked);
         }
         Some(ViewText::Plain(Cow::Borrowed(text)))

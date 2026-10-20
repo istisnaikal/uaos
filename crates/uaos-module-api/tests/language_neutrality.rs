@@ -27,7 +27,7 @@ use proptest::prelude::*;
 use uaos_json::{Limits, NodeId, parse};
 use uaos_module_api::{
     Code, Mask, ModuleState, ModuleText, Predicate, Selector, Step, StructuralView, TextError, ViewText,
-    is_explicit_bidi,
+    is_explicit_bidi, is_tag,
 };
 
 /// One sample per GA locale. Invisible and combining characters are written as escapes.
@@ -262,12 +262,53 @@ proptest! {
         match ModuleText::new(s.clone()) {
             Ok(text) => {
                 prop_assert_eq!(text.as_str().as_bytes(), s.as_bytes());
-                let refused = |c: char| (c.is_control() && c != '\n' && c != '\t') || is_explicit_bidi(c);
+                let refused = |c: char| {
+                    (c.is_control() && !matches!(c, '\n' | '\r' | '\t')) || is_explicit_bidi(c) || is_tag(c)
+                };
                 prop_assert!(!s.chars().any(refused), "accepted text holds a refused character");
             }
-            Err(TextError::Control) => prop_assert!(s.chars().any(|c| c.is_control() && c != '\n' && c != '\t')),
+            Err(TextError::Control) => prop_assert!(s.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))),
+            Err(TextError::Tag) => prop_assert!(s.chars().any(is_tag)),
             Err(TextError::Bidi) => prop_assert!(s.chars().any(is_explicit_bidi)),
             Err(other) => prop_assert!(false, "unexpected refusal {other:?}"),
         }
+    }
+}
+
+#[test]
+fn keys_never_fold_case() {
+    let body = r#"{"Straße":1,"İstanbul":2,"ı":3}"#;
+    let tape = parse(body.as_bytes(), &Limits::DEFAULT).unwrap();
+    let none = Mask::new();
+    let view = StructuralView::new(&tape, &none);
+    let found = |key: &str| {
+        Selector::new(vec![Step::Key(key.into())])
+            .unwrap()
+            .resolve(&view)
+            .unwrap()
+            .len()
+    };
+    for (stored, asked) in [
+        ("Straße", "strasse"),
+        ("Straße", "STRASSE"),
+        ("İstanbul", "istanbul"),
+        ("ı", "i"),
+        ("ı", "I"),
+    ] {
+        assert_eq!(found(stored), 1, "{stored:?} matches itself");
+        assert_eq!(found(asked), 0, "folded case: key {stored:?} matched {asked:?}");
+    }
+}
+
+#[test]
+fn module_text_takes_crlf_and_refuses_tag_characters() {
+    assert!(ModuleText::new("line one\r\nline two").is_ok(), "CRLF text was refused");
+    for c in ['\u{E0000}', '\u{E0041}', '\u{E007F}'] {
+        assert!(is_tag(c));
+        assert_eq!(
+            ModuleText::new(format!("hi{c}")),
+            Err(TextError::Tag),
+            "a tag character was accepted"
+        );
     }
 }

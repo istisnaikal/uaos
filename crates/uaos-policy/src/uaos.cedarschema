@@ -50,8 +50,8 @@ namespace Uaos {
     context: Ctx,
   };
 
-  // Reading another pocket's memory: default deny, like everything; a grant or a policy must
-  // name the source pocket (module socket contract §6.2).
+  // Reading a pocket's memory: default deny, like everything. For another pocket, only a live
+  // grant allows the read; a policy at most asks for one (module socket contract §6.2).
   action "memory.read" appliesTo {
     principal: [Agent, Human, Module, System],
     resource: [Pocket],

@@ -65,8 +65,9 @@ pub enum Action {
     BudgetTransfer,
     /// A configuration change.
     ConfigChange,
-    /// Reading another pocket's memory (C-44): default deny, allowed only by a grant or a policy
-    /// that names the source pocket (module socket contract §6.2).
+    /// Reading a pocket's memory (C-44): default deny. Reading another pocket is allowed only by
+    /// a live grant; a policy at most asks for one (module socket contract §6.2). Reading the
+    /// requesting pocket itself follows policy as any action does.
     MemoryRead,
 }
 

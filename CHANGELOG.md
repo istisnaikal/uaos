@@ -224,7 +224,13 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       with constructors, so they grow without a break.
     - V1 review (`docs/reviews/WP3.A4-module-socket.md`): 2 High, 8 Medium and 8 Low,
       resolved or assigned to the host (PR-8). A scoped second round (0 High, 2 Medium,
-      6 Low) is resolved too. 19 seeded violations.
+      6 Low) is resolved too. The final review (2 High, 6 Medium, 12 Low) is resolved but for
+      two Mediums on the grant path (M4, M5), which stay open. 26 seeded violations.
+    - A replay rebuilds a module's state and declares nothing (`EventView::replay`). Hooks see
+      frames and errors from before rehydration. One call of a module per pocket runs at a time.
+    - A strip may not enclose a forbidden role (`RoleMap::touching`, `RoleMap::may_strip`), and
+      a masked container masks everything inside it.
+    - `ModuleText` refuses Unicode tag characters and accepts CRLF.
     - **Language-neutral (ADR-0020).** No type names a locale. `ModuleText` keeps any language
       byte for byte and refuses explicit bidi controls (U+202A–U+202E, U+2066–U+2069). A
       seven-locale corpus (EN, TR, DE, FR, ES, IT, AR) crosses five stages with 0 byte

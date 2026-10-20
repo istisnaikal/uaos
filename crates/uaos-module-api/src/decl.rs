@@ -29,6 +29,9 @@ pub enum TextError {
     /// A control character other than a newline or a tab.
     #[error("module text holds a control character other than a newline or a tab")]
     Control,
+    /// A Unicode tag character (U+E0000 to U+E007F): text a model reads and a person cannot see.
+    #[error("module text holds a Unicode tag character (U+E0000-U+E007F)")]
+    Tag,
     /// An explicit bidirectional embedding, override or isolate (ADR-0020 rule 5).
     #[error("module text holds an explicit bidirectional control (U+202A-U+202E, U+2066-U+2069)")]
     Bidi,
@@ -40,6 +43,13 @@ pub enum TextError {
 #[must_use]
 pub const fn is_explicit_bidi(c: char) -> bool {
     matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Whether `c` is a Unicode tag character, U+E0000 to U+E007F. A model reads tag text that no
+/// display shows, so a module could append instructions an approver never sees.
+#[must_use]
+pub const fn is_tag(c: char) -> bool {
+    matches!(c, '\u{E0000}'..='\u{E007F}')
 }
 
 /// Text a module adds to a request: bounded, in any language and kept byte for byte (ADR-0020
@@ -60,11 +70,14 @@ impl ModuleText {
         if text.len() > MAX_MODULE_TEXT {
             return Err(TextError::TooLong);
         }
-        if text.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+        if text.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
             return Err(TextError::Control);
         }
         if text.chars().any(is_explicit_bidi) {
             return Err(TextError::Bidi);
+        }
+        if text.chars().any(is_tag) {
+            return Err(TextError::Tag);
         }
         Ok(Self(text))
     }
@@ -331,6 +344,13 @@ pub enum Strike {
     /// The call grew the module's state past its bound ([`crate::ModuleState::exceeded`]).
     #[error("the call grew the module's state past its bound")]
     StateExceeded,
+    /// A `CancelOp` naming an Operation that is not one of the module's own children; the host
+    /// checks it, since only the host knows the children.
+    #[error("a cancellation of an Operation that is not the module's own child")]
+    NotOwnChild,
+    /// A ranking naming a candidate outside the offer; the host checks it against the offer.
+    #[error("a ranking names a candidate outside the offer")]
+    UnknownCandidate,
     /// A declaration the point, or the hook's mode, does not allow.
     #[error("a declaration this point or mode does not allow")]
     NotAllowedHere,
@@ -354,6 +374,8 @@ impl Strike {
             Self::NotHooked => "not_hooked",
             Self::BoundExceeded => "bound_exceeded",
             Self::StateExceeded => "state_exceeded",
+            Self::NotOwnChild => "not_own_child",
+            Self::UnknownCandidate => "unknown_candidate",
             Self::NotAllowedHere => "not_allowed_here",
             Self::UndeclaredCode => "undeclared_code",
             Self::UndeclaredAction => "undeclared_action",
@@ -417,6 +439,9 @@ pub fn check_decls(manifest: &Manifest, point: Option<HookPoint>, decls: &[Decl]
                 {
                     return Err(Strike::FeatureNotRequired(feature));
                 }
+            }
+            Decl::CancelOp(_) if !manifest.requires().contains(&KernelFeature::ChildOperations) => {
+                return Err(Strike::FeatureNotRequired(KernelFeature::ChildOperations));
             }
             Decl::Checkpoint if !manifest.requires().contains(&KernelFeature::StateCheckpoints) => {
                 return Err(Strike::FeatureNotRequired(KernelFeature::StateCheckpoints));

@@ -5,7 +5,9 @@
 //!
 //! A selector resolves to node ids taken from the tape itself, in document order and without
 //! repeats, so it can never name anything outside the view. Its size is bounded (steps, nesting,
-//! keys, the values a predicate lists), so the kernel's cost to resolve it is bounded too.
+//! keys, the values a predicate lists), and each step visits a node at most once, even when the
+//! nodes selected so far are nested inside one another. Resolving therefore costs
+//! O(steps × nodes), times a predicate's bounded cost, whatever the document's shape.
 //!
 //! **Masked content is unknown, never probed.** A masked string equals no value and a masked key
 //! is no name, so a predicate's answer is the same whatever the masked text is.
@@ -266,7 +268,14 @@ impl Selector {
                 }
                 Step::AnyDepthKey(key) => {
                     let mut found = BTreeSet::new();
+                    // Nodes come in document order: one inside a subtree already walked adds
+                    // nothing, so it is skipped and no node is visited twice.
+                    let mut walked_to: Option<NodeId> = None;
                     for node in nodes {
+                        if walked_to.is_some_and(|end| node.id() < end) {
+                            continue;
+                        }
+                        walked_to = Some(node.subtree_end());
                         for below in node.descendants() {
                             if below.key_is(key).map_err(|_| SelectorError::Undecodable)? {
                                 found.insert(below.id());
