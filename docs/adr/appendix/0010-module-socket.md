@@ -40,13 +40,15 @@ waits for P5 sidecars.
 2. **Modules describe; the kernel acts** (D-1). A hook returns declarations (§4). Every effect a
    module wants is a child Operation (§6) that passes the same pipeline as any request: policy,
    reservation, journal, final scan, the one door.
-3. **Unforgeable capability.** `GrantRef` has no public constructor and no public fields. A
-   module obtains one only from the host, for a grant the manifest declared and policy issued;
-   the host re-checks it against the live grant at every use, so a stale or revoked one fails
-   closed.
+3. **A grant reference is not authority.** `GrantRef` only names a grant, and anyone can build
+   one. Authority is the live grant: at every use, the host checks the grant behind it for
+   holder, pocket, action, expiry and revocation. A reference that a module built, kept or
+   copied therefore grants nothing that policy does not grant at that moment. A missing, stale
+   or revoked grant fails closed.
 4. **No free text** (D-2). Reasons, labels and module event fields are manifest-declared codes
    and bounded numbers. Text a module adds (`ModuleText`) is bounded, detected and final-scanned
-   like any outbound byte.
+   like any outbound byte. It refuses control characters other than newline and tab, and the
+   explicit bidirectional controls U+202A–U+202E and U+2066–U+2069 (ADR-0020 rule 5).
 5. **Redacted by default.** A module sees the redacted structural view. No raw view exists at
    RC-1.
 6. **Pocket isolation.** A module's state, events and grants are per pocket (§5). Nothing
@@ -54,6 +56,10 @@ waits for P5 sidecars.
 7. **Fail closed at load.** A manifest the host cannot fully honour is refused, never loaded in
    part: an unknown `requires` feature, a hook point or mode the kernel does not offer, a bound
    above its ceiling, an undeclared code.
+8. **Language-neutral** (ADR-0020 rule 2). No type names a locale. Content in any language
+   crosses the view, the selectors, `ModuleText` and `ModuleState` byte for byte: nothing
+   normalizes it, case-folds it or reorders it. Codes are ASCII keys that a surface
+   translates.
 
 ## 3. The manifest (`uaos.module/1`)
 
@@ -182,8 +188,10 @@ explained.
   approval (ADR-0004, ADR-0012), scoped to one source pocket, one requesting pocket and an
   expiry, and carrying an **injection policy**: `auto`, `ask` or `never` (CLAUDE.md main flow 5).
 - **`GrantRef`** is how a module carries that consent into the request: the host hands the module
-  the refs for the grants its manifest declared that are live for the Operation's pocket; the
-  module cannot build or alter one.
+  the refs for the grants its manifest declared that are live for the Operation's pocket. The
+  reference is unforgeable in effect, as ADR-0010 requires, though not as a type: building
+  or keeping one confers nothing, because the host checks the live grant behind it at every
+  use (§2 rule 3).
 - **What comes back** is redacted, labelled with its provenance (source pocket, record, grant)
   and, with injection `ask`, held for the human before it may be appended at
   `context.assemble`. With `never`, it may inform ranking but never enter a prompt.
@@ -246,8 +254,8 @@ shows identifiers, lengths and counts only, never a view's content, state bytes 
 - manifest validation refuses each case of §2 rule 7, one test per refusal reason;
 - `requires` is compared by set: an unknown feature, and a feature the kernel lacks, are refused;
 - `ModuleState` refuses growth past its bound and leaves the state unchanged;
-- a `GrantRef` cannot be built outside the crate (`compile_fail` doctest) and carries no public
-  field;
+- a `GrantRef` is checked against the live grant at every use (the host's test, PR-8). Building
+  one confers nothing (§2 rule 3);
 - `AgentId` round-trips; an envelope without `agent_id` serializes exactly as before (the
   journal's exact-bytes hash chain must not change for old records);
 - `uaos.grant/1` round-trips and its schema is exported;
@@ -255,7 +263,12 @@ shows identifiers, lengths and counts only, never a view's content, state bytes 
   denied when the grant names another source pocket, another requesting pocket, or has expired;
   a forbid still wins (ADR-0008 Amendment 1);
 - selectors resolve to the expected node ids on generated tapes; a role map never assigns a role
-  to a node outside the view.
+  to a node outside the view;
+- **language neutrality** (`tests/language_neutrality.rs`, gate `language-neutrality`): a
+  seven-locale corpus crosses five stages with 0 byte differences: parse, the view, selectors,
+  `ModuleText`, and `ModuleState` checkpoint and restore. Two properties hold over arbitrary
+  strings. Selectors never fold case (Turkish i, German `ß`). NFC and NFD stay distinct.
+  `ModuleText` refuses explicit bidi controls and keeps the implicit marks.
 
 **Seeded violations** (`cargo xtask negative`):
 
@@ -266,6 +279,8 @@ shows identifiers, lengths and counts only, never a view's content, state bytes 
 | `agent-id-serialized-when-absent` | `skip_serializing_if` removed | the exact-bytes envelope test |
 | `cedar-cross-pocket-without-grant` | a default permit for `memory.read` | the cross-pocket denial test |
 | `selector-escapes-view` | the view bound check skipped in resolution | the role-map test |
+| `selector-folds-case` | string comparison in the view lower-cases both sides | `selectors_never_fold_case` |
+| `module-text-accepts-bidi-override` | the explicit bidi check skipped | `module_text_refuses_explicit_bidi_controls` |
 
 `schema-breaking-change` is re-proven over the new schemas.
 
