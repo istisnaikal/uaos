@@ -132,6 +132,61 @@ impl fmt::Debug for ModuleState {
     }
 }
 
+/// A hook's handle on its pocket's state, handed over by value for one call: the only way a
+/// module changes its state. It offers the bounded changes and nothing else, so a module can
+/// neither swap the host's state for another (which would clear `exceeded` and raise its bound)
+/// nor keep the handle past the call.
+pub struct StateMut<'s> {
+    state: &'s mut ModuleState,
+}
+
+impl<'s> StateMut<'s> {
+    /// A handle on `state` for one call. The host builds it.
+    #[must_use]
+    pub const fn new(state: &'s mut ModuleState) -> Self {
+        Self { state }
+    }
+
+    /// The bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.state.as_bytes()
+    }
+
+    /// The bound, in bytes.
+    #[must_use]
+    pub const fn limit(&self) -> u32 {
+        self.state.limit()
+    }
+
+    /// As [`ModuleState::replace`].
+    ///
+    /// # Errors
+    /// [`StateError`] past the bound; the state is unchanged and marked exceeded.
+    pub fn replace(&mut self, bytes: &[u8]) -> Result<(), StateError> {
+        self.state.replace(bytes)
+    }
+
+    /// As [`ModuleState::append`].
+    ///
+    /// # Errors
+    /// [`StateError`] past the bound; the state is unchanged and marked exceeded.
+    pub fn append(&mut self, bytes: &[u8]) -> Result<(), StateError> {
+        self.state.append(bytes)
+    }
+
+    /// Empties the state.
+    pub fn clear(&mut self) {
+        self.state.clear();
+    }
+}
+
+impl fmt::Debug for StateMut<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&*self.state, f)
+    }
+}
+
 /// How far a module's state for a pocket reflects that pocket's journaled events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PocketCursor {

@@ -192,7 +192,7 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `memory.read` on it; the policy model gains `Action::MemoryRead` and `Resource::Pocket`. Such a
     read is denied by default and allowed only by a grant that names its holder, the source
     pocket and the reading pocket while it lives. A permit alone, named or blanket, only asks
-    for that consent, and a forbid still wins over a grant
+    for that consent (a read of the own pocket follows policy as any action does), and a forbid still wins over a grant
     (`cross_pocket_memory_reads_need_a_grant`, `a_permit_alone_only_asks_for_a_cross_pocket_read`).
     `uaos.grant/1` refuses a `memory.read` grant off a pocket and a pocket grant for any other
     action.
@@ -205,20 +205,26 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - Declarations checked against the manifest and the point (`check_decls`, one strike per
       reason). Nothing is declared at a point the module did not hook. Event value names,
       tools and configuration keys must be declared, and a child Operation's correlation tag
-      is a number, so no word from content reaches journal metadata.
-    - Pocket-scoped `ModuleState`, bounded at 64 KiB. A refused change marks the state
-      `exceeded`, so the host keeps a call whole or strikes it whole. The `PocketCursor` moves
+      is a number, so no word from content reaches journal metadata through a code or an
+      event. Selector keys and values may come from content, so the host journals only their
+      counts.
+    - Pocket-scoped `ModuleState`, bounded at 64 KiB, reached by a hook only through a
+      `StateMut` handle it cannot swap. A refused change marks the state `exceeded`, so the
+      host keeps a call whole or strikes it whole. The `PocketCursor` moves
       forward and only on its own pocket's events.
     - The redacted structural view and ADR-0014's selectors, with bounded predicates.
       Detection's mask covers keys and numbers as well as strings. Masked text is unknown: it
       equals no value and matches no name, so no predicate's answer depends on it.
-    - Endpoint path patterns match canonical paths by whole segments.
+    - Endpoint path patterns match canonical paths by whole segments. `classify` denies a path
+      that is not canonical or matches no endpoint, and picks the most restrictive class on
+      overlap.
     - Role maps, and the `uaos.adapter/1` codec trait.
     - Every `Debug` shows sizes and identifiers only, selectors and stream frames included.
     - The inputs a module receives (`OpMeta`, `Candidate`, `EventView`) are `#[non_exhaustive]`
       with constructors, so they grow without a break.
     - V1 review (`docs/reviews/WP3.A4-module-socket.md`): 2 High, 8 Medium and 8 Low,
-      resolved or assigned to the host (PR-8). 16 seeded violations.
+      resolved or assigned to the host (PR-8). A scoped second round (0 High, 2 Medium,
+      6 Low) is resolved too. 19 seeded violations.
     - **Language-neutral (ADR-0020).** No type names a locale. `ModuleText` keeps any language
       byte for byte and refuses explicit bidi controls (U+202A–U+202E, U+2066–U+2069). A
       seven-locale corpus (EN, TR, DE, FR, ES, IT, AR) crosses five stages with 0 byte

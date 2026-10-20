@@ -552,11 +552,13 @@ fn any_principal(n: u8) -> Principal {
 }
 
 fn any_target(n: u8) -> (Action, Resource) {
-    match n % 5 {
+    match n % 6 {
         0 => (Action::Exec, Resource::Tool(Name::new("git").unwrap())),
         1 => (Action::Exec, Resource::Tool(Name::new("curl").unwrap())),
         2 => (Action::ToolCall, Resource::Tool(Name::new("git").unwrap())),
         3 => (Action::ConfigChange, Resource::ConfigKey(Name::new("git").unwrap())),
+        // Pockets 0 and 1, like the requests' pockets: some reads cross, some stay home.
+        4 => (Action::MemoryRead, Resource::Pocket(pocket((n / 6) % 2))),
         _ => (Action::ModelCall, model("anthropic", "m")),
     }
 }
@@ -612,9 +614,10 @@ proptest! {
 
     /// Grants are matched natively; with any policy set that has no ask policies, the result
     /// equals compiling each grant to its permit. Principals, actions, resources, pockets,
-    /// expiry, risk tiers and data classes all vary (V1 review M-3). `memory.read` is outside
-    /// this equivalence on purpose: a permit is never consent for a cross-pocket read, so its
-    /// compiled form only asks (`a_permit_alone_only_asks_for_a_cross_pocket_read`).
+    /// expiry, risk tiers and data classes all vary (V1 review M-3). A cross-pocket `memory.read`
+    /// is the one place the two differ, by design: a permit is never consent, so where a native
+    /// grant allows, its compiled permit only asks. There the property checks that both deny
+    /// alike, and that nothing but a grant allows (PR-4 scoped review F4).
     #[test]
     fn native_grants_equal_their_permits(
         grants in prop::collection::vec((any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>()), 0..5),
@@ -644,7 +647,14 @@ proptest! {
         r.now_ms = NOW + req.3;
         r.risk_tier = RiskTier::new(req.4 % 4).unwrap();
         r.data_classes = any_classes(req.4 >> 2);
-        prop_assert_eq!(native.authorize(&r).effect, compiled.authorize(&r).effect);
+        let (n, c) = (native.authorize(&r), compiled.authorize(&r));
+        if r.action == Action::MemoryRead && r.resource != Resource::Pocket(r.pocket) {
+            prop_assert_eq!(n.effect == Effect::Deny, c.effect == Effect::Deny);
+            prop_assert!(n.effect != Effect::Allow || n.basis == Basis::Granted, "a cross-pocket read allowed without a grant");
+            prop_assert!(c.effect != Effect::Allow, "a permit allowed a cross-pocket read");
+        } else {
+            prop_assert_eq!(n.effect, c.effect);
+        }
     }
 
     /// Distinct principals and resources never share a Cedar identity, so neither grants nor
@@ -889,6 +899,19 @@ fn a_permit_alone_only_asks_for_a_cross_pocket_read() {
         named_only.authorize(&read(3, 2)).effect,
         Effect::Deny,
         "the permit names another pocket"
+    );
+    // Reading the requesting pocket itself crosses nothing: no consent loop, ordinary policy.
+    let own = PolicyEngine::load(blanket, &[], NOW).unwrap().authorize(&read(1, 1));
+    assert_eq!(
+        (own.effect, own.basis),
+        (Effect::Allow, Basis::Permitted),
+        "a read of the own pocket asked for consent"
+    );
+    let none = PolicyEngine::load("", &[], NOW).unwrap();
+    assert_eq!(
+        none.authorize(&read(1, 1)).effect,
+        Effect::Deny,
+        "default deny still holds"
     );
 
     let grant = Grant {

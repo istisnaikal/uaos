@@ -16,7 +16,8 @@ use crate::decl::MAX_EVENT_VALUES;
 pub const MAX_STATE_BYTES: u32 = 64 * 1024;
 /// The most declarations one hook call may return.
 pub const MAX_DECLS: u16 = 64;
-/// The most codes of one kind (reasons, labels, events) a manifest may declare.
+/// The most entries of one kind a manifest may declare: reasons, labels, events, targets or
+/// grants.
 pub const MAX_CODES: usize = 64;
 /// The largest configuration schema, in bytes.
 pub const MAX_CONFIG_SCHEMA_BYTES: usize = 16 * 1024;

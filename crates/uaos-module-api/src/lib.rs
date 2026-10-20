@@ -44,7 +44,7 @@ mod view;
 pub use code::{Code, CodeError, MAX_CODE_LEN};
 pub use codec::{
     CodecError, DialectCodec, EndpointClass, EndpointDecl, FrameKind, Method, PathError, PathPattern, Role, RoleMap,
-    SseEvent, UsageReport,
+    SseEvent, UsageReport, classify,
 };
 pub use decl::{
     AppendSlot, CandidateId, ChildBody, ChildOpRequest, Decl, DeclError, Decls, MAX_EVENT_VALUES, MAX_MODULE_TEXT,
@@ -61,5 +61,5 @@ pub use selector::{
     MAX_PREDICATE_DEPTH, MAX_PREDICATE_VALUES, MAX_SELECTOR_STEPS, MAX_SELECTOR_TEXT, Predicate, Selector,
     SelectorError, Step,
 };
-pub use state::{ModuleState, PocketCursor, StateCheckpoint, StateError};
+pub use state::{ModuleState, PocketCursor, StateCheckpoint, StateError, StateMut};
 pub use view::{Mask, StructuralView, ViewNode, ViewText};

@@ -18,8 +18,8 @@ contract, `AgentId` and `uaos.grant/1`, the Cedar `Pocket` entity with `memory.r
 **Resolution:** both Highs, every Medium but M8, and every Low are fixed in this PR, each with a
 test and, where a seeded bug can show the test bites, a seeded violation (16 in all). M8 and the
 parts of L5 and L8 that belong to the host are assigned to PR-8, with the contract saying so
-(§12). Under D-31, a scoped round over the fixes follows, then a final fresh full review before
-the PR leaves draft.
+(§12). The D-31 scoped round over the fixes found 0 High, 2 Medium and 6 Low, resolved below.
+A final fresh full review follows before the PR leaves draft.
 
 ## Findings and what was done
 
@@ -62,3 +62,25 @@ the PR leaves draft.
   `Candidate` and `EventView` were not. They are now, with constructors.
 - A stray `|||||||` conflict marker from an earlier local rebase of this branch was in
   `CHANGELOG.md`. It was removed before the review; it was never on main.
+
+## Second round, scoped to the fixes (D-31)
+
+**Reviewed:** `23450d5..3df85dd` and every invariant and caller it touches, by a fresh-context
+agent, 2026-10-20.
+**Result:** 0 High · 2 Medium · 6 Low.
+**Verified closed:** H1 (every accessor and selector step goes through the mask), H2 and M2, M3
+(12 refusal and 8 strike codes, exactly §10's), L4, L6, L7 (the journal writes with the same
+serializer the golden test uses), canonical paths, and all 16 seeds.
+
+| | Finding | Fix | Proof |
+|---|---|---|---|
+| F1 (M) | A hook got `&mut ModuleState`, and `new` and `restore` are public, so a module could replace the whole state. That cleared `exceeded` and raised its bound to 64 KiB, and the host kept the call; the resulting checkpoint could never be restored. The M4 fix had written this hole into §5. | Hooks get a `StateMut` handle, by value and for one call. It offers the bounded changes only, so the module cannot swap the state or keep the handle (§5). | The type: `Module::on_hook` and `on_event` take `StateMut`; `a_call_that_outgrows_its_state_is_struck_whole` runs through it |
+| F2 (M) | Nothing said what a path no endpoint matches gets, or which class wins on overlap, so a host could forward unmatched or non-canonical paths without detection. | `classify(endpoints, method, path)`: `denied` when the path is not canonical or nothing matches; the most restrictive class on overlap (§7). | `an_endpoint_s_class_is_the_strictest_match_and_unknown_paths_are_denied`; negative `endpoint-unmatched-not-denied` |
+| F3 (L) | The consent rule caught a read of the requesting pocket itself, an approval loop that could never end: a grant for the own pocket is invalid. | Only a read of another pocket needs a grant; the own pocket follows policy (§6.2). | `a_permit_alone_only_asks_for_a_cross_pocket_read`; negative `cedar-own-pocket-read-asks` |
+| F4 (L) | The grant property's generator never produced `memory.read`, and its comment presented that gap as a design choice. | The generator produces `memory.read`, on the requests' own pockets and on others. Off-pocket, the property checks that native and compiled deny alike and that only a grant allows. 20,000 cases pass. | `native_grants_equal_their_permits` |
+| F5 (L) | `Rank(vec![])` passed and vetoed the route without a reason; ids outside the offer were not mentioned. | An empty ranking is a strike; §4 says the host strikes an id outside the offer. | `an_empty_ranking_is_a_strike`; negative `module-rank-empty-accepted` |
+| F6 (L) | `Strip` selectors still carry strings a module may copy from content. | §2 rule 4: the host never journals or explains a selector's keys or values, only counts. The CHANGELOG claim is narrowed. | Contract §2 |
+| F7 (L) | Weak tests: `ModeUnavailable` for one point only; refusal codes partly; masked keys under predicates; bounds on targets and grants. | Every point is tried with an acting hook; both §10 code lists are compared exactly; a masked key, even one spelling the predicate's own name, is absent to every predicate; targets and grants are bounded. | `only_acting_points_take_an_acting_hook`, `every_code_is_one_the_contract_lists`, `a_masked_key_cannot_be_probed`, `targets_and_grants_are_bounded` |
+| F8 (L) | Docs: the `MAX_CODES` comment, the `grants` bound in §3, and `SseEvent` not `#[non_exhaustive]`. | All three fixed; `SseEvent::new` is the host's constructor. | Contract §3, §9 |
+
+Under D-31, a final fresh full review of the whole PR follows before it leaves draft.

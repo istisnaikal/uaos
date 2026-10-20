@@ -21,7 +21,8 @@ use uaos_module_api::{
     CandidateId, ChildBody, ChildKind, ChildOpRequest, Code, ConfigSchema, Decl, DeclError, Decls, EventClass,
     EventDecl, EventView, GrantDecl, HookCx, HookDecl, HookMode, HookPoint, KernelFeature, KernelOffer, MAX_DECLS,
     MAX_MODULE_TEXT, MAX_RANK, MAX_STATE_BYTES, Manifest, ManifestBuilder, ManifestError, Module, ModuleApiVersion,
-    ModuleEvent, ModuleState, ModuleText, ModuleVersion, OpMeta, PocketCursor, Refusal, Strike, TextError, check_decls,
+    ModuleEvent, ModuleState, ModuleText, ModuleVersion, OpMeta, PocketCursor, Refusal, StateMut, Strike, TextError,
+    check_decls,
 };
 
 const V1: ModuleVersion = ModuleVersion {
@@ -498,7 +499,7 @@ impl Module for Counter {
         &self.0
     }
 
-    fn on_hook(&self, cx: &HookCx<'_>, state: &mut ModuleState, out: &mut Decls) {
+    fn on_hook(&self, cx: &HookCx<'_>, mut state: StateMut<'_>, out: &mut Decls) {
         let seen = state.as_bytes().len();
         // The append is attempted every call; past the bound it is refused and marks the state.
         let grew = state.append(&[1]).is_ok();
@@ -513,7 +514,7 @@ impl Module for Counter {
 fn host_call(module: &dyn Module, cx: &HookCx<'_>, state: &mut ModuleState) -> Result<Vec<Decl>, Strike> {
     let mut copy = state.clone();
     let mut out = Decls::new(module.manifest().max_decls());
-    module.on_hook(cx, &mut copy, &mut out);
+    module.on_hook(cx, StateMut::new(&mut copy), &mut out);
     if copy.exceeded() {
         return Err(Strike::StateExceeded);
     }
@@ -551,8 +552,145 @@ fn a_call_that_outgrows_its_state_is_struck_whole() {
     let event_type = EventType::new("op.created").unwrap();
     module.on_event(
         &EventView::new(pocket(1), Seq(1), &event_type, None),
-        &mut state,
+        StateMut::new(&mut state),
         &mut out,
     );
     assert!(out.is_empty(), "the default on_event declares nothing");
+}
+
+#[test]
+fn only_acting_points_take_an_acting_hook() {
+    let mut observe_only = Vec::new();
+    for point in HookPoint::ALL {
+        let b = point
+            .required_feature()
+            .into_iter()
+            .fold(builder(), ManifestBuilder::requires)
+            .hook(HookDecl::new(point, HookMode::Act));
+        match b.build() {
+            Ok(_) => assert!(point.acts()),
+            Err(e) => {
+                assert_eq!(e, ManifestError::ModeUnavailable(point), "{point:?}");
+                observe_only.push(point);
+            }
+        }
+    }
+    assert_eq!(
+        observe_only,
+        [
+            HookPoint::StreamObserve,
+            HookPoint::ResponsePost,
+            HookPoint::ErrorTranslate
+        ]
+    );
+}
+
+#[test]
+fn every_code_is_one_the_contract_lists() {
+    // Contract §10, both lists, exactly.
+    let refusals: BTreeSet<&str> = [
+        "feature_missing",
+        "api_major",
+        "api_minor_ahead",
+        "bound_exceeded",
+        "undeclared_code",
+        "point_unavailable",
+        "duplicate_hook",
+        "feature_not_required",
+        "duplicate_event",
+        "grant_without_action",
+        "default_on_reaches_outside",
+        "config_schema",
+    ]
+    .into_iter()
+    .collect();
+    let strikes: BTreeSet<&str> = [
+        "too_many",
+        "not_hooked",
+        "not_allowed_here",
+        "undeclared_code",
+        "undeclared_action",
+        "feature_not_required",
+        "bound_exceeded",
+        "state_exceeded",
+    ]
+    .into_iter()
+    .collect();
+    let p = HookPoint::Classify;
+    let f = KernelFeature::StreamAssert;
+    let manifest = [
+        ManifestError::DuplicateHook(p),
+        ManifestError::Deadline {
+            point: p,
+            ceiling_us: 200,
+        },
+        ManifestError::FeatureNotRequired(f),
+        ManifestError::StateTooLarge { max: 1 },
+        ManifestError::Decls { max: 1 },
+        ManifestError::TooManyCodes { max: 1 },
+        ManifestError::DuplicateEvent(code("x1")),
+        ManifestError::GrantWithoutAction,
+        ManifestError::UndeclaredCode(code("x1")),
+        ManifestError::ModeUnavailable(p),
+        ManifestError::DefaultOnReachesOutside,
+        ManifestError::ConfigSchema,
+    ];
+    let admission = [
+        Refusal::ApiMajor {
+            kernel_major: 1,
+            module_major: 2,
+        },
+        Refusal::ApiMinorAhead {
+            kernel_minor: 0,
+            module_minor: 1,
+        },
+        Refusal::FeatureMissing(f),
+    ];
+    let produced: BTreeSet<&str> = manifest
+        .iter()
+        .map(ManifestError::code)
+        .chain(admission.iter().map(Refusal::code))
+        .collect();
+    assert_eq!(produced, refusals, "the refusal codes differ from contract §10");
+    let struck: BTreeSet<&str> = [
+        Strike::TooMany,
+        Strike::NotHooked,
+        Strike::NotAllowedHere,
+        Strike::UndeclaredCode,
+        Strike::UndeclaredAction,
+        Strike::FeatureNotRequired(f),
+        Strike::BoundExceeded,
+        Strike::StateExceeded,
+    ]
+    .iter()
+    .map(Strike::code)
+    .collect();
+    assert_eq!(struck, strikes, "the strike codes differ from contract §10");
+}
+
+#[test]
+fn targets_and_grants_are_bounded() {
+    let targets = (0..=64).fold(builder(), |b, i| b.target(code(&format!("t{i}"))));
+    assert_eq!(targets.build(), Err(ManifestError::TooManyCodes { max: 64 }));
+    let base = builder()
+        .requires(KernelFeature::ChildOperations)
+        .action(ChildKind::ModelCall)
+        .reason(code("rewrite"));
+    let grants = (0..=64).fold(base, |b, _| {
+        b.grant(GrantDecl {
+            kind: ChildKind::ModelCall,
+            why: code("rewrite"),
+        })
+    });
+    assert_eq!(grants.build(), Err(ManifestError::TooManyCodes { max: 64 }));
+}
+
+#[test]
+fn an_empty_ranking_is_a_strike() {
+    let m = acting_manifest();
+    assert_eq!(
+        check_decls(&m, Some(HookPoint::RouteDecide), &[Decl::Rank(Vec::new())]),
+        Err(Strike::BoundExceeded),
+        "an empty ranking vetoed the route without a reason"
+    );
 }
