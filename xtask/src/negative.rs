@@ -2572,7 +2572,7 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // V1 review H1: a key detection flagged reads as masked.
-            seed: replace("crates/uaos-module-api/src/view.rs", "let masked = self.mask.masks_key(self.node.id());", "let masked = false;"),
+            seed: replace("crates/uaos-module-api/src/view.rs", "let masked = self.key_masked();", "let masked = false;"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-module-api", "--test", "view", "masked_keys_and_numbers_read_as_masked"],
@@ -2584,7 +2584,7 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // V1 review H1: a member whose key is masked is never found by name.
-            seed: replace("crates/uaos-module-api/src/view.rs", ".filter(|n| !self.mask.masks_key(n.id()))", ".filter(|_| true)"),
+            seed: replace("crates/uaos-module-api/src/view.rs", ".filter(|n| !self.wrap(*n).key_masked())", ".filter(|_| true)"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-module-api", "--test", "view", "masked_keys_and_numbers_read_as_masked"],
@@ -2714,6 +2714,90 @@ The journal is tamper-proof.
                 args: &["test", "-p", "uaos-module-api", "--test", "socket", "an_empty_ranking_is_a_strike"],
             },
             expect: "an empty ranking vetoed the route without a reason",
+        },
+        Case {
+            id: "view-masked-container-leaks",
+            gate: "test",
+            tool: None,
+            // Final review L12: masking a container masks everything inside it.
+            seed: replace("crates/uaos-module-api/src/view.rs", "self.node.ancestors().any(|a| self.mask.masks_value(a.id()))", "self.node.ancestors().any(|_| false)"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_masked_container_masks_everything_inside"],
+            },
+            expect: "inside a masked container was",
+        },
+        Case {
+            id: "role-check-ancestors-only",
+            gate: "test",
+            tool: None,
+            // Final review M2: an edit's role check covers the node's whole subtree, not only its ancestors.
+            seed: replace("crates/uaos-module-api/src/codec.rs", "for (_, inside) in self.roles.range(id..node.subtree_end()) {", "for (_, inside) in self.roles.range(id..id) {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_strip_never_encloses_a_forbidden_role"],
+            },
+            expect: "an edit's roles missed its subtree",
+        },
+        Case {
+            id: "replay-declares-again",
+            gate: "test",
+            tool: None,
+            // Final review H2: an event delivered by a replay is marked, so its declarations are discarded.
+            seed: replace("crates/uaos-module-api/src/module.rs", "self.replay = true;", "self.replay = false;"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "a_replay_rebuilds_state_and_declares_nothing"],
+            },
+            expect: "a replay requested a child Operation again",
+        },
+        Case {
+            id: "module-text-accepts-tag",
+            gate: "test",
+            tool: None,
+            // Final review L10: module text refuses Unicode tag characters.
+            seed: replace("crates/uaos-module-api/src/decl.rs", "if text.chars().any(is_tag) {", "if text.chars().any(|_| false) {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "language_neutrality", "module_text_takes_crlf_and_refuses_tag_characters"],
+            },
+            expect: "a tag character was accepted",
+        },
+        Case {
+            id: "path-parameter-canonical",
+            gate: "test",
+            tool: None,
+            // Final review L11: a path parameter (`;`) is not canonical.
+            seed: replace("crates/uaos-module-api/src/codec.rs", "['?', '#', '%', ';', '\\\\']", "['?', '#', '%', '\\\\']"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "path_patterns_match_canonical_paths_by_segment"],
+            },
+            expect: "matched a pattern it should not",
+        },
+        Case {
+            id: "module-cancel-without-feature",
+            gate: "test",
+            tool: None,
+            // Final review L3: cancelling a child Operation needs child_operations.
+            seed: replace("crates/uaos-module-api/src/decl.rs", "Decl::CancelOp(_) if !manifest.requires().contains(&KernelFeature::ChildOperations) => {", "Decl::CancelOp(_) if false => {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "cancelling_a_child_needs_child_operations"],
+            },
+            expect: "a cancellation was accepted without child_operations",
+        },
+        Case {
+            id: "chunk-lost-drops-agent",
+            gate: "test",
+            tool: None,
+            // Contract §8: a chunk.lost record carries the agent of the record it reports.
+            seed: replace("crates/uaos-state/src/journal/writer.rs", "agent_id: referencing.agent_id,", "agent_id: None,"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-state", "--test", "durability", "a_lost_payload_record_names_the_agent_of_the_record_it_reports"],
+            },
+            expect: "a lost-payload record dropped the agent",
         },
     ]
 }

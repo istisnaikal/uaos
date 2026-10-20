@@ -33,7 +33,7 @@ use std::time::Duration;
 use proptest::prelude::*;
 use uaos_contracts::digest::ChunkRef;
 use uaos_contracts::event::{Actor, Durability, Metadata, types};
-use uaos_contracts::id::{CorrelationId, PocketId, TypedId};
+use uaos_contracts::id::{AgentId, CorrelationId, PocketId, TypedId};
 use uaos_contracts::limits::Millis;
 use uaos_contracts::operation::{RiskTier, SideEffectClass};
 use uaos_contracts::time::WallTime;
@@ -565,6 +565,33 @@ fn a_failed_payload_flush_stops_the_writer_until_recovery_reports_the_loss() {
     );
     drop(journal);
     assert!(w.survey().1.contains(&seq), "the loss is journaled as chunk.lost");
+}
+
+/// A `chunk.lost` record carries the agent of the record whose payload it reports, so per-agent
+/// attribution survives a loss (module socket contract §8).
+#[test]
+fn a_lost_payload_record_names_the_agent_of_the_record_it_reports() {
+    let w = World::new(4);
+    let store = w.store();
+    let mut journal = w.open(&store).unwrap();
+    let agent = AgentId::from_parts(9, [9; 10]);
+    let chunk = store.put(pocket(), &content(1)).unwrap();
+    let mut referencing = draft(Some(pocket()), Some(chunk), 1);
+    referencing.agent_id = Some(agent);
+    let seq = journal.append(referencing).unwrap().seq.0;
+    w.sim.fail_next_sync();
+    assert_eq!(journal.sync(), Err(JournalError::PayloadFlushFailed));
+    journal.recover().unwrap();
+    drop(journal);
+    let (records, _) = read_verified(&w.sim, &w.data.join(JOURNAL_DIR)).unwrap();
+    let lost: Vec<_> = records
+        .iter()
+        .map(|r| &r.envelope)
+        .filter(|e| e.event_type == types::CHUNK_LOST)
+        .collect();
+    assert_eq!(lost.len(), 1);
+    assert_eq!(lost[0].metadata.as_map()[RECORD_SEQ_METADATA_KEY], seq.to_string());
+    assert_eq!(lost[0].agent_id, Some(agent), "a lost-payload record dropped the agent");
 }
 
 #[test]

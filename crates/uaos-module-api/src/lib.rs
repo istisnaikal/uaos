@@ -42,13 +42,14 @@ mod state;
 mod view;
 
 pub use code::{Code, CodeError, MAX_CODE_LEN};
+// The tape types the view's API names, so a Ring 1 module needs no edge to `uaos-json`.
 pub use codec::{
     CodecError, DialectCodec, EndpointClass, EndpointDecl, FrameKind, Method, PathError, PathPattern, Role, RoleMap,
     SseEvent, UsageReport, classify,
 };
 pub use decl::{
     AppendSlot, CandidateId, ChildBody, ChildOpRequest, Decl, DeclError, Decls, MAX_EVENT_VALUES, MAX_MODULE_TEXT,
-    MAX_RANK, ModuleEvent, ModuleText, Strike, TextError, check_decls, is_explicit_bidi,
+    MAX_RANK, ModuleEvent, ModuleText, Strike, TextError, check_decls, is_explicit_bidi, is_tag,
 };
 pub use grant_ref::GrantRef;
 pub use manifest::{
@@ -62,4 +63,5 @@ pub use selector::{
     SelectorError, Step,
 };
 pub use state::{ModuleState, PocketCursor, StateCheckpoint, StateError, StateMut};
+pub use uaos_json::{JsonError, Kind, NodeId};
 pub use view::{Mask, StructuralView, ViewNode, ViewText};

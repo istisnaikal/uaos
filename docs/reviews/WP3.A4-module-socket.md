@@ -83,4 +83,39 @@ serializer the golden test uses), canonical paths, and all 16 seeds.
 | F7 (L) | Weak tests: `ModeUnavailable` for one point only; refusal codes partly; masked keys under predicates; bounds on targets and grants. | Every point is tried with an acting hook; both §10 code lists are compared exactly; a masked key, even one spelling the predicate's own name, is absent to every predicate; targets and grants are bounded. | `only_acting_points_take_an_acting_hook`, `every_code_is_one_the_contract_lists`, `a_masked_key_cannot_be_probed`, `targets_and_grants_are_bounded` |
 | F8 (L) | Docs: the `MAX_CODES` comment, the `grants` bound in §3, and `SseEvent` not `#[non_exhaustive]`. | All three fixed; `SseEvent::new` is the host's constructor. | Contract §3, §9 |
 
-Under D-31, a final fresh full review of the whole PR follows before it leaves draft.
+A final fresh full review of the whole PR followed (round 3, below).
+
+## Final full review (D-31, round 3)
+
+**Reviewed:** the whole PR at `cd5a72e`, by a fresh-context agent, 2026-10-20.
+**Result:** 2 High · 6 Medium · 12 Low. The PR stays in draft.
+**Verified correct by the reviewer:**
+- the schemas and the golden envelope;
+- the `memory.read` rules;
+- `StateMut` closing F1;
+- all 19 seeds.
+
+| | Finding | What was done | Proof |
+|---|---|---|---|
+| H1 | Frames reached `stream.observe` after forwarding, which is after rehydration (ADR-0017), so a secret masked on the way out could come back to a module. `error.translate` had the same gap. | Contract §2 rule 5 and §4: frames and errors reach a hook as the provider sent them, before rehydration. A PR-8 proof obligation with a seeded violation (§12). | Contract |
+| H2 | A replay through `on_event` re-issued declarations: a restart without a checkpoint re-requested every past child Operation, repeating spend. | `EventView::replay` marks a replayed event. Contract §5: the host applies the state changes and discards every declaration. | `a_replay_rebuilds_state_and_declares_nothing`; negative `replay-declares-again` |
+| M1 | "As if the module had never stopped" was false: hook-time changes are not journaled, and two concurrent calls in one pocket could lose an update. | §5: the host runs at most one call of a module for one pocket at a time. The resume claim now says that hook changes after the latest checkpoint do not survive a restart, and how a module keeps them. | Contract; PR-8 obligation |
+| M2 | The role check walked ancestors only, so a strip of an enclosing node could remove a signed block. No role marked the newest tool result. | `RoleMap::touching` (ancestors plus the whole subtree, as a range of ids) and `RoleMap::may_strip`. A strip must lie inside the point's anchor and touch no forbidden role. New role `NewestToolResult`; `Role::forbids_edit`. | `a_strip_never_encloses_a_forbidden_role`; negative `role-check-ancestors-only` |
+| M3 | Nested `AnyDepthKey` walks repeated subtrees (94.6 ms for 16 steps on 16.7 KB). | A step skips nodes inside a subtree it already walked, so it visits each node at most once: O(steps × nodes). | `nested_any_depth_keys_resolve_once_each`, and the property `any_depth_keys_equal_the_naive_walk` against the naive walk. No seeded violation: removing the skip changes the cost, not the answer |
+| M4 | The policy engine matches grants without the grant the module carried, and cites the first. | **Open.** It changes the policy engine's `Request`; it waits for the maintainer's choice between this PR and a separate one before PR-8. | — |
+| M5 | `uaos.grant/1` is not yet the wire form of `model::Grant`: no provider, `DataClass` cannot hold dots, no human or system principal, no conversions. | **Open**, as M4. | — |
+| M6 | Rule 6 claimed pocket isolation as a type rule, though a module's own fields can carry data across pockets. | Rule 6 now states the limit: a module's own fields are outside the guarantee. A Ring 1 rule against interior mutability and statics is owned by PR-10. | Contract |
+| L1 | The §11 seed table missed three seeds. | The table lists all 26. | Contract §11 |
+| L2 | Stale "a grant or a policy" comments. | Fixed in `model.rs` and the Cedar schema. | — |
+| L3 | `CancelOp` passed without `child_operations`; no code for an id outside the module's children or the offer. | `CancelOp` needs the feature; `not_own_child` and `unknown_candidate` are strike codes the host uses. | `cancelling_a_child_needs_child_operations`, `every_code_is_one_the_contract_lists`; negative `module-cancel-without-feature` |
+| L4, L5 | `Code`'s `Debug` prints a struck word; module-built ids were journaled unchecked. | §2 rule 4: the host never formats a struck call's declarations, and checks module-built ids before journaling or explaining them. | Contract |
+| L6 | Module event naming was unresolved. | §8: the host journals module events as `module.event`, with the module name and the code as fields. | Contract |
+| L7 | The view's API named `uaos-json` types that module-api did not re-export. | `Kind`, `NodeId` and `JsonError` are re-exported. | — |
+| L8 | `EventDecl`, `GrantDecl`, `EndpointDecl` and `ModuleVersion` were not `#[non_exhaustive]`. | All four now are, with constructors (§9). | The tests build them through the constructors |
+| L9 | Weak tests: the selector property ran with an empty mask; case folding was untested for keys; the `chunk.lost` agent was untested. | The property masks random values and keys; `keys_never_fold_case`; `a_lost_payload_record_names_the_agent_of_the_record_it_reports`. | Negative `chunk-lost-drops-agent` |
+| L10 | `ModuleText` accepted Unicode tag characters and refused CR. | Tag characters are refused (`TextError::Tag`); CR is accepted. | `module_text_takes_crlf_and_refuses_tag_characters`; negative `module-text-accepts-tag` |
+| L11 | `canonical` accepted `;`. | A path parameter is not canonical. | Negative `path-parameter-canonical` |
+| L12 | A masked container masked nothing below it; strips were not said to resolve over the masked view; two assumptions had no mechanism behind them. | A masked container masks everything inside it. §2 rule 5 says strips resolve over the masked view. The pool clause is dropped, and note bodies are marked open (§12). | `a_masked_container_masks_everything_inside`; negative `view-masked-container-leaks` |
+
+Under D-31, the PR leaves draft only when no High or Medium remains: M4 and M5 must be fixed here
+or split out. A further fresh full review follows the fixes.

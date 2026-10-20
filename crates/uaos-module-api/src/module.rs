@@ -188,6 +188,10 @@ pub struct EventView<'e> {
     pub event_type: &'e EventType,
     /// The Operation it belongs to, if any.
     pub operation: Option<OperationId>,
+    /// Whether it is delivered by a replay that rebuilds the module's state (contract §5). The
+    /// host then applies the state changes only and discards every declaration, so a replay
+    /// never requests, emits or cancels anything twice.
+    pub replay: bool,
 }
 
 impl<'e> EventView<'e> {
@@ -199,7 +203,15 @@ impl<'e> EventView<'e> {
             seq,
             event_type,
             operation,
+            replay: false,
         }
+    }
+
+    /// The same event, delivered by a replay.
+    #[must_use]
+    pub const fn replayed(mut self) -> Self {
+        self.replay = true;
+        self
     }
 }
 

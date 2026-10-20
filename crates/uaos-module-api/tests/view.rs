@@ -249,6 +249,8 @@ fn path_patterns_match_canonical_paths_by_segment() {
         ("/v1/models/%2e%2e/messages", false),
         ("/v1/models//x", false),
         ("/v1/models/.", false),
+        ("/v1/models/..;/messages", false),
+        ("/v1/models;x", false),
         ("/v1\\models", false),
     ] {
         assert_eq!(
@@ -344,9 +346,18 @@ proptest! {
     /// repeats; a key step names only members with that key; a role map names only nodes it was
     /// given.
     #[test]
-    fn selectors_stay_inside_the_view(doc in json(), steps in steps()) {
+    fn selectors_stay_inside_the_view(doc in json(), steps in steps(), masked in prop::collection::vec((any::<u16>(), any::<bool>()), 0..4)) {
         let tape = parse(doc.as_bytes(), &Limits::DEFAULT).unwrap();
-        let mask = Mask::new();
+        // Mask a few nodes, values or keys, so the key checks below also prove a masked key is
+        // never selected by name.
+        let plain = Mask::new();
+        let ids: Vec<NodeId> = StructuralView::new(&tape, &plain).root().descendants().map(|n| n.id()).collect();
+        let mut mask = Mask::new();
+        for (pick, key) in &masked {
+            if let Some(id) = ids.get(usize::from(*pick) % ids.len().max(1)) {
+                if *key { mask.key(*id) } else { mask.value(*id) }
+            }
+        }
         let view = StructuralView::new(&tape, &mask);
         let last_is_key = match steps.last() {
             Some(Step::Key(k) | Step::AnyDepthKey(k)) => Some(k.clone()),
@@ -409,11 +420,7 @@ fn a_masked_key_cannot_be_probed() {
 
 #[test]
 fn an_endpoint_s_class_is_the_strictest_match_and_unknown_paths_are_denied() {
-    let decl = |path: &str, class| EndpointDecl {
-        method: Method::Post,
-        path: PathPattern::new(path).unwrap(),
-        class,
-    };
+    let decl = |path: &str, class| EndpointDecl::new(Method::Post, PathPattern::new(path).unwrap(), class);
     let endpoints = [
         decl("/v1/*", EndpointClass::Metadata),
         decl("/v1/messages", EndpointClass::Governed),
@@ -433,5 +440,128 @@ fn an_endpoint_s_class_is_the_strictest_match_and_unknown_paths_are_denied() {
             expected,
             "an endpoint got a weaker class: {path}"
         );
+    }
+}
+
+#[test]
+fn a_masked_container_masks_everything_inside() {
+    let body = br#"{"outer":{"k":"v","n":7,"deep":{"x":"y"}},"other":"o"}"#;
+    let tape = parse(body, &Limits::DEFAULT).unwrap();
+    let plain = Mask::new();
+    let outer = StructuralView::new(&tape, &plain)
+        .root()
+        .member("outer")
+        .unwrap()
+        .unwrap()
+        .id();
+    let mut mask = Mask::new();
+    mask.value(outer);
+    let view = StructuralView::new(&tape, &mask);
+    let outer = view.node(outer).unwrap();
+    assert!(
+        outer.member("k").unwrap().is_none(),
+        "a key inside a masked container was found"
+    );
+    for node in outer.descendants() {
+        assert!(
+            !matches!(node.key().unwrap(), Some(ViewText::Plain(_))),
+            "a key inside a masked container was readable"
+        );
+        assert!(
+            !matches!(node.text().unwrap(), Some(ViewText::Plain(_))),
+            "a string inside a masked container was readable"
+        );
+        assert!(
+            !matches!(node.number_text(), Some(ViewText::Plain(_))),
+            "a number inside a masked container was readable"
+        );
+    }
+    let other = view.root().member("other").unwrap().unwrap();
+    assert_eq!(other.text().unwrap(), Some(ViewText::Plain("o".into())));
+}
+
+#[test]
+fn a_strip_never_encloses_a_forbidden_role() {
+    use uaos_module_api::HookPoint;
+    let body =
+        br#"{"messages":[{"role":"user","content":[{"type":"thinking","signature":"s"},{"type":"text","text":"t"}]}]}"#;
+    let tape = parse(body, &Limits::DEFAULT).unwrap();
+    let mask = Mask::new();
+    let view = StructuralView::new(&tape, &mask);
+    let message = sel(messages()).resolve(&view).unwrap()[0];
+    let mut blocks = messages();
+    blocks.extend([Step::Key("content".into()), Step::Each]);
+    let blocks = sel(blocks).resolve(&view).unwrap();
+    let (thinking, text) = (blocks[0], blocks[1]);
+    let mut roles = RoleMap::new();
+    roles.assign(&view, &sel(messages()), Role::NewestHumanTurn).unwrap();
+    let mut signed = messages();
+    signed.extend([
+        Step::Key("content".into()),
+        Step::Each,
+        Step::Where(member_in("type", &["thinking"])),
+    ]);
+    roles.assign(&view, &sel(signed), Role::Signed).unwrap();
+
+    assert!(!roles.governing(&view, message).unwrap().contains(&Role::Signed));
+    assert!(
+        roles.touching(&view, message).unwrap().contains(&Role::Signed),
+        "an edit's roles missed its subtree"
+    );
+    assert!(
+        !roles.may_strip(&view, message, HookPoint::IngressParsed),
+        "a strip removed a signed block it encloses"
+    );
+    assert!(
+        !roles.may_strip(&view, thinking, HookPoint::IngressParsed),
+        "a strip removed a signed block"
+    );
+    assert!(roles.may_strip(&view, text, HookPoint::IngressParsed));
+    assert!(
+        !roles.may_strip(&view, text, HookPoint::ToolResult),
+        "a tool.result strip outside the tool result"
+    );
+    assert!(!roles.may_strip(&view, text, HookPoint::Classify));
+}
+
+#[test]
+fn nested_any_depth_keys_resolve_once_each() {
+    let body = br#"{"a":{"a":{"a":{"b":1}}},"c":{"a":2}}"#;
+    let tape = parse(body, &Limits::DEFAULT).unwrap();
+    let mask = Mask::new();
+    let view = StructuralView::new(&tape, &mask);
+    let first = sel(vec![Step::AnyDepthKey("a".into())]).resolve(&view).unwrap();
+    assert_eq!(first.len(), 4);
+    let second = sel(vec![Step::AnyDepthKey("a".into()), Step::AnyDepthKey("a".into())])
+        .resolve(&view)
+        .unwrap();
+    assert_eq!(second, first[1..3].to_vec(), "nested subtrees changed the answer");
+}
+
+/// The naive two-step `AnyDepthKey` walk, as an oracle for the one that skips covered subtrees.
+fn naive_any_depth(view: &StructuralView<'_, '_>, first: &str, second: &str) -> Vec<NodeId> {
+    let level: Vec<_> = view.root().descendants().filter(|n| n.key_is(first).unwrap()).collect();
+    let found: BTreeSet<NodeId> = level
+        .iter()
+        .flat_map(|n| {
+            n.descendants()
+                .filter(|d| d.key_is(second).unwrap())
+                .map(|d| d.id())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    found.into_iter().collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn any_depth_keys_equal_the_naive_walk(doc in json(), first in prop::sample::select(vec!["a", "b", "content"]), second in prop::sample::select(vec!["a", "b", "type"])) {
+        let tape = parse(doc.as_bytes(), &Limits::DEFAULT).unwrap();
+        let mask = Mask::new();
+        let view = StructuralView::new(&tape, &mask);
+        let fast = sel(vec![Step::AnyDepthKey(first.into()), Step::AnyDepthKey(second.into())]).resolve(&view).unwrap();
+        prop_assert_eq!(fast, naive_any_depth(&view, first, second));
     }
 }

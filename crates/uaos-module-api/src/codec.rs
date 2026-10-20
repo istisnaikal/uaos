@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use uaos_json::NodeId;
 
 use crate::code::Code;
+use crate::manifest::HookPoint;
 use crate::selector::{Selector, SelectorError};
 use crate::view::StructuralView;
 
@@ -32,6 +33,20 @@ pub enum Role {
     SystemEntry(u16),
     /// A `role: "system"` message inside `messages`.
     SystemMessage,
+    /// The newest turn's `tool_result` block: the only place a `tool.result` strip lands.
+    NewestToolResult,
+}
+
+impl Role {
+    /// Whether an edit may never touch content with this role (ADR-0014 Decision 2): signed,
+    /// opaque and provider-produced content, and the system prompt.
+    #[must_use]
+    pub const fn forbids_edit(self) -> bool {
+        matches!(
+            self,
+            Self::Signed | Self::Opaque | Self::ProviderProduced | Self::SystemEntry(_) | Self::SystemMessage
+        )
+    }
 }
 
 /// The roles a codec assigned, by node. A node's roles govern its whole subtree, so a role check
@@ -86,6 +101,38 @@ impl RoleMap {
         Some(roles)
     }
 
+    /// The roles an edit of `id` touches: those of `id`, of its ancestors and of every node in
+    /// its subtree. `None` if `id` is not in `view`. Removing a node removes its subtree, so a
+    /// forbidden role anywhere inside it forbids the edit; a walk up through `parent` alone
+    /// would miss it.
+    #[must_use]
+    pub fn touching(&self, view: &StructuralView<'_, '_>, id: NodeId) -> Option<BTreeSet<Role>> {
+        let node = view.node(id)?;
+        let mut roles = self.governing(view, id)?;
+        for (_, inside) in self.roles.range(id..node.subtree_end()) {
+            roles.extend(inside.iter().copied());
+        }
+        Some(roles)
+    }
+
+    /// Whether a module's `Strip` may remove `id` at `point`: `id` lies inside the point's anchor
+    /// (the newest human turn at `ingress.parsed`, the newest tool result at `tool.result`), and
+    /// nothing the removal touches carries a role that forbids edits. False at any other point
+    /// and outside the view.
+    #[must_use]
+    pub fn may_strip(&self, view: &StructuralView<'_, '_>, id: NodeId, point: HookPoint) -> bool {
+        let anchor = match point {
+            HookPoint::IngressParsed => Role::NewestHumanTurn,
+            HookPoint::ToolResult => Role::NewestToolResult,
+            _ => return false,
+        };
+        let inside_anchor = self.governing(view, id).is_some_and(|roles| roles.contains(&anchor));
+        inside_anchor
+            && self
+                .touching(view, id)
+                .is_some_and(|roles| !roles.iter().any(|role| role.forbids_edit()))
+    }
+
     /// Every node with a role, in document order.
     pub fn nodes(&self) -> impl Iterator<Item = (NodeId, &BTreeSet<Role>)> {
         self.roles.iter().map(|(id, roles)| (*id, roles))
@@ -115,7 +162,7 @@ pub enum Method {
 pub struct PathError;
 
 /// Whether `path` is canonical: it starts with `/`, is printable ASCII, and has no query or
-/// fragment, no percent-encoding, no backslash, no `.` or `..` segment and no empty segment but
+/// fragment, no percent-encoding, no path parameter (`;`), no backslash, no `.` or `..` segment and no empty segment but
 /// a trailing one. A path that is not canonical never matches, so an encoded or dotted spelling
 /// can never reach a class meant for another endpoint.
 fn canonical(path: &str) -> bool {
@@ -125,7 +172,7 @@ fn canonical(path: &str) -> bool {
     let segments: Vec<&str> = rest.split('/').collect();
     let last = segments.len().saturating_sub(1);
     path.bytes().all(|b| b.is_ascii_graphic())
-        && !path.contains(['?', '#', '%', '\\'])
+        && !path.contains(['?', '#', '%', ';', '\\'])
         && segments
             .iter()
             .enumerate()
@@ -211,8 +258,9 @@ pub fn classify(endpoints: &[EndpointDecl], method: Method, path: &str) -> Endpo
         .unwrap_or(EndpointClass::Denied)
 }
 
-/// One endpoint a dialect serves.
+/// One endpoint a dialect serves. `#[non_exhaustive]`: built with [`EndpointDecl::new`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EndpointDecl {
     /// Its method.
     pub method: Method,
@@ -220,6 +268,14 @@ pub struct EndpointDecl {
     pub path: PathPattern,
     /// Its class.
     pub class: EndpointClass,
+}
+
+impl EndpointDecl {
+    /// An endpoint.
+    #[must_use]
+    pub const fn new(method: Method, path: PathPattern, class: EndpointClass) -> Self {
+        Self { method, path, class }
+    }
 }
 
 /// One server-sent event of a response stream; `data` is one complete JSON document. Built by

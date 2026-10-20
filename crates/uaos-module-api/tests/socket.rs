@@ -25,11 +25,7 @@ use uaos_module_api::{
     check_decls,
 };
 
-const V1: ModuleVersion = ModuleVersion {
-    major: 1,
-    minor: 0,
-    patch: 0,
-};
+const V1: ModuleVersion = ModuleVersion::new(1, 0, 0);
 
 fn code(s: &str) -> Code {
     Code::new(s).unwrap()
@@ -48,11 +44,9 @@ fn set<T: Ord>(items: impl IntoIterator<Item = T>) -> BTreeSet<T> {
 }
 
 fn event(name: &str, class: EventClass, fields: &[&str]) -> EventDecl {
-    EventDecl {
-        code: code(name),
-        class,
-        fields: fields.iter().map(|f| code(f)).collect(),
-    }
+    fields
+        .iter()
+        .fold(EventDecl::new(code(name), class), |e, f| e.field(code(f)))
 }
 
 fn prompt() -> ChildBody {
@@ -102,20 +96,14 @@ fn a_manifest_is_refused_whole_for_each_reason() {
             ManifestError::FeatureNotRequired(KernelFeature::CrossPocketRead),
         ),
         (
-            builder().grant(GrantDecl {
-                kind: ChildKind::ModelCall,
-                why: code("rewrite"),
-            }),
+            builder().grant(GrantDecl::new(ChildKind::ModelCall, code("rewrite"))),
             ManifestError::GrantWithoutAction,
         ),
         (
             builder()
                 .requires(KernelFeature::ChildOperations)
                 .action(ChildKind::ModelCall)
-                .grant(GrantDecl {
-                    kind: ChildKind::ModelCall,
-                    why: code("anything"),
-                }),
+                .grant(GrantDecl::new(ChildKind::ModelCall, code("anything"))),
             ManifestError::UndeclaredCode(code("anything")),
         ),
         (
@@ -613,6 +601,8 @@ fn every_code_is_one_the_contract_lists() {
         "feature_not_required",
         "bound_exceeded",
         "state_exceeded",
+        "not_own_child",
+        "unknown_candidate",
     ]
     .into_iter()
     .collect();
@@ -661,6 +651,8 @@ fn every_code_is_one_the_contract_lists() {
         Strike::FeatureNotRequired(f),
         Strike::BoundExceeded,
         Strike::StateExceeded,
+        Strike::NotOwnChild,
+        Strike::UnknownCandidate,
     ]
     .iter()
     .map(Strike::code)
@@ -677,10 +669,7 @@ fn targets_and_grants_are_bounded() {
         .action(ChildKind::ModelCall)
         .reason(code("rewrite"));
     let grants = (0..=64).fold(base, |b, _| {
-        b.grant(GrantDecl {
-            kind: ChildKind::ModelCall,
-            why: code("rewrite"),
-        })
+        b.grant(GrantDecl::new(ChildKind::ModelCall, code("rewrite")))
     });
     assert_eq!(grants.build(), Err(ManifestError::TooManyCodes { max: 64 }));
 }
@@ -692,5 +681,77 @@ fn an_empty_ranking_is_a_strike() {
         check_decls(&m, Some(HookPoint::RouteDecide), &[Decl::Rank(Vec::new())]),
         Err(Strike::BoundExceeded),
         "an empty ranking vetoed the route without a reason"
+    );
+}
+
+/// A paper module that asks for a summary whenever an event reaches it, and counts the events.
+struct Summarizer(Manifest);
+
+impl Module for Summarizer {
+    fn manifest(&self) -> &Manifest {
+        &self.0
+    }
+
+    fn on_hook(&self, _cx: &HookCx<'_>, _state: StateMut<'_>, _out: &mut Decls) {}
+
+    fn on_event(&self, _event: &EventView<'_>, mut state: StateMut<'_>, out: &mut Decls) {
+        if state.append(&[1]).is_ok() {
+            let request = ChildOpRequest::new(ChildKind::ModelCall, prompt(), 1).unwrap();
+            out.push(Decl::Request(request)).unwrap();
+        }
+    }
+}
+
+/// The host's event procedure (contract §5): as for a hook, and a replay keeps the state changes
+/// and discards every declaration.
+fn host_event(module: &dyn Module, event: &EventView<'_>, state: &mut ModuleState) -> Result<Vec<Decl>, Strike> {
+    let mut copy = state.clone();
+    let mut out = Decls::new(module.manifest().max_decls());
+    module.on_event(event, StateMut::new(&mut copy), &mut out);
+    if copy.exceeded() {
+        return Err(Strike::StateExceeded);
+    }
+    check_decls(module.manifest(), None, out.as_slice())?;
+    *state = copy;
+    Ok(if event.replay { Vec::new() } else { out.into_inner() })
+}
+
+#[test]
+fn a_replay_rebuilds_state_and_declares_nothing() {
+    let manifest = builder()
+        .requires(KernelFeature::ChildOperations)
+        .action(ChildKind::ModelCall)
+        .state_bytes(8)
+        .build()
+        .unwrap();
+    let module = Summarizer(manifest);
+    let event_type = EventType::new("op.committed").unwrap();
+    let live = EventView::new(pocket(1), Seq(1), &event_type, None);
+    let mut state = ModuleState::new(8);
+    assert_eq!(host_event(&module, &live, &mut state).unwrap().len(), 1);
+
+    // After a restart without a checkpoint, the same events are replayed into a fresh state.
+    let mut rebuilt = ModuleState::new(8);
+    let replayed: Vec<Decl> = (1..=3)
+        .flat_map(|n| {
+            let event = EventView::new(pocket(1), Seq(n), &event_type, None).replayed();
+            host_event(&module, &event, &mut rebuilt).unwrap()
+        })
+        .collect();
+    assert!(replayed.is_empty(), "a replay requested a child Operation again");
+    assert_eq!(rebuilt.as_bytes().len(), 3, "the replay rebuilt the state");
+}
+
+#[test]
+fn cancelling_a_child_needs_child_operations() {
+    let m = builder()
+        .hook(HookDecl::new(HookPoint::ResponsePost, HookMode::Observe))
+        .build()
+        .unwrap();
+    let cancel = Decl::CancelOp(OperationId::from_parts(1, [1; 10]));
+    assert_eq!(
+        check_decls(&m, Some(HookPoint::ResponsePost), &[cancel]),
+        Err(Strike::FeatureNotRequired(KernelFeature::ChildOperations)),
+        "a cancellation was accepted without child_operations"
     );
 }

@@ -165,7 +165,9 @@ validated_string! {
     { "type": "string", "maxLength": 64, "pattern": "^[a-z][a-z0-9-]*$" }
 }
 
-/// Event types emitted by the kernel. Modules use their own namespace (`mod.<name>.*`).
+/// Event types emitted by the kernel. A module's events are not types of their own: the host
+/// journals each as `module.event`, with the module's name and its declared code as fields
+/// (module socket contract §8).
 pub mod types {
     use super::EventType;
 

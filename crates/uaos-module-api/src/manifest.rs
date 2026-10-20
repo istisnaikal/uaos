@@ -52,8 +52,9 @@ impl ModuleApiVersion {
     }
 }
 
-/// A module's own version.
+/// A module's own version. `#[non_exhaustive]`: built with [`ModuleVersion::new`] (contract §9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct ModuleVersion {
     /// Major.
     pub major: u32,
@@ -61,6 +62,14 @@ pub struct ModuleVersion {
     pub minor: u32,
     /// Patch.
     pub patch: u32,
+}
+
+impl ModuleVersion {
+    /// A version.
+    #[must_use]
+    pub const fn new(major: u32, minor: u32, patch: u32) -> Self {
+        Self { major, minor, patch }
+    }
 }
 
 impl fmt::Display for ModuleVersion {
@@ -365,13 +374,22 @@ impl ChildKind {
     }
 }
 
-/// A grant a module may hold, and why.
+/// A grant a module may hold, and why. `#[non_exhaustive]`: built with [`GrantDecl::new`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct GrantDecl {
     /// The kind of child Operation it covers.
     pub kind: ChildKind,
     /// A declared reason, shown to the human who approves it.
     pub why: Code,
+}
+
+impl GrantDecl {
+    /// A grant for child Operations of `kind`, held for the reason `why`.
+    #[must_use]
+    pub const fn new(kind: ChildKind, why: Code) -> Self {
+        Self { kind, why }
+    }
 }
 
 /// Whether a module event is journaled (truth, resumable) or ephemeral (lossy, counted).
@@ -386,7 +404,9 @@ pub enum EventClass {
 /// An event code a module may emit, and the names of the values it may carry (at most
 /// [`MAX_EVENT_VALUES`]): a value under any other name is a strike, so an event can never carry
 /// words taken from content (contract §2 rule 4).
+/// `#[non_exhaustive]`: built with [`EventDecl::new`] and [`EventDecl::field`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EventDecl {
     /// The code.
     pub code: Code,
@@ -394,6 +414,25 @@ pub struct EventDecl {
     pub class: EventClass,
     /// The value names it may carry.
     pub fields: BTreeSet<Code>,
+}
+
+impl EventDecl {
+    /// An event code of `class`, carrying no values yet.
+    #[must_use]
+    pub const fn new(code: Code, class: EventClass) -> Self {
+        Self {
+            code,
+            class,
+            fields: BTreeSet::new(),
+        }
+    }
+
+    /// Declares a value name it may carry.
+    #[must_use]
+    pub fn field(mut self, name: Code) -> Self {
+        self.fields.insert(name);
+        self
+    }
 }
 
 /// A module's configuration schema: a JSON object of at most [`MAX_CONFIG_SCHEMA_BYTES`].

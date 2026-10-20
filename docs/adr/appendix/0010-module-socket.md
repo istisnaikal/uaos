@@ -49,16 +49,31 @@ waits for P5 sidecars.
    configuration keys a child Operation names are manifest-declared codes. Event values are
    bounded numbers, and a child Operation's correlation tag is a number. A `Strip` selector
    may name keys and values a module copied from content, so the host never journals or
-   explains a selector's keys or values, only their counts. Text a module adds (`ModuleText`) is bounded, detected and final-scanned
-   like any outbound byte. It refuses control characters other than newline and tab, and the
-   explicit bidirectional controls U+202A–U+202E and U+2066–U+2069 (ADR-0020 rule 5).
+   explains a selector's keys or values, only their counts. The host never formats a struck
+   call's declarations either: its explanation names the strike code only. Identifiers a
+   module builds (a `GrantRef`, a source pocket, a `CancelOp` target) are checked against
+   what the host knows before any of them is journaled or explained. Text a module adds
+   (`ModuleText`) is bounded, detected and final-scanned like any outbound byte. It refuses
+   control characters other than newline, carriage return and tab; the explicit
+   bidirectional controls U+202A–U+202E and U+2066–U+2069 (ADR-0020 rule 5); and the Unicode
+   tag characters U+E0000–U+E007F, which a model reads and a person cannot see.
 5. **Redacted by default.** A module sees the redacted structural view. Detection scans keys
    as well as values, so the mask covers strings, numbers and object keys. A masked value or
    key reads as masked, equals no value, matches no name and is never found by name, so no
-   predicate's answer depends on masked text. A finding the host cannot place on a value or a
-   key refuses the view. No raw view exists at RC-1.
-6. **Pocket isolation.** A module's state, events and grants are per pocket (§5). Nothing
-   crosses pockets except through a cross-pocket grant (§6.2).
+   predicate's answer depends on masked text. Masking a container masks everything inside
+   it, so a finding placed on the wrong node fails closed. A finding the host cannot place on
+   a value or a key refuses the view. A module's `Strip` selector is resolved over the masked
+   view, never over the raw tape. **Frames and errors** reach a hook as the provider sent
+   them: before rehydration (ADR-0017), never rehydrated. A secret masked on the way out
+   therefore never comes back to a module on the way in. No raw view exists at RC-1.
+6. **Pocket isolation, for what the socket holds.** A module's state, events and grants are
+   per pocket (§5), and nothing the socket holds crosses pockets except through a
+   cross-pocket grant (§6.2). A module's own fields are outside this guarantee. A module
+   that keeps data across calls in its own fields (interior mutability, statics) escapes the
+   state bound and the pocket's shred. The module-author rules (PR-10) forbid it, and an
+   architecture rule for Ring 1 crates will refuse interior mutability and statics (owner
+   PR-10). Until then this rests on the trust model: trusted code with minimized authority.
+   Untrusted code waits for P5 sidecars.
 7. **Fail closed at load.** A manifest the host cannot fully honour is refused, never loaded in
    part. The causes: an unknown `requires` feature; a hook point or mode the kernel does not
    offer, including an acting hook at a point that only observes; a bound above its ceiling;
@@ -123,8 +138,8 @@ ADR-0010 Decision 7 uses the same path.
 | `context.assemble` | append-only | redacted + own state | 400 µs | skip and explain |
 | `tool.result` | veto or transform the newest-turn `tool_result` | redacted | 300 µs | risk ≥ 2: deny |
 | `route.decide` | rank or subset permitted, account-pinned candidates (I-16), seeing breaker state | metadata | 100 µs | kernel default route |
-| `stream.observe` | observe after forwarding, lossy | frame + stream state | 50 µs per frame, off the relay path | detach and count |
-| `stream.assert` | `Cancel` from the next frame; frames held only at high risk; pings never held | frame | 100 µs per frame | high risk: cancel |
+| `stream.observe` | observe after forwarding, lossy | frame (as the provider sent it, before rehydration) + stream state | 50 µs per frame, off the relay path | detach and count |
+| `stream.assert` | `Cancel` from the next frame; frames held only at high risk; pings never held | frame (as the provider sent it, before rehydration) | 100 µs per frame | high risk: cancel |
 | `response.post` | observe after settle | metadata | 5 ms, off the hot path | ignore and count |
 | `error.translate` | additive annotation; upstream bytes stay identical. **Observe only in this draft:** the annotation's declaration is added with the host (PR-8) | error + metadata | 200 µs | kernel default |
 
@@ -135,15 +150,15 @@ The pre-egress ceilings sum to 1.3 ms, inside the 2 ms hook budget. **Kernel rul
 
 | Declaration | Allowed at | Effect, performed by the kernel |
 |---|---|---|
-| `Strip(Selection)` | `ingress.parsed`, `tool.result` | a span splice outside every forbidden role (ADR-0014 §3) |
+| `Strip(Selection)` | `ingress.parsed`, `tool.result` | removes nodes inside the point's anchor (the newest human turn at `ingress.parsed`, the newest tool result at `tool.result`) whose ancestors and whole subtree carry no role that forbids edits (`RoleMap::may_strip`; ADR-0014 §3) |
 | `Append { slot, text: ModuleText }` | `ingress.parsed`, `context.assemble` | an append in the newest human turn; the text is detected and final-scanned |
 | `Veto(ReasonCode)` | `tool.result` | the Operation is denied and explained |
 | `Cancel(ReasonCode)` | `stream.assert` | the stream is cancelled from the next frame |
 | `Label(Label)` | `classify` | a label added; risk only rises |
-| `Rank(Vec<CandidateId>)` | `route.decide` | a ranking or subset of the candidates offered: 1 to 64, none twice; the host strikes an id outside the offer |
+| `Rank(Vec<CandidateId>)` | `route.decide` | a ranking or subset of the candidates offered: 1 to 64, none twice; an id outside the offer is a strike (`unknown_candidate`) |
 | `Emit(ModuleEvent)` | every hooked point | an event with a declared code and declared value names, each with a number; journaled ones rate-limited per module per Operation |
 | `Request(ChildOpRequest)` | every point, with `child_operations` | a child Operation (§6) |
-| `CancelOp(OperationId)` | every point | cancels one of the module's own child Operations |
+| `CancelOp(OperationId)` | every point, with `child_operations` | cancels one of the module's own child Operations; any other id is a strike (`not_own_child`) |
 | `Checkpoint` | `context.assemble`, `response.post`, `on_event` | persists the module's state for this pocket (§5), with `state_checkpoints` |
 
 A declaration a point does not allow, a declaration at a point the manifest does not hook, a
@@ -161,8 +176,10 @@ never shared between pockets (C-18).
   for another (which would clear the mark below and raise its bound) nor keep the handle. Each
   change is atomic, and a refused one marks the state `exceeded`. The host runs every call on a copy and keeps the copy only if
   it is not exceeded and its declarations pass. Otherwise the call is a strike
-  (`state_exceeded`), and the state is left as it was before the call. A cursor advances only
-  on its own pocket's events.
+  (`state_exceeded`), and the state is left as it was before the call. The host runs at most
+  one call of a module for one pocket at a time, so no two calls work on copies of the same
+  state and none of their changes is lost. A cursor advances only on its own pocket's
+  events.
 - **Events in order.** `on_event` delivers the pocket's **journaled** events (D-9), the module's
   own and the kernel's it subscribed to, in journal order, with their sequence number. A
   module's state for a pocket reflects its events up to a `PocketCursor { pocket, through: Seq }`.
@@ -173,9 +190,14 @@ never shared between pockets (C-18).
   another pocket.
 - **Resume.** After a restart, a quarantine or a re-enable, the host restores the latest
   checkpoint for each pocket the module touches and replays the pocket's journaled events after
-  its cursor through `on_event`, so the state is the same as if the module had never stopped. No
-  checkpoint means an empty state and a replay from the start of the pocket's journal, bounded
-  by the projection's retention.
+  its cursor through `on_event`. **A replay rebuilds state and declares nothing.** Each
+  replayed event is marked (`EventView::replay`). The host applies the call's state changes,
+  under the same all-or-nothing rule, and discards every declaration, so a replay never
+  requests, emits or cancels anything a second time. No checkpoint means an empty state and a
+  replay from the start of the pocket's journal, bounded by the projection's retention.
+  Changes a hook made after the latest checkpoint are not journaled and do not survive a
+  restart. A module that must not lose a change makes it in `on_event`, which replay
+  repeats, or checkpoints after it.
 - **Not synchronized:** ephemeral events (frames, metrics), which are lossy by design (D-9), and
   anything between pockets.
 
@@ -188,7 +210,7 @@ never shared between pockets (C-18).
 for new text) and a correlation tag (a `u16`, never a word). The kernel builds the child under the parent's correlation
 id with `parent_operation`, and it passes the full pipeline. Limits (ADR-0010 Decision 6): depth
 at most 2; a module's hooks never run on its own children; a per-module quota of children; the
-child bills the parent's pool unless its grant names another. The outcome reaches the module as
+child bills the parent's pool. The outcome reaches the module as
 journaled events through `on_event`, never as a return value.
 
 ### 6.2 Cross-project memory (C-44)
@@ -230,7 +252,10 @@ detection overlay (`Mask`): values and keys holding a finding read as `Masked` (
 **`Selector`** is ADR-0014 §6's language and no more: `key`, `each element`, `any-depth key`; the
 predicates "member is one of", "member is not one of" and "string, or an array with an element
 matching"; a `last` modifier. Growing it needs ADR-0014 amended. A selector resolves to node ids
-on the tape; roles are kept by node id, so a later edit's role check is O(depth) through `parent`.
+on the tape. Roles are kept by node id. An edit's role check covers the node's ancestors and
+its whole subtree, a contiguous range of ids (`RoleMap::touching`), so an edit that encloses a
+forbidden role is refused. Each step of a selector visits a node at most once, so resolving
+costs O(steps × nodes), whatever the document's shape.
 
 ## 8. Kernel contract additions (all additive)
 
@@ -240,7 +265,7 @@ on the tape; roles are kept by node id, so a later edit's role check is O(depth)
 | `uaos.event/1` | optional `agent_id` on `EventEnvelope` and `EventDraft`, omitted when absent | CLAUDE.md §4: every request carries its agent id; per-agent spend and the task ledger (C-45, C-30) | a new optional property: non-breaking under `schema-compat` |
 | `uaos.grant/1` (new) | `Grant`: id, principal, action, resource, the pocket it applies in, expiry, highest risk tier, data classes, the ask policies it satisfies, for `memory.read` the injection policy, the approval that issued it, and when | the wire form of `uaos_policy::model::Grant`, journaled when issued and when revoked | a new contract |
 | Cedar schema | `entity Pocket;` and `action "memory.read" appliesTo { principal: [Agent, Human, Module, System], resource: [Pocket], context: Ctx }` | cross-pocket reads are authorized like every other action, default deny (ADR-0008) | additive; existing policies unchanged |
-| Event naming | `<domain>.<event>`, lowercase, `[a-z_]` words, no `uaos.` prefix, as in the code (`op.committed`, `chunk.lost`). Reserved domains: `op`, `budget`, `chunk`, `redact`, `identity`, `kernel`, `module`, `admission`, `egress`, `bus`, `config`, `grant` | Move 1's text used `uaos.module.*`; the code never did. Constants are added by the PR that first emits them | rule only |
+| Event naming | `<domain>.<event>`, lowercase, `[a-z_]` words, no `uaos.` prefix, as in the code (`op.committed`, `chunk.lost`). Reserved domains: `op`, `budget`, `chunk`, `redact`, `identity`, `kernel`, `module`, `admission`, `egress`, `bus`, `config`, `grant` | Move 1's text used `uaos.module.*`; the code never did. Constants are added by the PR that first emits them. **Module events** are not types of their own: the host journals each as `module.event`, with the module's name and the declared code as fields, so a module name with hyphens never has to fit an event type | rule only |
 
 **Who fills `agent_id`:** session inference (ADR-0015, M2) from the client's own agent markers;
 until then the field is absent and nothing claims per-agent attribution.
@@ -253,7 +278,9 @@ freeze, so the contract still freezes with the rest.
 
 - Inputs a module receives are `#[non_exhaustive]` and built by the host through
   constructors: `OpMeta`, `Candidate`, `EventView`, `SseEvent`.
-- Types a module builds (`Manifest`, `ChildOpRequest`, `ModuleText`) are built through builders.
+- Types a module builds are built through builders or constructors and are
+  `#[non_exhaustive]` where they carry fields: `Manifest`, `ChildOpRequest`, `ModuleText`,
+  `EventDecl`, `GrantDecl`, `EndpointDecl`, `ModuleVersion`.
 - Output enums (`Decl`, `KernelFeature`, `FrameKind`) are `#[non_exhaustive]` and grow additively.
 - Paper modules (PR-10, test-only) prove that C-14, C-16, C-24, C-35, C-44, C-45, C-49, C-50, C-51,
   C-52 and C-61 fit `module/1` without a breaking change.
@@ -268,7 +295,8 @@ the `ModuleName`, the reason and label codes, and two code sets:
   `feature_not_required`, `duplicate_event`, `grant_without_action`,
   `default_on_reaches_outside`, `config_schema`;
 - **strike codes:** `too_many`, `not_hooked`, `not_allowed_here`, `undeclared_code`,
-  `undeclared_action`, `feature_not_required`, `bound_exceeded`, `state_exceeded`.
+  `undeclared_action`, `feature_not_required`, `bound_exceeded`, `state_exceeded`, and the
+  two the host checks against what only it knows: `not_own_child` and `unknown_candidate`.
 
 `Debug` output shows identifiers, lengths and counts only, never a view's content, a
 selector's keys and values, a frame, state bytes or `ModuleText` (I-11).
@@ -325,6 +353,16 @@ the `language-neutrality` gate once ADR-0020's PR registers it):
 | `cedar-cross-pocket-without-grant` | a permit allows `memory.read` without a grant | `a_permit_alone_only_asks_for_a_cross_pocket_read` |
 | `selector-folds-case` | predicate values compared lower-cased | `selectors_never_fold_case` |
 | `module-text-accepts-bidi-override` | the explicit bidi check skipped | `module_text_refuses_explicit_bidi_controls` |
+| `endpoint-unmatched-not-denied` | an unmatched path falls back to `metadata` | `an_endpoint_s_class_is_the_strictest_match_and_unknown_paths_are_denied` |
+| `cedar-own-pocket-read-asks` | an own-pocket read is treated as cross-pocket | `a_permit_alone_only_asks_for_a_cross_pocket_read` |
+| `module-rank-empty-accepted` | an empty ranking passes | `an_empty_ranking_is_a_strike` |
+| `view-masked-container-leaks` | a masked container no longer masks its inside | `a_masked_container_masks_everything_inside` |
+| `role-check-ancestors-only` | the role check skips the subtree | `a_strip_never_encloses_a_forbidden_role` |
+| `replay-declares-again` | a replayed event is not marked | `a_replay_rebuilds_state_and_declares_nothing` |
+| `module-text-accepts-tag` | the tag-character check skipped | `module_text_takes_crlf_and_refuses_tag_characters` |
+| `path-parameter-canonical` | `;` counts as canonical | `path_patterns_match_canonical_paths_by_segment` |
+| `module-cancel-without-feature` | `CancelOp` without `child_operations` passes | `cancelling_a_child_needs_child_operations` |
+| `chunk-lost-drops-agent` | a `chunk.lost` record drops the agent | `a_lost_payload_record_names_the_agent_of_the_record_it_reports` |
 
 `schema-breaking-change` is re-proven over the new schemas.
 
@@ -336,8 +374,9 @@ the `language-neutrality` gate once ADR-0020's PR registers it):
   need `OperationKind` values for cross-pocket reads and network calls. Options: (a) keep the gate
   and issue `uaos.operation/2` when PR-8 adds them; (b) let draft contracts take added enum values
   as a minor bump, with readers that refuse unknown values. PR-4 adds no enum value either way.
-- `[CONSCIOUS ASSUMPTION]` `MAX_STATE_BYTES` = 64 KiB per module per pocket. Notes and reminders
-  keep their bodies in pocket chunks and their index in state; revisit with paper modules.
+- `[CONSCIOUS ASSUMPTION]` `MAX_STATE_BYTES` = 64 KiB per module per pocket. **Open:** no
+  declaration or child kind writes a pocket chunk yet, so a module that needs more than 64 KiB
+  (note bodies) has nowhere to put it. The paper modules (PR-10) decide whether one is added.
 - `[CONSCIOUS ASSUMPTION]` Replay without a checkpoint is bounded by the projection's retention,
   which P4's compaction will set; a module that needs more must checkpoint.
 - **Owned by the host (PR-8), from the V1 review:**
@@ -349,6 +388,13 @@ the `language-neutrality` gate once ADR-0020's PR registers it):
     spell, for the C-61 paper module (L8);
   - binding a `ModuleState` to its pocket in the host's store; this crate only checks the
     cursor (L5).
+- **PR-8 proof obligations, from the final review:**
+  - a hook at `stream.observe`, `stream.assert` or `error.translate` receives the frame or
+    error from before rehydration, with a seeded violation that hands it the rehydrated one;
+  - a replay discards every declaration, as `a_replay_rebuilds_state_and_declares_nothing`
+    shows for the procedure;
+  - calls of one module for one pocket never overlap;
+  - `not_own_child` and `unknown_candidate` strike what they name.
 - `[CONSCIOUS ASSUMPTION]` Event values are `i64`. A module that is wrong could still encode
   data in numbers. The trust model is trusted code with minimized authority, not hostile
   code: hostile code waits for P5 sidecars. Declared value names close the realistic leak, a
