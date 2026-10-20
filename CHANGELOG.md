@@ -241,6 +241,18 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       differences: parse, the view, selectors, `ModuleText`, and state restore. Selectors never
       fold case, and NFC and NFD stay distinct.
 
+- P3 Move 1, PR-4b (spec first): grants on the wire and cross-pocket consent,
+  `docs/adr/appendix/0008-grants-on-the-wire-and-cross-pocket-consent.md`. Split from PR-4 (#32)
+  at the maintainer's choice, with PR-4's final review findings M4 and M5.
+  - **Moved from PR-4 unchanged:**
+    - `uaos.grant/1`;
+    - the Cedar `Pocket` entity and the `memory.read` action;
+    - the consent rule: only a live grant allows a read of another pocket, and a permit at most
+      asks.
+  - **M4:** a request names the grant it carries, only that grant can satisfy it, and the
+    decision cites it.
+  - **M5:** `uaos.grant/1` becomes the exact wire form of the engine's grant, with conversions both
+    ways.
 - P3 Move 1, PR-2 (WP3.A2): `uaos-json`, the one structural tokenizer (ADR-0014). Nothing calls
   it yet; `uaos-redact` and its final scan are untouched.
   - **The crate:**
