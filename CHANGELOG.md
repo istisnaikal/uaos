@@ -171,9 +171,10 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     cursor over the pocket's journaled events, checkpointed as chunks under the pocket's key, so
     shredding a pocket shreds its module states.
   - **Child Operations and `GrantRef`:** every module effect is a child Operation through the full
-    pipeline, carrying a grant reference a module cannot build and the host re-checks at each
-    use. Cross-project memory is a `memory.read` child Operation on a Cedar `Pocket`, default
-    deny, with an injection policy (`auto`, `ask`, `never`) and provenance labels.
+    pipeline, carrying a grant reference that confers nothing by itself: the host checks the
+    live grant behind it at each use. Cross-project memory is a `memory.read` child Operation
+    on a Cedar `Pocket`, default deny, with an injection policy (`auto`, `ask`, `never`) and
+    provenance labels.
   - **`uaos.adapter/1` (draft):** the dialect codec's endpoints, roles through ADR-0014's
     selectors only, frames and usage.
   - **Kernel additions, all additive:** `AgentId` and an optional `agent_id` on the envelope,
@@ -192,6 +193,25 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     read is denied by default, allowed by a grant that names its holder, the source pocket and the
     reading pocket while it lives, or by a policy that names the source pocket; a forbid still
     wins over a grant (`cross_pocket_memory_reads_need_a_grant`).
+  - **Built: the socket crate, `uaos-module-api` (Ring 0, no I/O, `forbid(unsafe_code)`).**
+    - The manifest and its builder, validated whole: one refusal per reason, each with a stable
+      code.
+    - `KernelOffer::admit`, which compares the module API version and every required feature as
+      a set.
+    - The nine hook points with their deadline ceilings.
+    - Declarations checked against the manifest and the point (`check_decls`, one strike per
+      reason).
+    - Pocket-scoped `ModuleState`, bounded at 64 KiB and all or nothing, with an ordered
+      `PocketCursor`.
+    - The redacted structural view and ADR-0014's selectors. A masked value never matches a
+      predicate.
+    - Role maps, and the `uaos.adapter/1` codec trait.
+    - Every `Debug` shows sizes and identifiers only.
+    - **Language-neutral (ADR-0020).** No type names a locale. `ModuleText` keeps any language
+      byte for byte and refuses explicit bidi controls (U+202A–U+202E, U+2066–U+2069). A
+      seven-locale corpus (EN, TR, DE, FR, ES, IT, AR) crosses five stages with 0 byte
+      differences: parse, the view, selectors, `ModuleText`, and state restore. Selectors never
+      fold case, and NFC and NFD stay distinct.
 
 - P3 Move 1, PR-2 (WP3.A2): `uaos-json`, the one structural tokenizer (ADR-0014). Nothing calls
   it yet; `uaos-redact` and its final scan are untouched.
@@ -267,7 +287,6 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - The nightly lane also runs the tape's property fuzzing at 1,000,000 cases per property
       and its differential at 100,000, and adds `uaos-json` to mutation testing.
     - `.github/CODEOWNERS` covers `/fuzz/`.
-||||||| parent of 45bf82e (P3 Move 1 PR-4 (spec first): the module socket's contract)
 - Maintainer decisions of 2026-10-15:
   - **Accepted ADRs:** ADR-0010 (as revised), ADR-0011, ADR-0013, ADR-0014 (as revised, after
     the WP3.0c spike), ADR-0018 and ADR-0019 (with Amendment 1). ADR-0011's code merged a day

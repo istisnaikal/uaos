@@ -2815,6 +2815,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "uaos-module-api"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "thiserror",
+ "uaos-contracts",
+ "uaos-json",
+]
+
+[[package]]
 name = "uaos-platform"
 version = "0.0.0"
 dependencies = [
