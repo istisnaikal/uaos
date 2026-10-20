@@ -50,6 +50,7 @@ impl LedgerSink for JournalSink<'_> {
             pocket_id: None,
             operation_id: self.operation,
             request_id: None,
+            agent_id: None,
             correlation_id: self.correlation,
             parent_id: None,
             actor: tx.principal.clone(),

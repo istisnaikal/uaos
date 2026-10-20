@@ -72,6 +72,7 @@ fn draft(event_type: EventType, op: Option<u8>, correlation: u8) -> EventDraft {
         pocket_id: None,
         operation_id: op.map(|o| OperationId::from_parts(u64::from(o), [o; 10])),
         request_id: None,
+        agent_id: None,
         correlation_id: CorrelationId::from_parts(u64::from(correlation), [correlation; 10]),
         parent_id: None,
         actor: Actor::System,

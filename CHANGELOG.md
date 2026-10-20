@@ -180,6 +180,13 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `uaos.grant/1`, the Cedar `Pocket` entity and `memory.read` action, the event-naming rule.
     `uaos.approval/1` moves to M3 with the presence ceremony (ADR-0012).
   - Open decision D-35: how closed enums grow in draft contracts.
+  - **Built: the contract additions.** `AgentId` (`agt_…`) and an optional `agent_id` on the
+    envelope and the journal's draft (absent, it is not written, so existing records keep their
+    exact bytes; a lost-payload record inherits the agent of the record it reports).
+    `uaos.grant/1` (`schemas/grant.v1.json`): a grant entry, issued or revoked, whose record
+    validates its expiry, its bounds, an injection policy present exactly on a `memory.read` grant
+    on a pocket, and that such a grant never names its own pocket. `schemas/event.v1.json` gains
+    the optional `agent_id`, a non-breaking change.
 
 - P3 Move 1, PR-2 (WP3.A2): `uaos-json`, the one structural tokenizer (ADR-0014). Nothing calls
   it yet; `uaos-redact` and its final scan are untouched.

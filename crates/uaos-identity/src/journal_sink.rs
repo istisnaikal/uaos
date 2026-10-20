@@ -49,6 +49,7 @@ impl IdentitySink for JournalSink<'_> {
             pocket_id: None,
             operation_id: None,
             request_id: None,
+            agent_id: None,
             correlation_id: self.correlation,
             parent_id: None,
             actor: self.actor.clone(),
