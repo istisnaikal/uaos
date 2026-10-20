@@ -8,6 +8,12 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Security
 
+- **RUSTSEC-2026-0382: `rustls-webpki` 0.103.15 → 0.103.16.** The affected version could accept
+  certificate paths through distrusted emSign intermediates whose private keys are now known.
+  `uaos-egress` (the network door) verifies TLS with it. 0.103.16 rejects any path that holds one
+  of those keys, the trust anchor included. `cargo-vet` has no imported audit for the delta yet,
+  so the new version is exempted with notes on what the delta contains (PD-06). `cargo deny`
+  failed on every branch until this update.
 - `deny.toml` takes its first advisory exceptions: RUSTSEC-2026-0370, -0371 and -0372
   (`zvariant`, `zbus_names`, `zvariant_derive` unmaintained, merged into zbus 6.0.0). They reach
   the build only through the Linux keyring store (`zbus-secret-service-keyring-store` 1.0.1 →
