@@ -21,6 +21,8 @@ use crate::util::{rel, walk_files};
 
 const FORBIDDEN: &[&str] = &[
     "perfect",
+    "faultless",
+    "flawless",
     "zero loss",
     "zero-loss",
     "tamper-proof",

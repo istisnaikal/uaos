@@ -103,6 +103,8 @@ No micromanagement: if the goal, boundary, and quality threshold are defined, im
   - Optional WASM: portable plugins
   - Does not create a kernel source-patch requirement.
 - Dependency direction: upper layers bind to lower contracts; lower layers do not depend on product decisions.
+- Language neutrality: the kernel treats content in any language as bytes. It never normalizes Unicode, never case-folds outside ASCII, never reorders bidirectional text, never splits a code point. The locale list is a product decision and lives above the kernel; Ring 0/1 never names a locale.
+- Prefix-stable rendering: text the kernel or a module injects into a request is rendered once, in the locale pinned for its Operation, and journaled as bytes. Replay, rehydration and checkpoint restore reuse those bytes and never re-render, so a locale change never rewrites a sent prefix. A checkpoint restores byte-identical and only into its own pocket.
 - Unsafe Rust is forbidden by default; exception requires ADR + owner + sanitizer/Miri + security review.
 - Local model/embedding/index jobs carry CPU/GPU/RAM/disk/thermal quotas; under pressure, adaptive degradation, no crashes.
 
@@ -277,6 +279,8 @@ CI merge blocker:
 - a11y critical flows
 - perf smoke
 - docs-changed-with-contract
+- language neutrality (7-locale corpus)
+- locale catalog completeness
 
 Required behaviors:
 
@@ -327,7 +331,10 @@ Test types:
   - sandboxed git
   - keyboard flow
 - Accessibility: keyboard-only, screen reader, focus order, contrast, reduced motion; WCAG 2.2 AA critical flows.
-- i18n: TR/EN initial; local keymaps.
+- i18n: 7 locales at GA: EN, TR, DE, FR, ES, IT, AR (right-to-left).
+  - Every user-facing string is a stable key with an entry in each locale; a missing entry or a mismatched placeholder fails the build.
+  - Local keymaps, tested on each locale's common layouts (TR-Q, TR-F, QWERTZ, AZERTY, Arabic); no shortcut becomes unreachable.
+  - Proof: the 7-locale corpus crosses tape, view, splice, rehydration and checkpoint with 0 byte differences; WCAG 2.2 AA critical flows run in `ar` as well as `en` (ADR-0020).
 
 ### Open-source discipline
 

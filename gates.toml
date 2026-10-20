@@ -116,6 +116,20 @@ job = "docs-sync"
 negative = ["contract-without-changelog"]
 
 [[gate]]
+id = "language-neutrality"
+source = "CLAUDE.md §4 CI merge blocker: language neutrality (7-locale corpus); ADR-0020"
+lane = "merge"
+status = "pending"
+phase = "P3"
+
+[[gate]]
+id = "locale-catalog"
+source = "CLAUDE.md §4 CI merge blocker: locale catalog completeness; ADR-0020"
+lane = "merge"
+status = "pending"
+phase = "P4"
+
+[[gate]]
 id = "gate-registry"
 source = "plan §4.2 gate registry"
 lane = "merge"
