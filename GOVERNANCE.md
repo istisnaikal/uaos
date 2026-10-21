@@ -55,6 +55,15 @@ second human approval is required for cryptography, `unsafe` code and the sandbo
 second qualified reviewer exists. A solo maintainer applies a 24-hour cool-off instead, which is
 recorded as a residual risk, not presented as an equivalent to a second reviewer.
 
+**Review convergence (D-31).** Every PR goes through four steps:
+1. a fresh full review;
+2. fixes;
+3. one scoped round over the fix diff and every invariant and caller that diff touches;
+4. a final fresh full review before the PR leaves draft.
+
+A PR still holding a High or a Medium after round 5 is split. A Low is fixed, or accepted
+one at a time into that review's debt table with an owner and a phase.
+
 ## Money and community funding
 
 Priority bets and community funding (C-59) run in Ring 3 on a ledger that is separate from any
