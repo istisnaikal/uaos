@@ -170,8 +170,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - an atomic flag, set before any watcher wakes;
     - admission checks it first (`RUNTIME_STOPPED`, `retry-after` 120 s);
     - every admitted Operation watches it, and every live relay cuts at its next poll;
-    - it acts before its record. `Stop::unrecorded` hands the `kernel.stopped` record to the
-      journal exactly once, and `boot_state` honours it at the next start;
+    - it acts before its record. `Stop::unrecorded` offers the `kernel.stopped` record until
+      `Stop::recorded` says it is journaled, and `boot_state` honours it at the next start;
+    - only a human's `kernel.resumed` resumes;
     - resume needs presence (M3); the ADR-0010 amendment is open as D-37.
   - **Admission** counts bytes in flight as well as Operations. A permit grows as copies are
     made, and dropping it releases both.
@@ -179,11 +180,24 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - no task and no channel;
     - at most one incomplete event held;
     - each event's exact bytes forwarded, zero-copy inside one upstream frame;
-    - every usage report parsed by `uaos-json` (duplicate keys refused), read by the codec,
-      checked against its dimensions and priced against the Operation's reservation.
-  - **A cut.** The first report one unit over the reservation cuts the stream and engages the
-    kernel stop (`BUDGET_STREAM_OVERRUN`, S1). So do an unreadable or unpriced report, a
-    malformed or oversized event, an oversized body, an idle or failed upstream, and a stop.
+    - every event but a ping read for usage, whatever its kind: parsed by `uaos-json`
+      (duplicate keys refused, object-shaped data must parse), read by the codec, checked
+      against its dimensions and priced against the Operation's reservation.
+  - **Settlement:** `RelayReport::settlement`.
+    - A cost settles as reported only when it is final: the stream completed, and the
+      dialect's end came at or after its last report.
+    - A cost past the reservation settles as reported, a lower bound, and records the overrun.
+    - Anything else settles the full reservation, estimated: tokens generated after the last
+      report are billed but uncounted.
+  - **A cut.** The first report one nano-USD over the reservation cuts the stream and engages
+    the kernel stop (`BUDGET_STREAM_OVERRUN`, S1); so does a cost past nano-USD's range. These
+    cut the stream without stopping the kernel:
+    - an unreadable or unpriced report;
+    - a malformed or oversized event;
+    - an oversized body;
+    - an idle or failed upstream;
+    - a stop, which says `RUNTIME_STOPPED` whatever engaged it.
+
     A cut:
     - forwards nothing more;
     - drops the upstream at once;
@@ -193,28 +207,31 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **Not claimed:**
     - tokens between provider reports are not counted;
     - bytes already forwarded cannot be recalled;
-    - tokens generated before the disconnect are billed.
+    - tokens generated before the disconnect are billed, which is why an unfinished stream
+      settles the full reservation.
 
     The hard cap stays the pre-request reservation at the clamped `max_tokens` (WP3.5).
   - **Locales:** the configuration snapshot pins an opaque `LocaleTag` per Operation. A publish
     reaches the next pin only, and no Ring 0 type names a locale.
   - **The supervisor** is the runtime's only spawner. Its tasks are bounded, and it is hyper's
-    executor for the door. `tokio::sync::mpsc::unbounded_channel` is banned workspace-wide
-    (PD-19), with a canary.
+    executor for the door. `tokio::sync::mpsc::unbounded_channel` and `std::sync::mpsc::channel`
+    are banned workspace-wide (PD-19), each with a canary.
   - **Contract additions:**
     - event types `kernel.stopped` and `kernel.resumed`;
     - error codes `RUNTIME_STOPPED` and `BUDGET_STREAM_OVERRUN`.
 
     No schema change: types and codes are strings.
-  - **Tests:** 41.
+  - **Tests:** 49.
     - A property over random events, line endings and chunking (CRLF and the byte-order mark
       split across chunks, the seven-locale corpus): the bytes received are the bytes sent, and
       the events the codec sees are the ones a whole-body event-stream parser reads. 256 cases
       per merge; 20,000 once locally.
     - A journaled stop survives a restart on a real journal.
-  - **Measured:** per event on the reference machine, p95 0.3 µs for content and 1.1 µs for a
-    usage report (the budget is 1 ms). About 650 MB/s.
-  - **Negatives:** 11 seeded violations.
+  - **Measured:** per event on the reference machine, with every event parsed for usage: p95
+    0.7 µs for content and 0.8 µs for a usage report (the budget is 1 ms). About 230 MB/s.
+  - **V1 review** (`docs/reviews/WP3.A6a-runtime-relay.md`): 1 High, 2 Medium and 13 Low.
+    All are resolved, apart from one Low owed to PR-9.
+  - **Negatives:** 18 seeded violations.
 - P3 Move 1, PR-4 (spec first): the module socket's contract,
   `docs/adr/appendix/0010-module-socket.md`, before any code.
   - **`uaos.module/1` (draft):** a manifest built through a builder, with `requires`, a closed set

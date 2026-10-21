@@ -66,6 +66,10 @@ impl Price for DeclaredPrice {
                 .find(|(priced, _)| priced == name)
                 .map(|(_, price)| *price)
                 .ok_or(PriceError::Unpriced)?;
+            if unit == NanoUsd::ZERO {
+                // Free, whatever the count (review L1).
+                continue;
+            }
             let count = i64::try_from(*count).map_err(|_| PriceError::Overflow)?;
             let cost = unit.get().checked_mul(count).ok_or(PriceError::Overflow)?;
             total = total.checked_add(NanoUsd::new(cost)).ok_or(PriceError::Overflow)?;

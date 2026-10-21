@@ -4,9 +4,10 @@
 //!
 //! Run: `cargo bench -p uaos-runtime --bench relay`. An in-memory upstream that is always ready
 //! feeds a deterministic Anthropic-shaped stream, so what is timed is the kernel's own work: the
-//! split, classification and, for usage events, the parse, the codec's read and the price. The
-//! stream is cut into chunks of one to three events, and one chunk in four ends mid-event, so
-//! the copy of an incomplete event is timed too. It prints p50, p95, p99 and the maximum per
+//! split, classification, the parse and the codec's read of every event, and for usage events
+//! the price. Each chunk holds one event, so each timed poll is one event's work (review L5); one
+//! chunk in four also takes the next event's first 7 bytes, so the copy of an incomplete event is
+//! timed too. It prints p50, p95, p99 and the maximum per
 //! event, for content events and for usage events, after a warm-up. `UAOS_BENCH_ENV` labels the
 //! environment (D-33). Dependency-free on purpose (`harness = false`); nothing leaves the
 //! machine.
@@ -120,7 +121,7 @@ fn events() -> Vec<(Vec<u8>, bool)> {
         .collect()
 }
 
-/// Chunks of one to three events; one in four ends 7 bytes into the next event.
+/// One event per chunk; one chunk in four ends 7 bytes into the next event.
 fn chunks(events: &[(Vec<u8>, bool)]) -> VecDeque<Bytes> {
     let body: Vec<u8> = events.iter().flat_map(|(e, _)| e.iter().copied()).collect();
     let ends: Vec<usize> = events
@@ -133,7 +134,7 @@ fn chunks(events: &[(Vec<u8>, bool)]) -> VecDeque<Bytes> {
     let mut out = VecDeque::new();
     let (mut at, mut i, mut n) = (0, 0, 0);
     while at < body.len() {
-        let next = (i + 1 + n % 3).min(ends.len());
+        let next = (i + 1).min(ends.len());
         let mut end = ends[next - 1];
         if n % 4 == 3 {
             end += 7;

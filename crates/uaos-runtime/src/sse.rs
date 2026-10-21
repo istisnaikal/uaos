@@ -13,6 +13,7 @@
 //! bytes forwarded are the bytes received.
 
 use std::borrow::Cow;
+use std::fmt;
 
 use bytes::{Bytes, BytesMut};
 
@@ -21,10 +22,20 @@ const BOM: &[u8] = b"\xEF\xBB\xBF";
 
 /// One event's exact bytes. `skip` bytes at the front (the stream's byte-order mark) are
 /// forwarded but not parsed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Segment {
     pub(crate) bytes: Bytes,
     pub(crate) skip: usize,
+}
+
+impl fmt::Debug for Segment {
+    // Lengths only: the bytes are upstream content.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Segment")
+            .field("len", &self.bytes.len())
+            .field("skip", &self.skip)
+            .finish()
+    }
 }
 
 impl Segment {
@@ -39,7 +50,6 @@ impl Segment {
 pub(crate) struct TooLarge;
 
 /// Splits a byte stream into events.
-#[derive(Debug)]
 pub(crate) struct Splitter {
     /// The start of an event whose end has not arrived yet.
     pending: BytesMut,
@@ -53,6 +63,17 @@ pub(crate) struct Splitter {
     /// whether the line it ended was blank.
     pending_cr: Option<bool>,
     max_event: usize,
+}
+
+impl fmt::Debug for Splitter {
+    // Lengths only: the held bytes are upstream content.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Splitter")
+            .field("pending", &self.pending.len())
+            .field("prelude", &self.prelude.as_ref().map(BytesMut::len))
+            .field("max_event", &self.max_event)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Splitter {
@@ -191,13 +212,22 @@ impl Splitter {
 }
 
 /// The fields of one event that the relay reads.
-#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Fields<'a> {
     /// The last `event` field's value, if any.
     pub(crate) event: Option<&'a [u8]>,
     /// The `data` lines joined with LF, if there is at least one. Without one, no event is
     /// dispatched.
     pub(crate) data: Option<Cow<'a, [u8]>>,
+}
+
+impl fmt::Debug for Fields<'_> {
+    // Lengths only: the fields are upstream content.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Fields")
+            .field("event", &self.event.map(<[u8]>::len))
+            .field("data", &self.data.as_ref().map(|d| d.len()))
+            .finish()
+    }
 }
 
 /// Reads one event's fields from its bytes (the byte-order mark already skipped).
