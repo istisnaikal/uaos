@@ -2334,40 +2334,11 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "a password holding `://` survived",
         },
         Case {
-            id: "redact-url-chain-past-list-byte",
-            gate: "redaction-corpus",
-            tool: None,
-            // ADR-0009 Amendment 2: a userinfo runs on past a `://` that another URL starts after a
-            // list byte, so a URL list reads as one password.
-            seed: replace(
-                "crates/uaos-redact/src/detect.rs",
-                "        return !glue.is_some_and(|b| LIST_BYTES.contains(&b));\n",
-                "        return true;\n",
-            ),
-            runner: Runner::Program {
-                program: "cargo",
-                args: &["test", "-p", "uaos-redact", "--lib", "another_url_after_a_list_byte_stays_another_url"],
-            },
-            expect: "two listed URLs read as one",
-        },
-        Case {
-            id: "redact-url-chain-from-host-port",
-            gate: "redaction-corpus",
-            tool: None,
-            // ADR-0009 Amendment 2, its V1 review H1 and M1: a userinfo opens after `host:port/`.
-            seed: replace("crates/uaos-redact/src/detect.rs", "        && !starts_with_port(so_far)\n", "        && !so_far.is_empty() | true\n"),
-            runner: Runner::Program {
-                program: "cargo",
-                args: &["test", "-p", "uaos-redact", "--lib", "another_url_after_a_list_byte_stays_another_url"],
-            },
-            expect: "a URL glued to another read as a password",
-        },
-        Case {
             id: "redact-url-chain-any-user",
             gate: "redaction-corpus",
             tool: None,
-            // ADR-0009 Amendment 2, its V1 review M1: any user's userinfo runs on past a `://`.
-            seed: replace("crates/uaos-redact/src/detect.rs", "    let opens = text.get(user.clone()).is_some_and(plain_user)\n", "    let opens = text.get(user.clone()).is_some()\n"),
+            // ADR-0009 Amendment 2, its V1 review M1: any user owns a password starting with `//`.
+            seed: replace("crates/uaos-redact/src/detect.rs", "    if !text.get(user.clone()).is_some_and(plain_user) {\n", "    if text.get(user.clone()).is_none() {\n"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-redact", "--lib", "another_url_after_a_list_byte_stays_another_url"],
@@ -2375,23 +2346,11 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "another URL after a list byte read as a password",
         },
         Case {
-            id: "redact-url-scheme-colon-split",
-            gate: "redaction-corpus",
-            tool: None,
-            // ADR-0009 Amendment 2, its scoped round M1: a colon-joined scheme after a list byte is read in parts.
-            seed: replace("crates/uaos-redact/src/detect.rs", "        if glue == Some(b':') && before.get(start.wrapping_sub(2)).copied().is_some_and(scheme_byte) {\n", "        if false {\n"),
-            runner: Runner::Program {
-                program: "cargo",
-                args: &["test", "-p", "uaos-redact", "--lib", "another_url_after_a_list_byte_stays_another_url"],
-            },
-            expect: "two listed URLs read as one",
-        },
-        Case {
             id: "redact-url-chain-blocks-next-url",
             gate: "redaction-corpus",
             tool: None,
-            // ADR-0009 Amendment 2, its scoped round M2: a chain that ends keeps the next URL from opening.
-            seed: replace("crates/uaos-redact/src/detect.rs", "            if memo.url_open.is_none() && has_scheme {\n", "            if memo.url_open.is_none() && has_scheme && false {\n"),
+            // ADR-0009 Amendment 2: a chained anchor does not open its own password starting with `//`.
+            seed: replace("crates/uaos-redact/src/detect.rs", "        if has_scheme {\n            open_userinfo(text, after, cut, memo);\n", "        if has_scheme && open.is_none() {\n            open_userinfo(text, after, cut, memo);\n"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-redact", "--lib", "url_passwords_may_hold_a_scheme_separator"],
