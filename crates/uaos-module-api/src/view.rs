@@ -255,7 +255,7 @@ impl<'v, 'a> ViewNode<'v, 'a> {
     }
 
     /// Whether a container around it was masked whole: everything inside reads as masked.
-    /// O(log ranges) once the mask is sealed against this tape, O(depth) otherwise; free when
+    /// O(log ranges) in a view from [`Sealed::view`], O(depth) otherwise; free when
     /// nothing is masked.
     fn inside_masked(&self) -> bool {
         if self.mask.values.is_empty() {

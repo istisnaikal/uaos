@@ -756,6 +756,11 @@ impl Module for Shifty {
         let request = ChildOpRequest::new(ChildKind::ModelCall, prompt(), 1).unwrap();
         out.push(Decl::Request(request)).unwrap();
     }
+
+    fn on_event(&self, _event: &EventView<'_>, _state: StateMut<'_>, mut out: DeclsMut<'_>) {
+        let request = ChildOpRequest::new(ChildKind::ModelCall, prompt(), 1).unwrap();
+        out.push(Decl::Request(request)).unwrap();
+    }
 }
 
 /// Fresh full review M1: a module is checked against the manifest it was admitted under, not one
@@ -791,6 +796,14 @@ fn a_module_is_checked_against_its_admitted_manifest() {
         module.call_hook(&cx, &mut state),
         Err(Strike::UndeclaredAction),
         "a module grew its manifest after admission"
+    );
+    // PR-4c scoped round L-b: an event is checked against the same snapshot.
+    let event_type = EventType::new("op.committed").unwrap();
+    let event = EventView::new(pocket(1), Seq(1), &event_type, None);
+    assert_eq!(
+        module.call_event(&event, &mut state),
+        Err(Strike::UndeclaredAction),
+        "an event was checked against a manifest grown after admission"
     );
 }
 

@@ -3378,6 +3378,18 @@ The journal is tamper-proof.
             expect: "a codec's roles each got a fresh budget",
         },
         Case {
+            id: "call-event-manifest-reread",
+            gate: "test",
+            tool: None,
+            // PR-4c scoped round L-b: an event is checked against the manifest admitted, not a later one.
+            seed: replace("crates/uaos-module-api/src/module.rs", "        check_decls(self.manifest(), None, out.as_slice())?;\n", "        check_decls(self.module.manifest(), None, out.as_slice())?;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "a_module_is_checked_against_its_admitted_manifest"],
+            },
+            expect: "an event was checked against a manifest grown after admission",
+        },
+        Case {
             id: "host-procedure-keeps-outgrown-state",
             gate: "test",
             tool: None,

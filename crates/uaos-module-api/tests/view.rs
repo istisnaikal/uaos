@@ -687,27 +687,48 @@ fn wide(n: usize) -> String {
 
 #[test]
 fn a_lookup_spends_a_visit_per_member() {
-    // PR-4c, M1: a `Key` step and a predicate's lookup each spend a visit per member examined.
+    // PR-4c, M1: a `Key` step and every predicate's lookup each spend a visit per member examined
+    // (`MemberNotIn` and `StringOrArrayWith` since the scoped round, L-c).
     let doc = wide(5_000);
     let tape = parse(doc.as_bytes(), &Limits::DEFAULT).unwrap();
     let none = Mask::new();
     let view = StructuralView::new(&tape, &none);
+    let member_in = |key: &str| Predicate::MemberIn {
+        key: key.to_owned(),
+        values: BTreeSet::from(["x".to_owned()]),
+    };
+    // Each lookup, and how many nodes it selects in the object, which has no `absent` member.
     let lookups = [
-        Selector::new(vec![Step::Key("absent".to_owned())]).unwrap(),
-        Selector::new(vec![Step::Where(Predicate::MemberIn {
-            key: "absent".to_owned(),
-            values: BTreeSet::from(["x".to_owned()]),
-        })])
-        .unwrap(),
+        (Selector::new(vec![Step::Key("absent".to_owned())]).unwrap(), 0),
+        (Selector::new(vec![Step::Where(member_in("absent"))]).unwrap(), 0),
+        (
+            Selector::new(vec![Step::Where(Predicate::MemberNotIn {
+                key: "absent".to_owned(),
+                values: BTreeSet::from(["x".to_owned()]),
+            })])
+            .unwrap(),
+            1,
+        ),
+        (
+            Selector::new(vec![Step::Where(Predicate::StringOrArrayWith {
+                key: "absent".to_owned(),
+                element: Box::new(member_in("k")),
+            })])
+            .unwrap(),
+            0,
+        ),
     ];
-    for selector in &lookups {
+    for (selector, selected) in &lookups {
         assert_eq!(
             selector.resolve_within(&view, &mut Visits::new(1_000)),
             Err(SelectorError::Budget),
             "a member scan was not charged"
         );
         let mut ample = Visits::per_call();
-        assert_eq!(selector.resolve_within(&view, &mut ample).map(|ids| ids.len()), Ok(0));
+        assert_eq!(
+            selector.resolve_within(&view, &mut ample).map(|ids| ids.len()),
+            Ok(*selected)
+        );
         assert!(
             Visits::per_call().left() - ample.left() >= 5_000,
             "a member scan was not charged"
