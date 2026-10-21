@@ -37,6 +37,21 @@ use crate::price::{Price, PriceError};
 use crate::sse::{self, Segment, Splitter};
 use crate::stop::{Stop, StopReason};
 
+/// The most JSON values one event's data may hold when it is read for usage: about 1.5 MiB of
+/// transient tape at 24 bytes a node (scoped round L-d). `[CONSCIOUS ASSUMPTION]` Enough for
+/// a provider's last event, which can repeat the whole output; WP3.0d counts real ones.
+const MAX_EVENT_NODES: u32 = 65_536;
+
+/// The deepest nesting one event's data may hold when it is read for usage.
+const MAX_EVENT_DEPTH: u16 = 128;
+
+/// Used only if the limits built from [`RelayLimits`] were refused, which clamping prevents.
+const EVENT_PARSE_FALLBACK: uaos_json::Limits = match uaos_json::Limits::new(1 << 20, MAX_EVENT_DEPTH, MAX_EVENT_NODES)
+{
+    Ok(limits) => limits,
+    Err(_) => uaos_json::Limits::DEFAULT,
+};
+
 /// The relay's bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelayLimits {
@@ -70,7 +85,8 @@ pub enum CutReason {
     /// A usage report's cost passed the reservation. The kernel stop is engaged too.
     BudgetOverrun,
     /// A usage report's cost passed nano-USD's range, so it is past any reservation. The
-    /// kernel stop is engaged too; the report keeps the last cost in range.
+    /// kernel stop is engaged too. The report keeps the last usage and cost in range, and the
+    /// reservation settles in full, estimated: the overrun shows in this reason and the stop.
     CostOutOfRange,
     /// The kernel stop was engaged.
     Stopped(StopReason),
@@ -259,6 +275,14 @@ impl Relay {
         }
         let meter = Meter {
             splitter: Splitter::new(self.limits.max_event_bytes),
+            parse: uaos_json::Limits::new(
+                u32::try_from(self.limits.max_event_bytes)
+                    .unwrap_or(u32::MAX)
+                    .clamp(1, uaos_json::Limits::MAX_BYTES_CEILING),
+                MAX_EVENT_DEPTH,
+                MAX_EVENT_NODES,
+            )
+            .unwrap_or(EVENT_PARSE_FALLBACK),
             codec: Arc::clone(&self.codec),
             price: Arc::clone(&self.price),
             ceiling: self.ceiling,
@@ -305,6 +329,8 @@ impl Relay {
 /// Reads and prices the usage events report.
 struct Meter {
     splitter: Splitter,
+    /// Bounds for reading one event's data.
+    parse: uaos_json::Limits,
     codec: Arc<dyn DialectCodec>,
     price: Arc<dyn Price>,
     ceiling: NanoUsd,
@@ -354,28 +380,37 @@ impl Meter {
         if data.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
             return Ok(None);
         }
-        let tape = uaos_json::parse(data, &uaos_json::Limits::DEFAULT).map_err(|_| CutReason::UnreadableUsage)?;
+        let tape = uaos_json::parse(data, &self.parse).map_err(|_| CutReason::UnreadableUsage)?;
         let mut mask = Mask::new();
         mask.seal(&tape).map_err(|_| CutReason::UnreadableUsage)?;
-        Ok(self.codec.usage(&StructuralView::new(&tape, &mask)))
+        // A report naming no dimension says nothing; on a usage frame it cuts, and it can never
+        // settle as a final cost of zero (scoped round M-a).
+        Ok(self
+            .codec
+            .usage(&StructuralView::new(&tape, &mask))
+            .filter(|report| !report.dims().is_empty()))
     }
 
     fn meter(&mut self, report: &UsageReport) -> Result<(), CutReason> {
         report
             .check(self.codec.dimensions())
             .map_err(|_| CutReason::UnreadableUsage)?;
+        // Merged aside and kept only once priced, so the report's usage and cost always agree
+        // (scoped round L-c).
+        let mut merged = self.usage.clone();
         for (name, count) in report.dims() {
-            match self.usage.iter_mut().find(|(merged, _)| merged == name) {
+            match merged.iter_mut().find(|(held_name, _)| held_name == name) {
                 Some((_, held)) => *held = (*held).max(*count),
-                None => self.usage.push((name.clone(), *count)),
+                None => merged.push((name.clone(), *count)),
             }
         }
-        let cost = match self.price.cost(&self.usage) {
+        let cost = match self.price.cost(&merged) {
             Ok(cost) => cost,
             // A cost past nano-USD's range is past any ceiling (review L1).
             Err(PriceError::Overflow) => return Err(CutReason::CostOutOfRange),
             Err(_) => return Err(CutReason::Unpriced),
         };
+        self.usage = merged;
         self.cost = Some(cost);
         if cost > self.ceiling {
             return Err(CutReason::BudgetOverrun);

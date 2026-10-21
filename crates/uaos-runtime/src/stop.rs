@@ -154,9 +154,11 @@ impl Stop {
 
     /// The engaged stop, while its record is not in the journal yet. The state actor (PR-6b)
     /// journals [`Engaged::draft`] and then calls [`Stop::recorded`]; until it does, this keeps
-    /// returning the stop, so a failed write is retried and a restart never boots running for
-    /// want of a record (review L12). `None` while running, or once recorded. Whoever engaged
-    /// the stop need not journal it, so a relay engages without a journal.
+    /// returning the stop, so while the process runs a failed write is retried (review L12). A
+    /// restart before the record is durable boots running: that is the window rule 3 accepts,
+    /// by acting before the record, and PR-6b's DST bounds it. `None` while running, or once
+    /// recorded. Whoever engaged the stop need not journal it, so a relay engages without a
+    /// journal.
     #[must_use]
     pub fn unrecorded(&self) -> Option<Engaged> {
         let reason = self.reason()?;

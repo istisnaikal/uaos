@@ -3197,6 +3197,30 @@ The journal is tamper-proof.
             },
             expect: "an empty event name reached the codec as a name",
         },
+        Case {
+            id: "relay-empty-usage-report-counts",
+            gate: "test",
+            tool: None,
+            // Scoped round M-a: a report naming no dimension is no report.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "            .filter(|report| !report.dims().is_empty()))\n", "            .filter(|_| true))\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "an_empty_usage_report_is_no_report"],
+            },
+            expect: "an empty usage report counted as a report",
+        },
+        Case {
+            id: "relay-report-after-end-final",
+            gate: "test",
+            tool: None,
+            // Scoped round L-a: a report after the dialect's end is not final.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "                self.ended = kind == FrameKind::End;\n", "                self.ended |= kind == FrameKind::End;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_report_after_the_end_is_not_final"],
+            },
+            expect: "a report after the dialect's end counted as final",
+        },
     ]
 }
 
