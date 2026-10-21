@@ -3,15 +3,17 @@
 //! The `Module` trait and what a hook sees (contract §2, §4): read-only borrows that end with the
 //! call, and a collector for declarations.
 
+use std::fmt;
+
 use uaos_contracts::event::EventType;
 use uaos_contracts::id::{AgentId, OperationId, PocketId};
 use uaos_contracts::operation::{OperationKind, RiskTier};
 use uaos_contracts::wire::Seq;
 
 use crate::codec::SseEvent;
-use crate::decl::{CandidateId, Decls};
+use crate::decl::{CandidateId, DeclsMut};
 use crate::grant_ref::GrantRef;
-use crate::manifest::{HookPoint, Manifest};
+use crate::manifest::{HookPoint, KernelOffer, Manifest, Refusal};
 use crate::state::StateMut;
 use crate::view::StructuralView;
 
@@ -223,11 +225,53 @@ pub trait Module: Send + Sync + 'static {
 
     /// Called at each point it hooked, within the point's deadline. Pure and bounded: it reads the
     /// context, may change its state for the Operation's pocket, and declares.
-    fn on_hook(&self, cx: &HookCx<'_>, state: StateMut<'_>, out: &mut Decls);
+    fn on_hook(&self, cx: &HookCx<'_>, state: StateMut<'_>, out: DeclsMut<'_>);
 
     /// Called, off the hot path, for each journaled event of a pocket it touches, in journal
     /// order. The default declares nothing.
-    fn on_event(&self, event: &EventView<'_>, state: StateMut<'_>, out: &mut Decls) {
+    fn on_event(&self, event: &EventView<'_>, state: StateMut<'_>, out: DeclsMut<'_>) {
         let _ = (event, state, out);
+    }
+}
+
+/// A module the kernel admitted, with the manifest it was admitted under (contract §3). The host
+/// checks every call against this snapshot and never reads [`Module::manifest`] again, so a module
+/// cannot grow its manifest after admission.
+pub struct Admitted<M> {
+    manifest: Manifest,
+    module: M,
+}
+
+impl<M: Module> Admitted<M> {
+    /// The manifest it was admitted under.
+    #[must_use]
+    pub const fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// The module.
+    #[must_use]
+    pub const fn module(&self) -> &M {
+        &self.module
+    }
+}
+
+impl<M> fmt::Debug for Admitted<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Admitted")
+            .field("module", self.manifest.name())
+            .finish()
+    }
+}
+
+impl KernelOffer {
+    /// Admits `module` whole under one snapshot of its manifest ([`KernelOffer::admit`]).
+    ///
+    /// # Errors
+    /// The [`Refusal`].
+    pub fn admit_module<M: Module>(&self, module: M) -> Result<Admitted<M>, Refusal> {
+        let manifest = module.manifest().clone();
+        self.admit(&manifest)?;
+        Ok(Admitted { manifest, module })
     }
 }

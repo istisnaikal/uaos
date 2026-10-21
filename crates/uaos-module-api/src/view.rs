@@ -13,6 +13,11 @@ use std::fmt;
 
 use uaos_json::{JsonError, Kind, Node, NodeId, Tape};
 
+/// A finding names a node that is not on the tape: the view is refused (fail closed).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("a finding names a node that is not on the tape")]
+pub struct MaskError;
+
 /// What detection flagged in one request, by node: values (strings and numbers) and object keys.
 /// The host builds it from the findings. A finding it cannot place on a value or a key refuses
 /// the view (fail closed); a raw view never exists.
@@ -20,6 +25,9 @@ use uaos_json::{JsonError, Kind, Node, NodeId, Tape};
 pub struct Mask {
     values: BTreeSet<NodeId>,
     keys: BTreeSet<NodeId>,
+    /// Once sealed against its tape: the masked containers, as disjoint `[start, end)` id
+    /// ranges, so "inside a masked container" is a binary search, not an ancestor walk.
+    covered: Option<Vec<(NodeId, NodeId)>>,
 }
 
 impl Mask {
@@ -29,6 +37,7 @@ impl Mask {
         Self {
             values: BTreeSet::new(),
             keys: BTreeSet::new(),
+            covered: None,
         }
     }
 
@@ -36,11 +45,37 @@ impl Mask {
     /// it, keys included, so a finding placed on the wrong node fails closed.
     pub fn value(&mut self, id: NodeId) {
         self.values.insert(id);
+        self.covered = None;
     }
 
     /// Masks the key of the object member at `id`.
     pub fn key(&mut self, id: NodeId) {
         self.keys.insert(id);
+        self.covered = None;
+    }
+
+    /// Seals the mask against `tape`: every finding must name a node on it, and masked containers
+    /// become id ranges, so the view's cost no longer grows with depth (contract §7). An unsealed
+    /// mask is as correct and slower; the host seals before it builds a view. Masking anything
+    /// more unseals it.
+    ///
+    /// # Errors
+    /// [`MaskError`] if a finding names a node that is not on `tape`.
+    pub fn seal(&mut self, tape: &Tape<'_>) -> Result<(), MaskError> {
+        let mut covered: Vec<(NodeId, NodeId)> = Vec::new();
+        for id in &self.values {
+            let node = tape.node(*id).ok_or(MaskError)?;
+            // Ids come in document order, so a container inside the last range adds nothing.
+            let inside_last = covered.last().is_some_and(|(_, end)| *id < *end);
+            if node.kind().is_container() && !inside_last {
+                covered.push((*id, node.subtree_end()));
+            }
+        }
+        if self.keys.iter().any(|id| tape.node(*id).is_none()) {
+            return Err(MaskError);
+        }
+        self.covered = Some(covered);
+        Ok(())
     }
 
     /// Whether the value at `id` is masked.
@@ -62,6 +97,7 @@ impl fmt::Debug for Mask {
         f.debug_struct("Mask")
             .field("values", &self.values.len())
             .field("keys", &self.keys.len())
+            .field("sealed", &self.covered.is_some())
             .finish()
     }
 }
@@ -87,6 +123,19 @@ impl<'v, 'a> StructuralView<'v, 'a> {
             node: self.tape.root(),
             mask: self.mask,
         }
+    }
+
+    /// Whether removing `id` would touch masked content: a masked value or key in its subtree,
+    /// its own key included, or a masked container around it. True outside the view.
+    #[must_use]
+    pub fn touches_masked(&self, id: NodeId) -> bool {
+        let Some(node) = self.node(id) else {
+            return true;
+        };
+        let end = node.subtree_end();
+        node.inside_masked()
+            || self.mask.values.range(id..end).next().is_some()
+            || self.mask.keys.range(id..end).next().is_some()
     }
 
     /// The node at `id`, if it is in this view.
@@ -137,8 +186,22 @@ impl<'v, 'a> ViewNode<'v, 'a> {
     }
 
     /// Whether a container around it was masked whole: everything inside reads as masked.
+    /// O(log ranges) once the mask is sealed, O(depth) before; free when nothing is masked.
     fn inside_masked(&self) -> bool {
-        self.node.ancestors().any(|a| self.mask.masks_value(a.id()))
+        if self.mask.values.is_empty() {
+            return false;
+        }
+        let id = self.node.id();
+        match &self.mask.covered {
+            Some(covered) => {
+                let after = covered.partition_point(|(start, _)| *start < id);
+                after
+                    .checked_sub(1)
+                    .and_then(|i| covered.get(i))
+                    .is_some_and(|(_, end)| id < *end)
+            }
+            None => self.node.ancestors().any(|a| self.mask.masks_value(a.id())),
+        }
     }
 
     /// Whether its value is masked: flagged itself, or inside a masked container.

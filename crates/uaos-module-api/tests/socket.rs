@@ -12,17 +12,18 @@
 )]
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use uaos_contracts::event::{EventType, ModuleName};
 use uaos_contracts::id::{OperationId, PocketId, TypedId};
 use uaos_contracts::operation::{OperationKind, RiskTier};
 use uaos_contracts::wire::Seq;
 use uaos_module_api::{
-    CandidateId, ChildBody, ChildKind, ChildOpRequest, Code, ConfigSchema, Decl, DeclError, Decls, EventClass,
-    EventDecl, EventView, GrantDecl, HookCx, HookDecl, HookMode, HookPoint, KernelFeature, KernelOffer, MAX_DECLS,
-    MAX_MODULE_TEXT, MAX_RANK, MAX_STATE_BYTES, Manifest, ManifestBuilder, ManifestError, Module, ModuleApiVersion,
-    ModuleEvent, ModuleState, ModuleText, ModuleVersion, OpMeta, PocketCursor, Refusal, StateMut, Strike, TextError,
-    check_decls,
+    Admitted, CandidateId, ChildBody, ChildKind, ChildOpRequest, Code, ConfigSchema, Decl, DeclError, Decls, DeclsMut,
+    EventClass, EventDecl, EventView, GrantDecl, HookCx, HookDecl, HookMode, HookPoint, KernelFeature, KernelOffer,
+    MAX_DECLS, MAX_MODULE_TEXT, MAX_RANK, MAX_STATE_BYTES, Manifest, ManifestBuilder, ManifestError, Module,
+    ModuleApiVersion, ModuleEvent, ModuleState, ModuleText, ModuleVersion, OnFailure, OpMeta, PocketCursor, Refusal,
+    StateMut, Strike, TextError, check_decls,
 };
 
 const V1: ModuleVersion = ModuleVersion::new(1, 0, 0);
@@ -487,7 +488,7 @@ impl Module for Counter {
         &self.0
     }
 
-    fn on_hook(&self, cx: &HookCx<'_>, mut state: StateMut<'_>, out: &mut Decls) {
+    fn on_hook(&self, cx: &HookCx<'_>, mut state: StateMut<'_>, mut out: DeclsMut<'_>) {
         let seen = state.as_bytes().len();
         // The append is attempted every call; past the bound it is refused and marks the state.
         let grew = state.append(&[1]).is_ok();
@@ -499,13 +500,16 @@ impl Module for Counter {
 
 /// The host's procedure (contract §5): run the call on a copy; keep it only if it stayed within
 /// its bound and its declarations pass; otherwise strike and keep the state as it was.
-fn host_call(module: &dyn Module, cx: &HookCx<'_>, state: &mut ModuleState) -> Result<Vec<Decl>, Strike> {
+fn host_call<M: Module>(module: &Admitted<M>, cx: &HookCx<'_>, state: &mut ModuleState) -> Result<Vec<Decl>, Strike> {
     let mut copy = state.clone();
     let mut out = Decls::new(module.manifest().max_decls());
-    module.on_hook(cx, StateMut::new(&mut copy), &mut out);
+    module
+        .module()
+        .on_hook(cx, StateMut::new(&mut copy), DeclsMut::new(&mut out));
     if copy.exceeded() {
         return Err(Strike::StateExceeded);
     }
+    // The admitted snapshot, never a fresh `manifest()` (fresh full review, M1).
     check_decls(module.manifest(), Some(cx.point()), out.as_slice())?;
     *state = copy;
     Ok(out.into_inner())
@@ -519,7 +523,7 @@ fn a_call_that_outgrows_its_state_is_struck_whole() {
         .state_bytes(4)
         .build()
         .unwrap();
-    let module: Box<dyn Module> = Box::new(Counter(manifest));
+    let module = full_offer().admit_module(Counter(manifest)).unwrap();
     let op = OpMeta::new(
         OperationId::from_parts(1, [1; 10]),
         OperationKind::ModelCall,
@@ -528,7 +532,7 @@ fn a_call_that_outgrows_its_state_is_struck_whole() {
     );
     let cx = HookCx::new(HookPoint::Classify, op);
     let mut state = ModuleState::new(module.manifest().state_bytes());
-    let outcomes: Vec<_> = (0..6).map(|_| host_call(module.as_ref(), &cx, &mut state)).collect();
+    let outcomes: Vec<_> = (0..6).map(|_| host_call(&module, &cx, &mut state)).collect();
     let emitted: usize = outcomes.iter().flatten().map(Vec::len).sum();
     assert_eq!(emitted, 2);
     assert_eq!(outcomes[4], Err(Strike::StateExceeded), "an outgrown call was kept");
@@ -538,10 +542,10 @@ fn a_call_that_outgrows_its_state_is_struck_whole() {
 
     let mut out = Decls::new(8);
     let event_type = EventType::new("op.created").unwrap();
-    module.on_event(
+    module.module().on_event(
         &EventView::new(pocket(1), Seq(1), &event_type, None),
         StateMut::new(&mut state),
-        &mut out,
+        DeclsMut::new(&mut out),
     );
     assert!(out.is_empty(), "the default on_event declares nothing");
 }
@@ -622,6 +626,7 @@ fn every_code_is_one_the_contract_lists() {
         ManifestError::GrantWithoutAction,
         ManifestError::UndeclaredCode(code("x1")),
         ManifestError::ModeUnavailable(p),
+        ManifestError::FailureUnavailable(p),
         ManifestError::DefaultOnReachesOutside,
         ManifestError::ConfigSchema,
     ];
@@ -692,9 +697,9 @@ impl Module for Summarizer {
         &self.0
     }
 
-    fn on_hook(&self, _cx: &HookCx<'_>, _state: StateMut<'_>, _out: &mut Decls) {}
+    fn on_hook(&self, _cx: &HookCx<'_>, _state: StateMut<'_>, _out: DeclsMut<'_>) {}
 
-    fn on_event(&self, _event: &EventView<'_>, mut state: StateMut<'_>, out: &mut Decls) {
+    fn on_event(&self, _event: &EventView<'_>, mut state: StateMut<'_>, mut out: DeclsMut<'_>) {
         if state.append(&[1]).is_ok() {
             let request = ChildOpRequest::new(ChildKind::ModelCall, prompt(), 1).unwrap();
             out.push(Decl::Request(request)).unwrap();
@@ -704,10 +709,16 @@ impl Module for Summarizer {
 
 /// The host's event procedure (contract §5): as for a hook, and a replay keeps the state changes
 /// and discards every declaration.
-fn host_event(module: &dyn Module, event: &EventView<'_>, state: &mut ModuleState) -> Result<Vec<Decl>, Strike> {
+fn host_event<M: Module>(
+    module: &Admitted<M>,
+    event: &EventView<'_>,
+    state: &mut ModuleState,
+) -> Result<Vec<Decl>, Strike> {
     let mut copy = state.clone();
     let mut out = Decls::new(module.manifest().max_decls());
-    module.on_event(event, StateMut::new(&mut copy), &mut out);
+    module
+        .module()
+        .on_event(event, StateMut::new(&mut copy), DeclsMut::new(&mut out));
     if copy.exceeded() {
         return Err(Strike::StateExceeded);
     }
@@ -724,7 +735,7 @@ fn a_replay_rebuilds_state_and_declares_nothing() {
         .state_bytes(8)
         .build()
         .unwrap();
-    let module = Summarizer(manifest);
+    let module = full_offer().admit_module(Summarizer(manifest)).unwrap();
     let event_type = EventType::new("op.committed").unwrap();
     let live = EventView::new(pocket(1), Seq(1), &event_type, None);
     let mut state = ModuleState::new(8);
@@ -754,4 +765,84 @@ fn cancelling_a_child_needs_child_operations() {
         Err(Strike::FeatureNotRequired(KernelFeature::ChildOperations)),
         "a cancellation was accepted without child_operations"
     );
+}
+
+fn full_offer() -> KernelOffer {
+    KernelOffer::new(ModuleApiVersion::CURRENT, set(KernelFeature::ALL))
+}
+
+/// A module whose manifest grows after admission: it asks for child Operations once flipped.
+struct Shifty {
+    small: Manifest,
+    grown: Manifest,
+    flipped: AtomicBool,
+}
+
+impl Module for Shifty {
+    fn manifest(&self) -> &Manifest {
+        if self.flipped.load(Ordering::Relaxed) {
+            &self.grown
+        } else {
+            &self.small
+        }
+    }
+
+    fn on_hook(&self, _cx: &HookCx<'_>, _state: StateMut<'_>, mut out: DeclsMut<'_>) {
+        let request = ChildOpRequest::new(ChildKind::ModelCall, prompt(), 1).unwrap();
+        out.push(Decl::Request(request)).unwrap();
+    }
+}
+
+/// Fresh full review M1: a module is checked against the manifest it was admitted under, not one
+/// it grows later.
+#[test]
+fn a_module_is_checked_against_its_admitted_manifest() {
+    let hook = HookDecl::new(HookPoint::ResponsePost, HookMode::Observe);
+    let small = builder().hook(hook.clone()).build().unwrap();
+    let grown = builder()
+        .hook(hook)
+        .requires(KernelFeature::ChildOperations)
+        .action(ChildKind::ModelCall)
+        .build()
+        .unwrap();
+    let degraded = KernelOffer::new(ModuleApiVersion::CURRENT, BTreeSet::new());
+    let module = degraded
+        .admit_module(Shifty {
+            small,
+            grown,
+            flipped: AtomicBool::new(false),
+        })
+        .unwrap();
+    module.module().flipped.store(true, Ordering::Relaxed);
+    let op = OpMeta::new(
+        OperationId::from_parts(1, [1; 10]),
+        OperationKind::ModelCall,
+        pocket(1),
+        RiskTier::new(1).unwrap(),
+    );
+    let cx = HookCx::new(HookPoint::ResponsePost, op);
+    let mut state = ModuleState::new(0);
+    assert_eq!(
+        host_call(&module, &cx, &mut state),
+        Err(Strike::UndeclaredAction),
+        "a module grew its manifest after admission"
+    );
+}
+
+/// Fresh full review L5: a failure at a point that runs after forwarding cannot deny.
+#[test]
+fn a_failure_cannot_deny_after_the_fact() {
+    let deny = |point| {
+        builder()
+            .hook(HookDecl::new(point, HookMode::Observe).on_failure(OnFailure::Deny))
+            .build()
+    };
+    for point in [HookPoint::ResponsePost, HookPoint::ErrorTranslate] {
+        assert_eq!(
+            deny(point),
+            Err(ManifestError::FailureUnavailable(point)),
+            "a failure policy that cannot deny was loaded"
+        );
+    }
+    assert!(deny(HookPoint::Classify).is_ok());
 }

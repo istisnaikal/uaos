@@ -222,6 +222,14 @@ impl HookPoint {
         !matches!(self, Self::StreamObserve | Self::ResponsePost | Self::ErrorTranslate)
     }
 
+    /// Whether a failure here can still deny the Operation: every point before forwarding, and
+    /// `stream.assert`, which cancels. A manifest's `OnFailure::Deny` only makes such a point
+    /// stricter; the point's own policy (contract §4) is the floor.
+    #[must_use]
+    pub const fn denies(self) -> bool {
+        !matches!(self, Self::StreamObserve | Self::ResponsePost | Self::ErrorTranslate)
+    }
+
     /// The feature a module must require to hook this point, if any.
     #[must_use]
     pub const fn required_feature(self) -> Option<KernelFeature> {
@@ -246,6 +254,7 @@ pub enum HookMode {
 /// What a hook's failure (a strike, a timeout, a panic) does to the Operation. At risk tier 2 or
 /// more, a failed veto denies whatever the manifest says (contract §4, the kernel rule).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum OnFailure {
     /// The kernel goes on as if the module had declared nothing, and explains it.
     Skip,
@@ -518,6 +527,10 @@ pub enum ManifestError {
     /// An acting hook at a point that only observes.
     #[error("the point `{}` only observes", .0.code())]
     ModeUnavailable(HookPoint),
+    /// `OnFailure::Deny` at a point that runs after the request was forwarded or settled, where
+    /// nothing is left to deny.
+    #[error("the point `{}` runs after forwarding: a failure there cannot deny", .0.code())]
+    FailureUnavailable(HookPoint),
     /// Enabled by default although it reaches outside the request.
     #[error("a module that requests child Operations is off by default")]
     DefaultOnReachesOutside,
@@ -539,7 +552,7 @@ impl ManifestError {
             Self::DuplicateEvent(_) => "duplicate_event",
             Self::GrantWithoutAction => "grant_without_action",
             Self::UndeclaredCode(_) => "undeclared_code",
-            Self::ModeUnavailable(_) => "point_unavailable",
+            Self::ModeUnavailable(_) | Self::FailureUnavailable(_) => "point_unavailable",
             Self::DefaultOnReachesOutside => "default_on_reaches_outside",
             Self::ConfigSchema => "config_schema",
         }
@@ -806,6 +819,9 @@ impl ManifestBuilder {
             }
             if hook.mode == HookMode::Act && !hook.point.acts() {
                 return Err(ManifestError::ModeUnavailable(hook.point));
+            }
+            if hook.on_failure == OnFailure::Deny && !hook.point.denies() {
+                return Err(ManifestError::FailureUnavailable(hook.point));
             }
         }
         for kind in &m.actions {

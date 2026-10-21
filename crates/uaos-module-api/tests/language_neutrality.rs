@@ -27,7 +27,7 @@ use proptest::prelude::*;
 use uaos_json::{Limits, NodeId, parse};
 use uaos_module_api::{
     Code, Mask, ModuleState, ModuleText, Predicate, Selector, Step, StructuralView, TextError, ViewText,
-    is_explicit_bidi, is_tag,
+    is_explicit_bidi, is_tag, is_variation_selector,
 };
 
 /// One sample per GA locale. Invisible and combining characters are written as escapes.
@@ -266,9 +266,11 @@ proptest! {
                     (c.is_control() && !matches!(c, '\n' | '\r' | '\t')) || is_explicit_bidi(c) || is_tag(c)
                 };
                 prop_assert!(!s.chars().any(refused), "accepted text holds a refused character");
+                prop_assert!(!has_variation_run(&s), "accepted text holds a variation run");
             }
             Err(TextError::Control) => prop_assert!(s.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))),
             Err(TextError::Tag) => prop_assert!(s.chars().any(is_tag)),
+            Err(TextError::VariationRun) => prop_assert!(has_variation_run(&s)),
             Err(TextError::Bidi) => prop_assert!(s.chars().any(is_explicit_bidi)),
             Err(other) => prop_assert!(false, "unexpected refusal {other:?}"),
         }
@@ -311,4 +313,33 @@ fn module_text_takes_crlf_and_refuses_tag_characters() {
             "a tag character was accepted"
         );
     }
+}
+
+/// Fresh full review L4: one variation selector after a base character selects a glyph; a run of
+/// them, or one with no base, is refused.
+#[test]
+fn module_text_refuses_variation_runs() {
+    for ok in ["\u{2764}\u{FE0F}", "\u{6F22}\u{E0100}", "1\u{FE0F}\u{20E3}"] {
+        assert!(ModuleText::new(ok).is_ok(), "{ok:?}");
+    }
+    for run in ["a\u{FE0F}\u{FE0F}", "\u{FE0F}x", "a\u{E0100}\u{E0101}"] {
+        assert_eq!(
+            ModuleText::new(run),
+            Err(TextError::VariationRun),
+            "a variation-selector run was accepted"
+        );
+    }
+}
+
+/// Whether `s` holds a variation selector with no base character before it.
+fn has_variation_run(s: &str) -> bool {
+    let mut after_base = false;
+    for c in s.chars() {
+        let selector = is_variation_selector(c);
+        if selector && !after_base {
+            return true;
+        }
+        after_base = !selector;
+    }
+    false
 }

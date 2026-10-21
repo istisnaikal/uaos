@@ -48,8 +48,9 @@ pub use codec::{
     SseEvent, UsageReport, classify,
 };
 pub use decl::{
-    AppendSlot, CandidateId, ChildBody, ChildOpRequest, Decl, DeclError, Decls, MAX_EVENT_VALUES, MAX_MODULE_TEXT,
-    MAX_RANK, ModuleEvent, ModuleText, Strike, TextError, check_decls, is_explicit_bidi, is_tag,
+    AppendSlot, CandidateId, ChildBody, ChildOpRequest, Decl, DeclError, Decls, DeclsMut, MAX_EVENT_VALUES,
+    MAX_MODULE_TEXT, MAX_RANK, ModuleEvent, ModuleText, Strike, TextError, check_decls, is_explicit_bidi, is_tag,
+    is_variation_selector,
 };
 pub use grant_ref::GrantRef;
 pub use manifest::{
@@ -57,11 +58,11 @@ pub use manifest::{
     KernelOffer, MAX_CODES, MAX_CONFIG_SCHEMA_BYTES, MAX_DECLS, MAX_STATE_BYTES, Manifest, ManifestBuilder,
     ManifestError, ModuleApiVersion, ModuleVersion, OnFailure, Refusal, ViewKind,
 };
-pub use module::{Candidate, CircuitState, EventView, HookCx, Module, OpMeta};
+pub use module::{Admitted, Candidate, CircuitState, EventView, HookCx, Module, OpMeta};
 pub use selector::{
-    MAX_PREDICATE_DEPTH, MAX_PREDICATE_VALUES, MAX_SELECTOR_STEPS, MAX_SELECTOR_TEXT, Predicate, Selector,
-    SelectorError, Step,
+    MAX_PREDICATE_DEPTH, MAX_PREDICATE_VALUES, MAX_SELECTOR_STEPS, MAX_SELECTOR_TEXT, MAX_VISITS, Predicate, Selector,
+    SelectorError, Step, Visits,
 };
 pub use state::{ModuleState, PocketCursor, StateCheckpoint, StateError, StateMut};
 pub use uaos_json::{JsonError, Kind, NodeId};
-pub use view::{Mask, StructuralView, ViewNode, ViewText};
+pub use view::{Mask, MaskError, StructuralView, ViewNode, ViewText};

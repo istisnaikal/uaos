@@ -128,3 +128,37 @@ main) takes the whole grant path: `uaos.grant/1`, the Cedar `Pocket` entity, `me
 with its consent rule, and their tests and seeded violations. That covers the findings M1 of
 round 1, F3 and F4 of round 2, and L4, M4 and M5. PR-4 keeps the module socket, `AgentId`
 and the contract text. PR-4b's own reviews are recorded in `docs/reviews/WP3.A4b-grant-path.md`.
+
+## Fresh full review (D-31, round 4)
+
+**Reviewed:** the whole PR at `442c59a` (rebased on main `eab34c6`), by a fresh-context agent
+reading only, 2026-10-21. **Result:** 1 High · 5 Medium · 7 Low.
+**Verified clean by the reviewer:**
+- the golden envelope bytes, and the schema;
+- all 23 seeds;
+- no probe of masked text;
+- `StateMut`;
+- unhooked points;
+- event value names;
+- canonical paths and `classify`;
+- both §10 code lists;
+- the moved grant path.
+
+| | Finding | Fix | Proof |
+|---|---|---|---|
+| H1 | `boot_cuts.rs` (from #29, on main) built an `EventDraft` without the new `agent_id` and no longer compiled. | `agent_id: None` (`e607d2a`). | The lane: 524 tests on main `eab34c6` |
+| M1 | The host re-read `manifest()` every call, so a module could grow its manifest after admission. | `KernelOffer::admit_module` returns `Admitted`, which keeps the manifest admitted. §2 rule 5 and the host procedures check every call against it. | `a_module_is_checked_against_its_admitted_manifest`; negative `module-manifest-reread` |
+| M2 | Every accessor walked ancestors, so cost grew with depth, and strip resolution had no budget. | `Mask::seal` turns masked containers into id ranges, making each check a binary search; an unsealed mask stays correct. A `Visits` budget runs per resolution and, for the host, per call (`MAX_VISITS`). §7 states the cost. | `sealed_and_unsealed_views_agree` (20,000 cases), `a_selector_stops_at_its_budget`; negatives `view-sealed-mask-drifts`, `selector-unbudgeted` |
+| M3 | `UsageReport` took undeclared codes and duplicates. | `DialectCodec::dimensions` declares them; `UsageReport::check` refuses others; `dim` refuses a name twice. | `usage_reports_name_declared_dimensions_once`; negative `usage-undeclared-dimension` |
+| M4 | A host-side refusal discarded a call's state live, while replay kept it. | §5: only a static strike or `state_exceeded` discards state. A host-side refusal drops the declaration and keeps the state, so replay rebuilds the live state. PR-8 obligation. | Contract |
+| M5 | The CHANGELOG claimed as built what is contract text, and miscounted. | Corrected. | — |
+| L1 | A strip could remove its anchor itself. | `may_strip` requires the anchor on a proper ancestor. | Negative `strip-removes-anchor` |
+| L2 | A masked container's structure stays visible. | Stated in §2 rule 5: structure is not content; findings are strings, numbers and keys. | Contract |
+| L3 | Roles failed open under masking. | `may_strip` refuses a strip that touches masked content (`StructuralView::touches_masked`). | Negative `strip-touches-masked` |
+| L4 | `ModuleText` let runs of variation selectors through. | A variation selector must follow a base character. | `module_text_refuses_variation_runs`; negative `module-text-accepts-variation-run` |
+| L5 | `OnFailure` vs §4. | §4: the point's policy is the floor. `Deny` is refused where nothing is left to deny (`FailureUnavailable`, `point_unavailable`). `OnFailure` is `#[non_exhaustive]`. | `a_failure_cannot_deny_after_the_fact`; negative `failure-deny-after-the-fact` |
+| L6 | The `Decls` collector could be swapped. | Hooks get a `DeclsMut` handle by value. | The type |
+| L7 | Stale docs; methods. | Docs corrected. `Put`, `Patch` and `Options` added; an unlisted method is denied. | `an_unlisted_method_is_denied` |
+
+Under D-31 this is round 4. A scoped round 5 over these fixes follows; a High or a Medium still
+open after it splits the PR.
