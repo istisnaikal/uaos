@@ -3342,16 +3342,16 @@ The journal is tamper-proof.
             expect: "a variation selector without a visible base passed",
         },
         Case {
-            id: "mask-seal-ignores-tape",
+            id: "selector-raw-bound-too-loose",
             gate: "test",
             tool: None,
-            // PR-4c, L3: a seal belongs to the tape it was sealed against.
-            seed: replace("crates/uaos-module-api/src/view.rs", "            .filter(|seal| seal.tape == TapeMark::of(tape))\n", "            .filter(|_| true)\n"),
+            // PR-4c V1 review M3: past the raw bound a string is never decoded.
+            seed: replace("crates/uaos-module-api/src/selector.rs", "is_some_and(|len| len > MAX_RAW_TEXT)", "is_some_and(|len| len > 2 * MAX_RAW_TEXT)"),
             runner: Runner::Program {
                 program: "cargo",
-                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_seal_belongs_to_its_tape"],
+                args: &["test", "-p", "uaos-module-api", "--lib", "a_string_past_the_raw_bound_is_never_decoded"],
             },
-            expect: "a seal from another tape masked the wrong node",
+            expect: "a string past the raw bound was decoded",
         },
         Case {
             id: "mask-seal-keyless-key",
@@ -3382,7 +3382,7 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // PR-4c, L4: the crate's call procedure strikes a call that outgrew its state.
-            seed: replace("crates/uaos-module-api/src/module.rs", "        if copy.exceeded() {\n            return Err(Strike::StateExceeded);\n        }\n        check_decls(&self.manifest, Some(cx.point()), out.as_slice())?;\n", "        check_decls(&self.manifest, Some(cx.point()), out.as_slice())?;\n"),
+            seed: replace("crates/uaos-module-api/src/module.rs", "        if copy.exceeded() {\n            return Err(Strike::StateExceeded);\n        }\n        check_decls(self.manifest(), Some(cx.point()), out.as_slice())?;\n", "        check_decls(self.manifest(), Some(cx.point()), out.as_slice())?;\n"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-module-api", "--test", "socket", "a_call_that_outgrows_its_state_is_struck_whole"],

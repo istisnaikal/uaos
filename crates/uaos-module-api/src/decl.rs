@@ -58,12 +58,17 @@ pub const fn is_tag(c: char) -> bool {
     matches!(c, '\u{E0000}'..='\u{E007F}')
 }
 
-/// Whether `c` is a variation selector: U+FE00 to U+FE0F, or U+E0100 to U+E01EF. One after a
+/// Whether `c` is a variation selector (Unicode 16.0, `Variation_Selector`): the Mongolian free
+/// variation selectors U+180B to U+180D and U+180F, U+FE00 to U+FE0F, or U+E0100 to U+E01EF
+/// (the Mongolian ones since PR-4c V1 review L6). One after a
 /// base character selects a glyph (an emoji's presentation, an ideographic variant); a run of
 /// them selects nothing a person sees.
 #[must_use]
 pub const fn is_variation_selector(c: char) -> bool {
-    matches!(c, '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
+    matches!(
+        c,
+        '\u{180B}'..='\u{180D}' | '\u{180F}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}'
+    )
 }
 
 /// Whether `c` is a default-ignorable code point (Unicode 16.0, `DerivedCoreProperties.txt`,

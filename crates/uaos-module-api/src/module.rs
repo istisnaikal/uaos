@@ -253,13 +253,13 @@ impl<M: Module> Admitted<M> {
     /// [`Strike::StateExceeded`], or the static strike [`check_decls`] returns.
     pub fn call_hook(&self, cx: &HookCx<'_>, state: &mut ModuleState) -> Result<Vec<Decl>, Strike> {
         let mut copy = state.clone();
-        let mut out = Decls::new(self.manifest.max_decls());
+        let mut out = Decls::new(self.manifest().max_decls());
         self.module
             .on_hook(cx, StateMut::new(&mut copy), DeclsMut::new(&mut out));
         if copy.exceeded() {
             return Err(Strike::StateExceeded);
         }
-        check_decls(&self.manifest, Some(cx.point()), out.as_slice())?;
+        check_decls(self.manifest(), Some(cx.point()), out.as_slice())?;
         *state = copy;
         Ok(out.into_inner())
     }
@@ -271,13 +271,13 @@ impl<M: Module> Admitted<M> {
     /// As [`Admitted::call_hook`].
     pub fn call_event(&self, event: &EventView<'_>, state: &mut ModuleState) -> Result<Vec<Decl>, Strike> {
         let mut copy = state.clone();
-        let mut out = Decls::new(self.manifest.max_decls());
+        let mut out = Decls::new(self.manifest().max_decls());
         self.module
             .on_event(event, StateMut::new(&mut copy), DeclsMut::new(&mut out));
         if copy.exceeded() {
             return Err(Strike::StateExceeded);
         }
-        check_decls(&self.manifest, None, out.as_slice())?;
+        check_decls(self.manifest(), None, out.as_slice())?;
         *state = copy;
         Ok(if event.replay { Vec::new() } else { out.into_inner() })
     }

@@ -19,31 +19,11 @@ use uaos_json::{JsonError, Kind, Node, NodeId, Tape};
 #[error("a finding names a node that is not on the tape, or a key no node has")]
 pub struct MaskError;
 
-/// Which tape a seal was made for: where its input lies, how long it is, how many nodes it has.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TapeMark {
-    start: usize,
-    bytes: usize,
-    nodes: u32,
-}
-
-impl TapeMark {
-    fn of(tape: &Tape<'_>) -> Self {
-        let input = tape.input();
-        Self {
-            start: input.as_ptr().addr(),
-            bytes: input.len(),
-            nodes: tape.stats().nodes,
-        }
-    }
-}
-
-/// A sealed mask's masked containers, for the tape it was sealed against.
-#[derive(Clone, PartialEq, Eq)]
-struct Seal {
-    tape: TapeMark,
-    /// Disjoint `[start, end)` id ranges, so "inside a masked container" is a binary search.
-    covered: Vec<(NodeId, NodeId)>,
+#[cfg(test)]
+thread_local! {
+    /// Strings [`ViewNode::text`] decoded on this thread, so a test can prove the comparison
+    /// bound (contract §7; PR-4c V1 review M3).
+    pub(crate) static DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// What detection flagged in one request, by node: values (strings and numbers) and object keys.
@@ -53,8 +33,6 @@ struct Seal {
 pub struct Mask {
     values: BTreeSet<NodeId>,
     keys: BTreeSet<NodeId>,
-    /// Once sealed: the masked containers as ranges, for the tape it was sealed against.
-    seal: Option<Seal>,
 }
 
 impl Mask {
@@ -64,7 +42,6 @@ impl Mask {
         Self {
             values: BTreeSet::new(),
             keys: BTreeSet::new(),
-            seal: None,
         }
     }
 
@@ -72,25 +49,24 @@ impl Mask {
     /// it, keys included, so a finding placed on the wrong node fails closed.
     pub fn value(&mut self, id: NodeId) {
         self.values.insert(id);
-        self.seal = None;
     }
 
     /// Masks the key of the object member at `id`.
     pub fn key(&mut self, id: NodeId) {
         self.keys.insert(id);
-        self.seal = None;
     }
 
     /// Seals the mask against `tape`: every finding must name a node on it, a key finding a
     /// node that has a key, and masked containers become id ranges, so the view's cost no
-    /// longer grows with depth (contract §7). The seal belongs to `tape`: a view over another
-    /// tape ignores it (contract §2 rule 5). An unsealed mask is as correct and slower; the host
-    /// seals before it builds a view. Masking anything more unseals it.
+    /// longer grows with depth (contract §7). The [`Sealed`] holds `tape` and the mask and builds
+    /// the view itself, so a seal is never used over another tape, and the mask cannot change
+    /// while it lives (contract §2 rule 5; PR-4c V1 review M2: a fingerprint of the tape could
+    /// match a refilled buffer). An unsealed view is as correct and slower.
     ///
     /// # Errors
     /// [`MaskError`] if a finding names a node that is not on `tape`, or a key finding a node
     /// with no key.
-    pub fn seal(&mut self, tape: &Tape<'_>) -> Result<(), MaskError> {
+    pub fn seal<'v, 'a>(&'v self, tape: &'v Tape<'a>) -> Result<Sealed<'v, 'a>, MaskError> {
         let mut covered: Vec<(NodeId, NodeId)> = Vec::new();
         for id in &self.values {
             let node = tape.node(*id).ok_or(MaskError)?;
@@ -107,11 +83,11 @@ impl Mask {
         {
             return Err(MaskError);
         }
-        self.seal = Some(Seal {
-            tape: TapeMark::of(tape),
+        Ok(Sealed {
+            tape,
+            mask: self,
             covered,
-        });
-        Ok(())
+        })
     }
 
     /// Whether the value at `id` is masked.
@@ -133,7 +109,38 @@ impl fmt::Debug for Mask {
         f.debug_struct("Mask")
             .field("values", &self.values.len())
             .field("keys", &self.keys.len())
-            .field("sealed", &self.seal.is_some())
+            .finish()
+    }
+}
+
+/// A mask sealed against one tape ([`Mask::seal`]): the tape, the mask, and the masked
+/// containers as disjoint `[start, end)` id ranges, so "inside a masked container" is a binary
+/// search. It borrows both, so neither can change while it lives.
+#[derive(Clone)]
+pub struct Sealed<'v, 'a> {
+    tape: &'v Tape<'a>,
+    mask: &'v Mask,
+    covered: Vec<(NodeId, NodeId)>,
+}
+
+impl<'a> Sealed<'_, 'a> {
+    /// The view over the sealed tape: each visit costs O(log ranges) (contract §7).
+    #[must_use]
+    pub fn view(&self) -> StructuralView<'_, 'a> {
+        StructuralView {
+            tape: self.tape,
+            mask: self.mask,
+            covered: Some(&self.covered),
+        }
+    }
+}
+
+impl fmt::Debug for Sealed<'_, '_> {
+    // Counts only, as for the mask.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sealed")
+            .field("mask", self.mask)
+            .field("ranges", &self.covered.len())
             .finish()
     }
 }
@@ -143,21 +150,27 @@ impl fmt::Debug for Mask {
 pub struct StructuralView<'v, 'a> {
     tape: &'v Tape<'a>,
     mask: &'v Mask,
-    /// The mask's ranges, when it was sealed against this very tape.
+    /// The sealed mask's ranges, when the view came from [`Sealed::view`].
     covered: Option<&'v [(NodeId, NodeId)]>,
 }
 
 impl<'v, 'a> StructuralView<'v, 'a> {
-    /// A view over `tape` in which what `mask` names reads as masked. The host builds it. A
-    /// seal made for another tape is ignored, so its ranges never mask the wrong nodes.
+    /// A view over `tape` in which what `mask` names reads as masked, each visit O(depth). The
+    /// host builds it; a sealed mask builds its own ([`Sealed::view`]), O(log ranges) a visit.
     #[must_use]
-    pub fn new(tape: &'v Tape<'a>, mask: &'v Mask) -> Self {
-        let covered = mask
-            .seal
-            .as_ref()
-            .filter(|seal| seal.tape == TapeMark::of(tape))
-            .map(|seal| seal.covered.as_slice());
-        Self { tape, mask, covered }
+    pub const fn new(tape: &'v Tape<'a>, mask: &'v Mask) -> Self {
+        Self {
+            tape,
+            mask,
+            covered: None,
+        }
+    }
+
+    /// Whether the view reads a sealed mask, each visit O(log ranges) (contract §7; PR-4c V1
+    /// review L3).
+    #[must_use]
+    pub const fn is_sealed(&self) -> bool {
+        self.covered.is_some()
     }
 
     /// The root value.
@@ -200,7 +213,7 @@ impl fmt::Debug for StructuralView<'_, '_> {
         f.debug_struct("StructuralView")
             .field("nodes", &self.tape.stats().nodes)
             .field("mask", self.mask)
-            .field("sealed_here", &self.covered.is_some())
+            .field("sealed", &self.covered.is_some())
             .finish()
     }
 }
@@ -352,6 +365,8 @@ impl<'v, 'a> ViewNode<'v, 'a> {
         if self.value_masked() {
             return Ok(Some(ViewText::Masked));
         }
+        #[cfg(test)]
+        DECODED.with(|decoded| decoded.set(decoded.get() + 1));
         Ok(self.node.str_value()?.map(ViewText::Plain))
     }
 

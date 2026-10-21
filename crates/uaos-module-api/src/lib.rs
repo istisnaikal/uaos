@@ -65,4 +65,4 @@ pub use selector::{
 };
 pub use state::{ModuleState, PocketCursor, StateCheckpoint, StateError, StateMut};
 pub use uaos_json::{JsonError, Kind, NodeId};
-pub use view::{Mask, MaskError, StructuralView, ViewNode, ViewText};
+pub use view::{Mask, MaskError, Sealed, StructuralView, ViewNode, ViewText};

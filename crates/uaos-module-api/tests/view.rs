@@ -599,8 +599,8 @@ fn a_strip_keeps_its_anchor_and_masked_content() {
     );
     let mut mask = Mask::new();
     mask.value(text);
-    mask.seal(&tape).unwrap();
-    let masked = StructuralView::new(&tape, &mask);
+    let sealed = mask.seal(&tape).unwrap();
+    let masked = sealed.view();
     assert!(
         !roles.may_strip(&masked, block, HookPoint::IngressParsed),
         "a strip touched masked content"
@@ -620,7 +620,7 @@ fn a_mask_naming_a_node_off_the_tape_refuses_to_seal() {
     let small = parse(b"[1]", &Limits::DEFAULT).unwrap();
     let mut off = Mask::new();
     off.value(last);
-    assert_eq!(off.seal(&small), Err(uaos_module_api::MaskError));
+    assert_eq!(off.seal(&small).err(), Some(uaos_module_api::MaskError));
 }
 
 /// Fresh full review M2: every resolution spends a visit budget, and stops when it is spent.
@@ -783,44 +783,35 @@ fn a_key_finding_on_a_keyless_node_refuses_the_seal() {
         let mut bad = Mask::new();
         bad.key(id);
         assert_eq!(
-            bad.seal(&tape),
-            Err(MaskError),
+            bad.seal(&tape).err(),
+            Some(MaskError),
             "a key finding on a keyless node was sealed"
         );
     }
 }
 
 #[test]
-fn a_seal_belongs_to_its_tape() {
-    // PR-4c, L3: sealed against one tape, a mask's ranges would mask the wrong nodes of another,
-    // so a view over another tape reads it unsealed.
-    let first = parse(br#"{"a":{"x":"1"},"b":"2"}"#, &Limits::DEFAULT).unwrap();
-    let second = parse(br#"{"a":"1","b":{"y":"2"}}"#, &Limits::DEFAULT).unwrap();
+fn a_sealed_view_reads_its_own_tape_sealed() {
+    // PR-4c V1 review M2, L3: the seal holds the tape it was made for and builds the view, so it
+    // is never used over another tape: a buffer refilled with another document of the same
+    // length cannot be, since the seal borrows it. On its own tape the seal is used and holds.
+    let tape = parse(br#"{"a":{"x":"1"},"b":"2"}"#, &Limits::DEFAULT).unwrap();
     let none = Mask::new();
-    let first_ids: Vec<NodeId> = StructuralView::new(&first, &none)
+    let ids: Vec<NodeId> = StructuralView::new(&tape, &none)
         .root()
         .descendants()
         .map(|n| n.id())
         .collect();
-    let second_ids: Vec<NodeId> = StructuralView::new(&second, &none)
-        .root()
-        .descendants()
-        .map(|n| n.id())
-        .collect();
-    // The container `a` of the first tape covers its own id and the next.
     let mut mask = Mask::new();
-    mask.value(first_ids[0]);
-    mask.seal(&first).unwrap();
-    // On the second tape that next id is `b`, outside any masked container.
-    let b = StructuralView::new(&second, &mask).node(second_ids[1]).unwrap();
-    assert_eq!(
-        b.key().unwrap(),
-        Some(ViewText::Plain("b".into())),
-        "a seal from another tape masked the wrong node"
-    );
-    // On its own tape the seal still holds.
-    let x = StructuralView::new(&first, &mask).node(first_ids[1]).unwrap();
-    assert_eq!(x.key().unwrap(), Some(ViewText::Masked));
+    mask.value(ids[0]);
+    assert!(!StructuralView::new(&tape, &mask).is_sealed());
+    let sealed = mask.seal(&tape).unwrap();
+    let view = sealed.view();
+    assert!(view.is_sealed(), "a sealed mask built an unsealed view");
+    // Inside the masked container `a`, its member `x` reads masked; `b` outside it reads plain.
+    assert_eq!(view.node(ids[1]).unwrap().key().unwrap(), Some(ViewText::Masked));
+    let b = view.root().member("b").unwrap().unwrap();
+    assert_eq!(b.key().unwrap(), Some(ViewText::Plain("b".into())));
 }
 
 proptest! {
@@ -841,9 +832,8 @@ proptest! {
                 if *key && has_key { mask.key(*id) } else { mask.value(*id) }
             }
         }
-        let mut sealed = mask.clone();
-        sealed.seal(&tape).unwrap();
-        let (slow, fast) = (StructuralView::new(&tape, &mask), StructuralView::new(&tape, &sealed));
+        let sealed = mask.seal(&tape).unwrap();
+        let (slow, fast) = (StructuralView::new(&tape, &mask), sealed.view());
         for id in &ids {
             let (a, b) = (slow.node(*id).unwrap(), fast.node(*id).unwrap());
             prop_assert_eq!(a.key().unwrap(), b.key().unwrap(), "a sealed view disagreed with an unsealed one");
