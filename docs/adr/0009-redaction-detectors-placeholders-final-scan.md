@@ -1,6 +1,6 @@
 # ADR-0009: Redaction: detector sets, placeholders and the final scan
 
-**Status:** Accepted (2026-10-13); amended 2026-10-13 by the retroactive review (see "Amendment 1") · **Plan refs:** §2.5 DETECT/TRANSFORM/FINAL, D7, D20, T2, B-22 · **Builds on:** ADR-0005, ADR-0007
+**Status:** Accepted (2026-10-13); amended 2026-10-13 by the retroactive review (see "Amendment 1") and 2026-10-21 (see "Amendment 2") · **Plan refs:** §2.5 DETECT/TRANSFORM/FINAL, D7, D20, T2, B-22 · **Builds on:** ADR-0005, ADR-0007
 
 ## Context
 
@@ -131,11 +131,13 @@ so no secret-shaped string is committed.
     output passes the final scan.
   - The final scan blocks the unredacted JSON body, naming the class.
   - The final scan blocks the unredacted raw text, naming the class.
-- **Negatives:** 100,000 hard negatives in 40 named families. False positives are counted per
+- **Negatives:** 100,000 hard negatives in 41 named families. False positives are counted per
   class **and per family**, so a family cannot hide in the total. The families include:
   - near-misses of every format, including runs that break before the minimum length;
   - URLs without a password, `host:port/path@…` on dotted and single-label service hosts,
     scp-style git URLs, and templated passwords;
+  - two URLs glued by a byte that is not a list byte, the second with a user and no password
+    (`url-glued`, Amendment 2);
   - JSON-escaped and percent-encoded text without a secret;
   - exact placeholders;
   - hashes, UUIDs, base64, code, prose and printable noise.
@@ -144,7 +146,7 @@ so no secret-shaped string is committed.
 |---|---|---|
 | Recall, every class | 3,000 / 3,000 (0 missed) | ≥ 99.9 % |
 | False positives, every class | 0 / 100,000 | ≤ 0.5 % |
-| False positives, every family | 0 in each of 40 | ≤ 0.5 % |
+| False positives, every family | 0 in each of 41 | ≤ 0.5 % |
 | Class labelled correctly | 3,000 / 3,000 | ≥ 99.9 % |
 
 Zero misses in 3,000 bounds recall above 99.9 % at 95 % confidence (the rule of three). Against
@@ -182,10 +184,18 @@ equals the full scan).
   - URL passwords:
     - containing an unencoded `"`, `<`, `>` or backtick, which end a URL in text;
     - containing a `://` whose scheme-like run follows a list or nesting byte (`,` `;` `|` `=`
-      `&` `?` `/` `(` `[` `{` `'`), which reads as another URL starting there (`p,ss://x`).
-      Any other `://` in a password is covered, and so is a password that starts with `//`
-      (Amendment 2);
-    - with userinfo longer than 512 bytes;
+      `&` `?` `/` `(` `[` `{` `'` `]`) since the previous `://`, or since the user's `:`. That
+      reads as another URL starting there (`p,ss://x`);
+    - containing a `://` and starting with a port and `/`, `?` or `#` (`8080/x://y`), which
+      reads as `host:port/…`;
+    - holding a `://`, or starting with `//`, after a user holding a byte other than letters,
+      digits, `+`, `.`, `-`, `_` or an earlier placeholder (`smtp://o'brien://pw@h`,
+      `smtp://me@example.com:ab://cd@h`), which reads as glue between two URLs.
+
+      Any other `://` in a password is covered, and so is any other password starting with
+      `//`, the generator's users being plain (Amendment 2);
+    - with userinfo longer than 512 bytes, or, across a `://`, longer than 512 bytes before its
+      last `://`;
     - that start with a port number and `/`, `?` or `#` after a host-like user, or continue as a
       lowercase path;
     - that look like an scp path after an email-like user;
@@ -194,8 +204,9 @@ equals the full scan).
     Each reads as something else, as URL parsers would read it.
 - **Over-redaction.** A URL whose path contains `@` after a password is redacted up to that
   `@`, host and path included; a key glued to more of its own characters is redacted with them;
-  two URLs glued by a byte that is not a list or nesting byte (`a://u:p@h)b://v:q@k`) read as
-  one userinfo, redacted up to the last `@`. All fail closed.
+  two URLs glued by a byte that is not a list or nesting byte (`a://u:p@h)b://v:q@k`) can read
+  as one userinfo, redacted up to the last `@`. Each anchor still reads its own URL, so this
+  never hides a password that URL holds alone. All fail closed.
 - **Exposed history.** Secrets already sent before a session pinned v1 are not retro-redacted;
   P3 raises "already exposed — rotate" (plan §2.5).
 - **Deferred to P3.**
@@ -212,8 +223,9 @@ equals the full scan).
 
 ## Verification
 
-- **Gate `redaction-corpus`** (active): `crates/uaos-redact/tests/corpus.rs`. Two seeded
-  negative cases prove it bites:
+- **Gate `redaction-corpus`** (active): `crates/uaos-redact/tests/corpus.rs`, with the URL
+  rule's unit tests. Seven seeded negative cases prove it bites; the five of Amendment 2 are
+  listed there. The first two:
   - `redact-detector-drops-a-format`: a coarse one, which drops the `ASIA` prefix;
   - `redact-url-password-stops-at-slash`: a subtle one, one byte wide; it brings back review
     H2.
@@ -281,16 +293,54 @@ window ended at every next `://`, so neither anchor found the password. The fina
 the same detectors, so it missed it too.
 
 **Decision:**
-- The window still ends at the next `://`, but the userinfo runs on past it unless another URL
-  starts there. Another URL needs a scheme after a list or nesting byte.
-- The anchor at that `://` continues the open userinfo. The scan visits every anchor in order,
-  so each window is examined once and the scan stays linear
+- **Each anchor reads its own URL** in a window that ends at the next `://`, exactly as before.
+- **A userinfo may also run on past that `://`.** The anchor there continues it, and a chain only
+  ever adds to what each anchor finds alone. It runs on only when all of these hold:
+  - another URL does not start at the cut: there is no scheme-like run after a list or nesting
+    byte since the previous `://`;
+  - the text after the user's `:` is not a port and a path;
+  - the user is plain: letters, digits, `+`, `.`, `-`, `_` or an earlier placeholder;
+  - the userinfo so far is at most `USERINFO_MAX` bytes.
+- **The scan stays linear.** It visits every anchor in order, so each window is examined once
   (`adversarial_inputs_are_scanned_in_linear_work`).
-- An open userinfo never runs past `USERINFO_MAX` bytes.
-- The corpus generator now leaves out the one shape still missed, which the limits above
-  state, so the property claims what the rule does. The CI seed is kept as a fixed case.
+- **The corpus generator** leaves out exactly the shapes still missed, which the limits above
+  state, by mirroring the detector. The property therefore claims what the rule does. The CI
+  seed is kept as a fixed case.
+
+**Revised by its V1 review (same day, before merge):**
+- **H1.** The first version let a chain replace the next anchor's own reading. In
+  `http://localhost:8080/?url=jdbc:mysql://root:pw@db`, the chained candidate was dropped as
+  `host:port/path`, so `pw` survived, though the base redacted it.
+  - **Fix:** each anchor now reads its own URL, and no userinfo runs on after a port and a path.
+  - **Test:** `a_host_and_port_never_hide_the_next_urls_password`.
+- **M1.** It also redacted the user of a glued URL with no password, as in
+  `http://mirror.example.com\nssh://git@…`, where `\n` is the two bytes.
+  - **Fix:** the plain-user and port rules.
+  - **Corpus:** a negative family, `url-glued`. Its first run found a third shape,
+    `http://mirror.example.com!jdbc:mysql://db/app?user=bob@corp.com`: a scheme's own `:` read
+    as the user's. A chain now needs a plain user in every case, not only before `//`.
+- **M2.** The generator's exclusion did not mirror the detector. It does now.
+- **Lows:**
+  - L1: the length bound is stated as it is: up to 512 bytes before the last `://`, and a
+    window of 512 after it.
+  - L2: this status line and the Verification section are updated.
+  - L3: the corpus is re-measured with its 41st family ("Measured"). The property can still
+    draw the older port-then-lowercase-path miss, stated since Amendment 1, about three runs
+    in 10,000. It is left as stated.
+  - L4: `]` is a list byte, so a placeholder from an earlier round never joins two URLs.
 
 **Precision:**
 - Two URLs a list byte separates stay two passwords.
 - A URL list or a redirect parameter (`?next=https://git@github.com`) is not a password.
-- Both are tested (`another_url_after_a_list_byte_stays_another_url`) and seeded.
+- A URL glued to another by a byte that is no list byte, the second with a user and no
+  password, is not a password.
+- All three are tested (`another_url_after_a_list_byte_stays_another_url`) and seeded.
+
+**Seeded violations** (gate `redaction-corpus`):
+
+| id | Seed | Caught by |
+|---|---|---|
+| `redact-url-separator-ends-userinfo` | the user is looked for only before the cut | `url_passwords_may_hold_a_scheme_separator` |
+| `redact-url-chain-past-list-byte` | a userinfo runs on after a list byte | `another_url_after_a_list_byte_stays_another_url` |
+| `redact-url-chain-from-host-port` | a userinfo runs on after `host:port/` | `another_url_after_a_list_byte_stays_another_url` |
+| `redact-url-chain-any-user` | any user's userinfo runs on past a `://` | `another_url_after_a_list_byte_stays_another_url` |

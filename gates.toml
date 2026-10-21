@@ -248,7 +248,7 @@ source = "CLAUDE.md §4 CI merge blocker: redaction corpus (detector set v1 vs s
 lane = "merge"
 status = "active"
 job = "test"
-negative = ["redact-detector-drops-a-format", "redact-url-password-stops-at-slash", "redact-url-separator-ends-userinfo", "redact-url-chain-past-list-byte"]
+negative = ["redact-detector-drops-a-format", "redact-url-password-stops-at-slash", "redact-url-separator-ends-userinfo", "redact-url-chain-past-list-byte", "redact-url-chain-from-host-port", "redact-url-chain-any-user"]
 
 [[gate]]
 id = "policy-semantics"
