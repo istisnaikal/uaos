@@ -2840,7 +2840,7 @@ The journal is tamper-proof.
             gate: "language-neutrality",
             tool: None,
             // Fresh full review L4: runs of variation selectors carry invisible bytes; module text refuses them.
-            seed: replace("crates/uaos-module-api/src/decl.rs", "            if selector && !after_base {\n", "            if false && selector && !after_base {\n"),
+            seed: replace("crates/uaos-module-api/src/decl.rs", "                base = None;\n", ""),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-module-api", "--test", "language_neutrality", "module_text_refuses_variation_runs"],
@@ -3292,6 +3292,102 @@ The journal is tamper-proof.
                 args: &["test", "-p", "uaos-runtime", "--test", "relay", "usage_on_a_frame_the_codec_calls_content_is_metered"],
             },
             expect: "usage on a frame the codec calls content went unmetered",
+        },
+        Case {
+            id: "selector-member-scan-uncharged",
+            gate: "test",
+            tool: None,
+            // PR-4c, M1: every member a lookup examines spends a visit.
+            seed: replace("crates/uaos-module-api/src/selector.rs", "        visits.spend(1)?;\n        // A key compares as it decodes and stops at the first difference: O(key) at most.\n", "        // A key compares as it decodes and stops at the first difference: O(key) at most.\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_lookup_spends_a_visit_per_member"],
+            },
+            expect: "a member scan was not charged",
+        },
+        Case {
+            id: "selector-raw-bound-too-tight",
+            gate: "test",
+            tool: None,
+            // PR-4c, M1: the raw-length shortcut refuses only what cannot decode to a value.
+            seed: replace("crates/uaos-module-api/src/selector.rs", "const MAX_RAW_TEXT: usize = 6 * MAX_SELECTOR_TEXT;\n", "const MAX_RAW_TEXT: usize = 5 * MAX_SELECTOR_TEXT;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_string_that_decodes_short_enough_still_matches"],
+            },
+            expect: "an escaped string that decodes to a value was refused",
+        },
+        Case {
+            id: "module-text-invisible-base",
+            gate: "language-neutrality",
+            tool: None,
+            // PR-4c, L1: a variation selector's base is visible.
+            seed: replace("crates/uaos-module-api/src/decl.rs", "                base = (!c.is_whitespace() && !c.is_control() && !is_default_ignorable(c)).then_some(c);\n", "                base = Some(c);\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "language_neutrality", "module_text_needs_a_visible_base"],
+            },
+            expect: "a variation selector without a visible base passed",
+        },
+        Case {
+            id: "module-text-ideographic-any-base",
+            gate: "language-neutrality",
+            tool: None,
+            // PR-4c, L1: an ideographic selector follows a CJK ideograph only.
+            seed: replace("crates/uaos-module-api/src/decl.rs", "                if !base.is_some_and(|b| !ideographic || is_unified_ideograph(b)) {\n", "                if !base.is_some_and(|_| !ideographic || true) {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "language_neutrality", "module_text_needs_a_visible_base"],
+            },
+            expect: "a variation selector without a visible base passed",
+        },
+        Case {
+            id: "mask-seal-ignores-tape",
+            gate: "test",
+            tool: None,
+            // PR-4c, L3: a seal belongs to the tape it was sealed against.
+            seed: replace("crates/uaos-module-api/src/view.rs", "            .filter(|seal| seal.tape == TapeMark::of(tape))\n", "            .filter(|_| true)\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_seal_belongs_to_its_tape"],
+            },
+            expect: "a seal from another tape masked the wrong node",
+        },
+        Case {
+            id: "mask-seal-keyless-key",
+            gate: "test",
+            tool: None,
+            // PR-4c, L3: a key finding on a node with no key refuses the seal.
+            seed: replace("crates/uaos-module-api/src/view.rs", "            .any(|id| tape.node(*id).and_then(|node| node.key_span()).is_none())\n", "            .any(|id| tape.node(*id).is_none())\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_key_finding_on_a_keyless_node_refuses_the_seal"],
+            },
+            expect: "a key finding on a keyless node was sealed",
+        },
+        Case {
+            id: "rolemap-fresh-budget-per-assign",
+            gate: "test",
+            tool: None,
+            // PR-4c, L4: a RoleMap carries one budget for all of a codec's roles().
+            seed: replace("crates/uaos-module-api/src/codec.rs", "        let mut visits = Visits::new(MAX_VISITS.saturating_sub(self.spent));\n", "        let mut visits = Visits::per_call();\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_codecs_roles_share_one_budget"],
+            },
+            expect: "a codec's roles each got a fresh budget",
+        },
+        Case {
+            id: "host-procedure-keeps-outgrown-state",
+            gate: "test",
+            tool: None,
+            // PR-4c, L4: the crate's call procedure strikes a call that outgrew its state.
+            seed: replace("crates/uaos-module-api/src/module.rs", "        if copy.exceeded() {\n            return Err(Strike::StateExceeded);\n        }\n        check_decls(&self.manifest, Some(cx.point()), out.as_slice())?;\n", "        check_decls(&self.manifest, Some(cx.point()), out.as_slice())?;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "a_call_that_outgrows_its_state_is_struck_whole"],
+            },
+            expect: "an outgrown call was kept",
         },
     ]
 }

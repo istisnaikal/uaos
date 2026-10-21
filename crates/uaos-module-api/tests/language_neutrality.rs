@@ -331,15 +331,96 @@ fn module_text_refuses_variation_runs() {
     }
 }
 
-/// Whether `s` holds a variation selector with no base character before it.
+/// Unicode 16.0 `Default_Ignorable_Code_Point`, as inclusive ranges.
+const IGNORABLE: &[(u32, u32)] = &[
+    (0xAD, 0xAD),
+    (0x34F, 0x34F),
+    (0x61C, 0x61C),
+    (0x115F, 0x1160),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x206F),
+    (0x3164, 0x3164),
+    (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0),
+    (0xFFF0, 0xFFF8),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+];
+
+/// Unicode 16.0 `Unified_Ideograph`, as inclusive ranges.
+const IDEOGRAPHS: &[(u32, u32)] = &[
+    (0x3400, 0x4DBF),
+    (0x4E00, 0x9FFF),
+    (0xFA0E, 0xFA0F),
+    (0xFA11, 0xFA11),
+    (0xFA13, 0xFA14),
+    (0xFA1F, 0xFA1F),
+    (0xFA21, 0xFA21),
+    (0xFA23, 0xFA24),
+    (0xFA27, 0xFA29),
+    (0x20000, 0x2A6DF),
+    (0x2A700, 0x2B739),
+    (0x2B740, 0x2B81D),
+    (0x2B820, 0x2CEA1),
+    (0x2CEB0, 0x2EBE0),
+    (0x2EBF0, 0x2EE5D),
+    (0x30000, 0x3134A),
+    (0x31350, 0x323AF),
+];
+
+fn within(c: char, ranges: &[(u32, u32)]) -> bool {
+    ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&u32::from(c)))
+}
+
+/// The contract's rule, read by pairs: every variation selector needs the character just before
+/// it to be a visible base, and an ideographic one (U+E0100 to U+E01EF) a CJK ideograph.
 fn has_variation_run(s: &str) -> bool {
-    let mut after_base = false;
-    for c in s.chars() {
-        let selector = is_variation_selector(c);
-        if selector && !after_base {
-            return true;
+    let chars: Vec<char> = s.chars().collect();
+    chars.iter().enumerate().any(|(i, c)| {
+        if !is_variation_selector(*c) {
+            return false;
         }
-        after_base = !selector;
+        let Some(before) = i.checked_sub(1).map(|j| chars[j]) else {
+            return true;
+        };
+        let visible = !before.is_whitespace() && !before.is_control() && !within(before, IGNORABLE);
+        let ideographic = u32::from(*c) >= 0xE0100;
+        !visible || (ideographic && !within(before, IDEOGRAPHS))
+    })
+}
+
+#[test]
+fn module_text_needs_a_visible_base() {
+    // PR-4c, L1: whitespace, a control and a default-ignorable code point are no base, and an
+    // ideographic selector follows a CJK ideograph only.
+    for good in [
+        "\u{2764}\u{FE0F}",
+        "a\u{FE0E}",
+        "\u{845B}\u{E0100}",
+        "\u{3400}\u{E01EF}",
+        "\u{20000}\u{E0101}",
+    ] {
+        assert!(ModuleText::new(good).is_ok(), "{good:?}");
     }
-    false
+    for bad in [
+        " \u{FE0F}",
+        "\t\u{FE0F}",
+        "\u{200B}\u{FE0F}",
+        "\u{AD}\u{FE0F}",
+        "\u{3164}\u{FE0F}",
+        "a\u{E0100}",
+        "\u{2764}\u{E0100}",
+        "\u{845B}\u{FE0F}\u{FE0F}",
+    ] {
+        assert_eq!(
+            ModuleText::new(bad),
+            Err(TextError::VariationRun),
+            "a variation selector without a visible base passed: {bad:?}"
+        );
+    }
 }

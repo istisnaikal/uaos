@@ -29,7 +29,9 @@ pub enum TextError {
     /// A control character other than a newline, a carriage return or a tab.
     #[error("module text holds a control character other than a newline, a carriage return or a tab")]
     Control,
-    /// A variation selector that follows no base character, or another variation selector: runs
+    /// A variation selector that follows no visible base character (whitespace, a control and a
+    /// default-ignorable code point are none), or another variation selector, or, for an
+    /// ideographic one, anything but a CJK ideograph: runs
     /// of them can carry bytes a model decodes and a person cannot see.
     #[error("module text holds a variation selector that follows no base character")]
     VariationRun,
@@ -64,6 +66,56 @@ pub const fn is_variation_selector(c: char) -> bool {
     matches!(c, '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
 }
 
+/// Whether `c` is a default-ignorable code point (Unicode 16.0, `DerivedCoreProperties.txt`,
+/// `Default_Ignorable_Code_Point`): invisible, so no base for a variation selector.
+const fn is_default_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{AD}'
+            | '\u{34F}'
+            | '\u{61C}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFF8}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
+/// Whether `c` is a CJK unified ideograph (Unicode 16.0, `Unified_Ideograph`), the only base an
+/// ideographic variation selector, U+E0100 to U+E01EF, takes (UTS #37).
+const fn is_unified_ideograph(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{FA0E}'..='\u{FA0F}'
+            | '\u{FA11}'
+            | '\u{FA13}'..='\u{FA14}'
+            | '\u{FA1F}'
+            | '\u{FA21}'
+            | '\u{FA23}'..='\u{FA24}'
+            | '\u{FA27}'..='\u{FA29}'
+            | '\u{20000}'..='\u{2A6DF}'
+            | '\u{2A700}'..='\u{2B739}'
+            | '\u{2B740}'..='\u{2B81D}'
+            | '\u{2B820}'..='\u{2CEA1}'
+            | '\u{2CEB0}'..='\u{2EBE0}'
+            | '\u{2EBF0}'..='\u{2EE5D}'
+            | '\u{30000}'..='\u{3134A}'
+            | '\u{31350}'..='\u{323AF}'
+    )
+}
+
 /// Text a module adds to a request: bounded, in any language and kept byte for byte (ADR-0020
 /// rule 2), without control characters but newlines, carriage returns and tabs, without
 /// explicit bidirectional controls, tag characters or runs of variation selectors. Like every outbound byte, it is detected and final-scanned by the kernel (contract
@@ -91,13 +143,20 @@ impl ModuleText {
         if text.chars().any(is_tag) {
             return Err(TextError::Tag);
         }
-        let mut after_base = false;
+        // The visible character a variation selector may follow, if the last one was one.
+        let mut base: Option<char> = None;
         for c in text.chars() {
-            let selector = is_variation_selector(c);
-            if selector && !after_base {
-                return Err(TextError::VariationRun);
+            if is_variation_selector(c) {
+                // An ideographic selector selects a glyph of a CJK ideograph only (UTS #37).
+                let ideographic = c >= '\u{E0100}';
+                if !base.is_some_and(|b| !ideographic || is_unified_ideograph(b)) {
+                    return Err(TextError::VariationRun);
+                }
+                // A second selector needs a base of its own.
+                base = None;
+            } else {
+                base = (!c.is_whitespace() && !c.is_control() && !is_default_ignorable(c)).then_some(c);
             }
-            after_base = !selector;
         }
         Ok(Self(text))
     }

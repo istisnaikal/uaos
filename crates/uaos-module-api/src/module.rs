@@ -11,10 +11,10 @@ use uaos_contracts::operation::{OperationKind, RiskTier};
 use uaos_contracts::wire::Seq;
 
 use crate::codec::SseEvent;
-use crate::decl::{CandidateId, DeclsMut};
+use crate::decl::{CandidateId, Decl, Decls, DeclsMut, Strike, check_decls};
 use crate::grant_ref::GrantRef;
 use crate::manifest::{HookPoint, KernelOffer, Manifest, Refusal};
-use crate::state::StateMut;
+use crate::state::{ModuleState, StateMut};
 use crate::view::StructuralView;
 
 /// What a hook may know about its Operation: identifiers and metadata, never content. Built by
@@ -243,6 +243,45 @@ pub struct Admitted<M> {
 }
 
 impl<M: Module> Admitted<M> {
+    /// Runs one hook call by the contract's procedure (§5), on a copy of `state`, against the
+    /// manifest it was admitted under. The copy becomes the state only if it stayed within its
+    /// bound and every declaration passes [`check_decls`]; otherwise the call is a strike, none
+    /// of its declarations apply, and `state` is as it was. The host adds only the strikes it
+    /// alone can make.
+    ///
+    /// # Errors
+    /// [`Strike::StateExceeded`], or the static strike [`check_decls`] returns.
+    pub fn call_hook(&self, cx: &HookCx<'_>, state: &mut ModuleState) -> Result<Vec<Decl>, Strike> {
+        let mut copy = state.clone();
+        let mut out = Decls::new(self.manifest.max_decls());
+        self.module
+            .on_hook(cx, StateMut::new(&mut copy), DeclsMut::new(&mut out));
+        if copy.exceeded() {
+            return Err(Strike::StateExceeded);
+        }
+        check_decls(&self.manifest, Some(cx.point()), out.as_slice())?;
+        *state = copy;
+        Ok(out.into_inner())
+    }
+
+    /// Delivers one journaled event by the same procedure. A replay keeps the state changes and
+    /// returns no declaration, so it rebuilds what the live run kept (§5).
+    ///
+    /// # Errors
+    /// As [`Admitted::call_hook`].
+    pub fn call_event(&self, event: &EventView<'_>, state: &mut ModuleState) -> Result<Vec<Decl>, Strike> {
+        let mut copy = state.clone();
+        let mut out = Decls::new(self.manifest.max_decls());
+        self.module
+            .on_event(event, StateMut::new(&mut copy), DeclsMut::new(&mut out));
+        if copy.exceeded() {
+            return Err(Strike::StateExceeded);
+        }
+        check_decls(&self.manifest, None, out.as_slice())?;
+        *state = copy;
+        Ok(if event.replay { Vec::new() } else { out.into_inner() })
+    }
+
     /// The manifest it was admitted under.
     #[must_use]
     pub const fn manifest(&self) -> &Manifest {
