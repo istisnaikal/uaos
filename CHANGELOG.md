@@ -178,12 +178,13 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     The explanation is one critical `kernel.booted` record with the counts, saying when a stop
     may have been lost.
   - **Contract:** the event type `kernel.booted` (`types::ALL` grows from 15 to 16), and the
-    error code `RUNTIME_BOOT_RECORDS_STALE` (Runtime 4).
+    error code `RUNTIME_BOOT_RECORDS_STALE` (Runtime 4); `RiskTier::MIN`; and in `uaos-ledger`,
+    `JournalSink::take_refusal`.
   - **Tests:** drift, the stop, the ledger, intents, the boot record, and a convergence
     property: a boot cut after its n-th append, for every n, converges on the next boot.
   - **Bench (§7):** 49,751 records after a crash boot in 867 ms median on the reference
     machine, about a tenth of it in `boot` itself.
-  - **Negatives:** seventeen seeded violations.
+  - **Negatives:** nineteen seeded violations.
   - **Review:** the V1 review (0 High, 7 Medium, 9 Low), the scoped round (0 High, 2 Medium,
     4 Low) and the final review (0 High, 2 Medium, 7 Low) are filed in
     `docs/reviews/WP3.A6b-boot-recovery.md`.

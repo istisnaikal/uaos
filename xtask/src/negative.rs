@@ -3455,6 +3455,30 @@ The journal is tamper-proof.
             expect: "a clean boot after complete boots claimed a lost stop",
         },
         Case {
+            id: "boot-intent-ids-dropped",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 4 and round 4 L1, the record keeps the Operation's ids.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "        session_id: intent.session_id,\n", "        session_id: None,\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "the_indeterminate_record_carries_the_intents_ids"],
+            },
+            expect: "the indeterminate record dropped the Operation's ids",
+        },
+        Case {
+            id: "boot-stuck-not-surfaced",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 5 and round 4 L2, a boot that left an item stuck surfaces.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "        || report.settled_estimated + report.completed + report.transfers_completed + report.stuck.len() > 0\n", "        || report.settled_estimated + report.completed + report.transfers_completed > 0\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--lib", "a_boot_that_leaves_an_item_stuck_counts_it_and_surfaces"],
+            },
+            expect: "a boot that left an item stuck was journaled as routine",
+        },
+        Case {
             id: "relay-content-json-cuts",
             gate: "test",
             tool: None,

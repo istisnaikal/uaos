@@ -16,7 +16,9 @@ use std::sync::Arc;
 use proptest::prelude::*;
 use uaos_contracts::budget::{BudgetTxKind, IdempotencyKey};
 use uaos_contracts::event::{Actor, Durability, EventEnvelope, EventType, Metadata, types};
-use uaos_contracts::id::{CorrelationId, OperationId, PoolId, ReservationId, TypedId};
+use uaos_contracts::id::{
+    AgentId, CorrelationId, OperationId, PocketId, PoolId, RequestId, ReservationId, SessionId, TypedId,
+};
 use uaos_contracts::money::NanoUsd;
 use uaos_contracts::operation::{RiskTier, SideEffectClass};
 use uaos_contracts::time::WallTime;
@@ -192,12 +194,25 @@ fn build(world: &World, fates: &[Fate], version: u64) {
                     _ => types::OP_INDETERMINATE,
                 };
                 journal.append(op_event(operation, outcome, version)).unwrap();
+                if *fate == Fate::AlreadyIndeterminate {
+                    // That earlier boot completed (round 4 L3): it is no interrupted boot.
+                    journal.append(earlier_boot(version)).unwrap();
+                }
             }
         }
     }
     // The process dies here: the open reservations and intents stay open.
     drop(journal);
     world.fs.crash();
+}
+
+/// A `kernel.booted` an earlier, complete boot journaled.
+fn earlier_boot(version: u64) -> EventDraft {
+    EventDraft {
+        operation_id: None,
+        side_effect_class: SideEffectClass::None,
+        ..op_event(op(0), types::KERNEL_BOOTED, version)
+    }
 }
 
 fn count(envelopes: &[EventEnvelope], event_type: &EventType, operation: OperationId) -> usize {
@@ -606,6 +621,7 @@ proptest! {
             "a boot made an Operation indeterminate twice"
         );
         let appended = reference.envelopes().split_off(before);
+        let last_ledger = appended.iter().rposition(|e| e.event_type == types::BUDGET_ENTRY);
         prop_assert_eq!(
             appended.last().map(|e| e.event_type.clone()),
             Some(types::KERNEL_BOOTED),
@@ -632,8 +648,9 @@ proptest! {
             // says, even when the interrupted boot closed everything.
             // A cut after recovering a reservation no intent named leaves no evidence: the residual
             // §2 step 5 states, which PR-6c's one-record intent removes.
-            let residual = !fates.iter().any(|f| matches!(f, Fate::Open | Fate::AlreadyIndeterminate))
-                && fates.contains(&Fate::ReservedOnly);
+            let residual = !fates.contains(&Fate::Open)
+                && fates.contains(&Fate::ReservedOnly)
+                && last_ledger.is_some_and(|last| n > last);
             if n < appended.len() && !residual {
                 prop_assert_eq!(report.stop_may_be_lost, says_lost, "an interrupted boot hid a lost stop");
             }
@@ -758,4 +775,51 @@ fn recovery_records_carry_the_operations_ids_and_honest_flags() {
         RiskTier::MIN,
         "a clean boot was journaled as a recovery"
     );
+}
+
+#[test]
+fn the_indeterminate_record_carries_the_intents_ids() {
+    // Round 4 L1: every id the intent carries is the Operation's, and its record keeps them.
+    let world = World::new();
+    build(&world, &[Fate::Committed], 1);
+    let intent = EventDraft {
+        session_id: Some(SessionId::from_parts(2, [2; 10])),
+        pocket_id: Some(PocketId::from_parts(3, [3; 10])),
+        request_id: Some(RequestId::from_parts(4, [4; 10])),
+        agent_id: Some(AgentId::from_parts(5, [5; 10])),
+        risk_tier: RiskTier::new(2).unwrap(),
+        ..op_event(op(6), types::OP_RESERVED_INTENT, 1)
+    };
+    {
+        let mut journal = world.open();
+        journal.append(intent).unwrap();
+    }
+    world.fs.crash();
+    assert!(world.boot(&config(1)).is_ok());
+    let envelopes = world.envelopes();
+    let of = |event_type: &EventType| {
+        envelopes
+            .iter()
+            .find(|e| e.event_type == *event_type && e.operation_id == Some(op(6)))
+            .unwrap()
+    };
+    let (written, made) = (of(&types::OP_RESERVED_INTENT), of(&types::OP_INDETERMINATE));
+    assert_eq!(
+        (
+            made.session_id,
+            made.pocket_id,
+            made.request_id,
+            made.agent_id,
+            made.risk_tier
+        ),
+        (
+            written.session_id,
+            written.pocket_id,
+            written.request_id,
+            written.agent_id,
+            written.risk_tier
+        ),
+        "the indeterminate record dropped the Operation's ids"
+    );
+    assert!(made.session_id.is_some() && made.agent_id.is_some());
 }

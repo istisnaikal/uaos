@@ -44,6 +44,10 @@ records, closes what a crash left open, and explains the boot in one record.
   ADR-0018's appendix owes (§5).
 - **PR-6c, a clean shutdown record.** Until one exists, a crash with nothing open looks like a
   clean exit (§2 step 5).
+- **PR-6c, the projection's side effect.** The `uaos-state` projection takes an Operation's
+  side-effect class from its first record, today the reserve `budget.entry`, written with
+  `none`. So it shows an indeterminate Operation's effect as `none`, while `op.indeterminate`
+  carries the intent's. The one-record intent, or the projection's upsert, fixes it (round 4).
 - **PR-6c, the ledger's recovery entries' attribution.** They carry the boot's correlation and
   no `operation_id`: the ledger keeps no Operation per reservation. The one-record intent links
   them (final review L4).
@@ -106,7 +110,8 @@ carry. It runs these steps in this order:
      payload `{"reason": "crash_recovery", "may_have_taken_effect": true}` (V1 review M7).
      Neither success nor failure is assumed (red line 3): the request may have reached the
      provider. The record is the Operation's. It carries the first intent's session, pocket,
-     request and agent ids and its correlation, and links to it (`parent_id`).
+     request and agent ids, its correlation and its risk tier, and links to it (`parent_id`).
+     It surfaces by its type, and by the boot record's tier.
    - `[CONSCIOUS ASSUMPTION]` One ordering window says more than happened. A crash between
      releasing a denied Operation's reservation and journaling `op.denied` leaves an intent
      with no outcome, and boot makes it indeterminate with `may_have_taken_effect`, though a
@@ -138,8 +143,8 @@ carry. It runs these steps in this order:
    - the configuration version.
 
    Every complete boot is explained. The record is critical. It is journaled at the highest risk
-   tier when the boot closed anything or says a stop may have been lost, and at the lowest when
-   nothing was open.
+   tier when the boot closed anything, left an item stuck or says a stop may have been lost, and
+   at the lowest when nothing was open.
 
 `boot` returns the `Stop`, the `Ledger` and a `BootReport` of the same counts.
 
@@ -160,6 +165,9 @@ The property in §5 proves convergence over crashes at every append.
 ## 4. Contract changes (additive)
 
 - **Event type** `kernel.booted`, with the inline payload of §2 step 5. `types::ALL` grows by one.
+- **Error code** `RUNTIME_BOOT_RECORDS_STALE` (Runtime 4, §2 step 0).
+- **`RiskTier::MIN`**, the lowest tier, for a clean boot's record.
+- **`JournalSink::take_refusal`** in `uaos-ledger`, for the journal's own error (§2 step 3).
 - **No schema change:** event types are strings in `uaos.event/1`.
 
 ## 5. Proof obligations
@@ -189,14 +197,17 @@ The property in §5 proves convergence over crashes at every append.
   - no Operation with two `op.indeterminate`;
   - no ledger entry journaled twice under one key.
 
-  The random journals hold open, committed, failed, denied and already indeterminate
-  Operations. Partial settles, transfers and a stop are tested by the ledger's and the stop's
+  The random journals hold open, committed, failed, denied, already indeterminate and
+  reserved-only Operations (a crash between the reserve and the intent). An already
+  indeterminate one is followed by its earlier boot's record, as a complete boot leaves it.
+  Partial settles, transfers and a stop are tested by the ledger's and the stop's
   own suites, not cut at boot level. PR-6d's DST owns that.
 
   The cut journal holds exactly the first n records a real boot appended, which is what a crash
   between two appends leaves: an acknowledged append survives a crash, and open cuts a torn one.
   For every cut before `kernel.booted`, the next complete boot says `stop_may_be_lost` as an
-  uncut boot does.
+  uncut boot does, except a cut after the last ledger append of a journal whose only open work
+  was reservations no intent named. That is the residual §2 step 5 states.
 
 **Seeded violations:** recorded in §7 by the commit that adds them, each with its catching test.
 
@@ -222,8 +233,8 @@ measures them (V1 review M5).
 ## 7. Measured, seeded
 
 **Bench** (`cargo bench -p uaos-runtime --bench boot`, 2026-10-21, at `d503a43`; the boot
-procedure has changed since only in work over the records already held, and the appends are the
-same. That work is the checks of step 0, the intents' bookkeeping, the payload's strings and
+procedure has changed since only in work over the records already held. The appends are the
+same in number and order; their content gained ids and strings. That work is the checks of step 0, the intents' bookkeeping, the payload's strings and
 the evidence scan):
 - **Machine:** the reference machine, Windows 10, environment label `reference-win10-local` (D-33).
 - **Method:** 3 rounds per size, each on a fresh copy of a journal that a crash left. Every
