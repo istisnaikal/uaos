@@ -60,7 +60,8 @@ waits for P5 sidecars.
    control characters other than newline, carriage return and tab; the explicit
    bidirectional controls U+202A–U+202E and U+2066–U+2069 (ADR-0020 rule 5); and the Unicode
    tag characters U+E0000–U+E007F, which a model reads and a person cannot see; and a
-   variation selector that follows no base character (a run of them encodes bytes nobody
+   variation selector (U+FE00–U+FE0F, U+E0100–U+E01EF, and the Mongolian U+180B–U+180D and
+   U+180F since the PR-4c V1 review) that follows no base character (a run of them encodes bytes nobody
    sees). A base is a visible character: not whitespace, not a control, and not a
    default-ignorable code point (PR-4c). An ideographic variation selector, U+E0100–U+E01EF,
    follows only a CJK unified ideograph. Declarations reach the host through a `DeclsMut`
@@ -74,8 +75,10 @@ waits for P5 sidecars.
    counts and nesting, inside a masked container too; findings are strings, numbers and keys.
    A finding the host cannot place on a value or a key refuses the view, and so does one that
    names a node off the tape, or a key finding on a node that has no key (`Mask::seal`). A seal
-   belongs to the tape it was sealed against: a view over any other tape ignores it and reads
-   the mask unsealed, which is as correct and slower (PR-4c). A module's `Strip` selector is
+   holds the tape it was sealed against and the mask, and builds the view itself
+   (`Sealed::view`), so it is never used over another tape and the mask cannot change under it
+   (PR-4c; its V1 review M2 found a fingerprint of the tape matched a refilled buffer). An
+   unsealed view is as correct and slower. A module's `Strip` selector is
    resolved over the masked
    view, never over the raw tape. **Frames and errors** reach a hook as the provider sent
    them: before rehydration (ADR-0017), never rehydrated. A secret masked on the way out
@@ -195,7 +198,8 @@ never shared between pockets (C-18).
   for another (which would clear the mark below and raise its bound) nor keep the handle. Each
   change is atomic, and a refused one marks the state `exceeded`. The host runs every call on a copy and keeps the copy only if
   it is not exceeded and its declarations pass. The procedure is the crate's own
-  (`Admitted::call_hook`, `Admitted::call_event`, PR-4c), so no host can run it differently;
+  (`Admitted::call_hook`, `Admitted::call_event`, PR-4c), so every host gets the same one. A
+  module's own entry points stay public for tests, and PR-8's host calls only these (§12);
   the host adds only the strikes it alone can make. Otherwise the call is a strike
   (`state_exceeded`), and the state is left as it was before the call. **Every strike refuses
   all of the call's declarations.** A static strike (from `check_decls`) and `state_exceeded`
@@ -285,8 +289,9 @@ forbidden role is refused. A strip may remove what lies inside its anchor, never
 itself, and never anything that touches masked content: a codec assigns roles through the
 masked view, so masked content may hide a forbidding role (`RoleMap::may_strip`).
 
-**Cost (PR-4c).** Each step visits a node at most once, and every node a step or a predicate
-examines spends one visit from a `Visits` budget, each member a lookup examines included.
+**Cost (PR-4c).** Each step selects a node at most once, and every node a step or a predicate
+examines spends one visit from a `Visits` budget, each member a lookup examines included, so a
+node examined twice in one step spends twice: the budget counts examinations, not nodes.
 No comparison decodes more than six times `MAX_SELECTOR_TEXT` bytes:
 - a key is compared with the selector's key as it decodes, and stops at the first difference;
 - a string whose raw text is longer than six times `MAX_SELECTOR_TEXT` is equal to no value,
@@ -294,8 +299,8 @@ No comparison decodes more than six times `MAX_SELECTOR_TEXT` bytes:
   `MAX_SELECTOR_TEXT` bytes, longer than any value a selector names. A masked string is
   equal to no value either, so the shortcut reveals nothing about masked text.
 
-Each visit also costs O(log ranges) against a sealed mask; the host seals before it builds a
-view. One call's selectors share one budget of `MAX_VISITS`, and running out is a host-side
+Each visit also costs O(log ranges) against a sealed mask; the host builds the view from the
+seal (`Sealed::view`). One call's selectors share one budget of `MAX_VISITS`, and running out is a host-side
 strike (`budget_exceeded`). **So one call costs at most `MAX_VISITS` visits, each
 O(`MAX_SELECTOR_TEXT` + log ranges).** A codec's `roles()` is bounded the same way: its
 `RoleMap` carries one budget for all the selectors it assigns. `Visits` is not `Copy`, so a
@@ -365,10 +370,10 @@ selector's keys and values, a frame, state bytes or `ModuleText` (I-11).
 - **the per-call cost bound (PR-4c):**
   - a `Key` step and a predicate's lookup spend a visit per member examined;
   - an escaped string at exactly six times `MAX_SELECTOR_TEXT` raw bytes still matches the
-    value it decodes to, and one byte past the bound matches none;
+    value it decodes to, and one byte past the bound matches none and is never decoded;
   - one `RoleMap` exhausts one budget across its assignments;
-- **seals (PR-4c):** a seal from another tape is ignored, and a key finding on a keyless node
-  refuses the seal;
+- **seals (PR-4c):** a sealed view is over its own tape and says it is sealed, and a key
+  finding on a keyless node refuses the seal;
 - **`ModuleText` bases (PR-4c):** whitespace, a control and a default-ignorable code point are
   no base, and an ideographic selector follows a CJK ideograph only;
 - a `GrantRef` is checked against the live grant at every use (the host's test, PR-8). Building
@@ -385,9 +390,11 @@ selector's keys and values, a frame, state bytes or `ModuleText` (I-11).
   strings. Selectors never fold case (Turkish i, German `ß`). NFC and NFD stay distinct.
   `ModuleText` refuses explicit bidi controls and keeps the implicit marks.
 
-**Seeded violations** (`cargo xtask negative`): gate `test`, except the three language cases
-(`selector-folds-case`, `module-text-accepts-bidi-override`, `module-text-accepts-tag`), which
-make the `language-neutrality` gate active (ADR-0020):
+**Seeded violations** (`cargo xtask negative`): gate `test`, except the six language cases
+(`selector-folds-case`, `module-text-accepts-bidi-override`, `module-text-accepts-tag`,
+`module-text-accepts-variation-run`, `module-text-invisible-base`,
+`module-text-ideographic-any-base`), which keep the `language-neutrality` gate active
+(ADR-0020):
 
 | id | Seed | Caught by |
 |---|---|---|
@@ -426,7 +433,7 @@ make the `language-neutrality` gate active (ADR-0020):
 | `selector-raw-bound-too-tight` | the raw-length shortcut refuses a string that decodes to a value (PR-4c) | `a_string_that_decodes_short_enough_still_matches` |
 | `module-text-invisible-base` | any character is a variation selector's base (PR-4c) | `module_text_needs_a_visible_base` |
 | `module-text-ideographic-any-base` | an ideographic selector follows any base (PR-4c) | `module_text_needs_a_visible_base` |
-| `mask-seal-ignores-tape` | a seal is used over any tape (PR-4c) | `a_seal_belongs_to_its_tape` |
+| `selector-raw-bound-too-loose` | a string past the raw bound is decoded (PR-4c V1 review M3) | `a_string_past_the_raw_bound_is_never_decoded` |
 | `mask-seal-keyless-key` | a key finding on a keyless node seals (PR-4c) | `a_key_finding_on_a_keyless_node_refuses_the_seal` |
 | `rolemap-fresh-budget-per-assign` | each assignment gets a fresh budget (PR-4c) | `a_codecs_roles_share_one_budget` |
 | `host-procedure-keeps-outgrown-state` | the crate's procedure keeps a call that outgrew its state (PR-4c) | `a_call_that_outgrows_its_state_is_struck_whole` |
@@ -464,8 +471,8 @@ make the `language-neutrality` gate active (ADR-0020):
     wide objects and long strings;
   - L1: a variation selector's base must be a visible character, not whitespace, a control or
     a default-ignorable code point, and U+E0100–U+E01EF only after a CJK ideograph;
-  - L3: a seal is tied to its tape (a view built from a sealed mask checks it), and a key
-    finding on a node with no key refuses the seal;
+  - L3: a seal holds its tape and builds the view (its V1 review M2), and a key finding on a
+    node with no key refuses the seal;
   - L4: `Visits` becomes move-only; a `RoleMap` carries one budget for a codec's `roles()`;
     the host procedure moves into the crate.
 - **Owned by PR-8:** the codec's `dimensions()`, snapshot at admission like a module's
@@ -478,8 +485,21 @@ make the `language-neutrality` gate active (ADR-0020):
   - calls of one module for one pocket never overlap;
   - a host-side refusal keeps the call's state (§5), so replay rebuilds the live state;
   - every call is checked against the admitted manifest snapshot;
+  - the host calls a module only through `Admitted::call_hook` and `Admitted::call_event`,
+    never its `on_hook` or `on_event` directly (PR-4c V1 review L5);
+  - a host builds a module's view from the seal (`Sealed::view`), so every visit is O(log
+    ranges);
   - one `Visits` budget per call, a strike (`budget_exceeded`) when spent;
   - `not_own_child` and `unknown_candidate` strike what they name.
+- `[CONSCIOUS ASSUMPTION]` (PR-4c V1 review L6) `ModuleText` refuses variation-selector runs
+  and invisible bases, but accepts other invisible characters: runs of U+200B–U+200D and
+  U+2060–U+2064, the Hangul fillers, and format, private-use or noncharacter code points as
+  bases. ZWJ and ZWNJ are needed in emoji sequences and in scripts such as Persian and the
+  Indic scripts, so which others to refuse belongs to ADR-0020 (D-36). The kernel's final scan
+  stays the backstop. Owner: ADR-0020's PR, before PR-8.
+- **Debt (PR-4c V1 review L7):** the Unicode tables in `decl.rs` and in the test oracle name
+  their Unicode 16.0 sources, but nothing checks them against an independent copy of the UCD.
+  Owner: WP3.9, before RC-1.
 - `[CONSCIOUS ASSUMPTION]` Event values are `i64`. A module that is wrong could still encode
   data in numbers. The trust model is trusted code with minimized authority, not hostile
   code: hostile code waits for P5 sidecars. Declared value names close the realistic leak, a

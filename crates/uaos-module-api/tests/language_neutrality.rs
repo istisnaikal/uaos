@@ -319,10 +319,22 @@ fn module_text_takes_crlf_and_refuses_tag_characters() {
 /// them, or one with no base, is refused.
 #[test]
 fn module_text_refuses_variation_runs() {
-    for ok in ["\u{2764}\u{FE0F}", "\u{6F22}\u{E0100}", "1\u{FE0F}\u{20E3}"] {
+    for ok in [
+        "\u{2764}\u{FE0F}",
+        "\u{6F22}\u{E0100}",
+        "1\u{FE0F}\u{20E3}",
+        "\u{1820}\u{180B}",
+    ] {
         assert!(ModuleText::new(ok).is_ok(), "{ok:?}");
     }
-    for run in ["a\u{FE0F}\u{FE0F}", "\u{FE0F}x", "a\u{E0100}\u{E0101}"] {
+    for run in [
+        "a\u{FE0F}\u{FE0F}",
+        "\u{FE0F}x",
+        "a\u{E0100}\u{E0101}",
+        // PR-4c V1 review L6: the Mongolian free variation selectors.
+        "\u{1820}\u{180B}\u{180C}",
+        "\u{180F}x",
+    ] {
         assert_eq!(
             ModuleText::new(run),
             Err(TextError::VariationRun),
@@ -331,7 +343,9 @@ fn module_text_refuses_variation_runs() {
     }
 }
 
-/// Unicode 16.0 `Default_Ignorable_Code_Point`, as inclusive ranges.
+/// Unicode 16.0 `Default_Ignorable_Code_Point`, as inclusive ranges. Source:
+/// `https://www.unicode.org/Public/16.0.0/ucd/DerivedCoreProperties.txt`; re-derive from it when
+/// Unicode is bumped, not from `decl.rs` (PR-4c V1 review L7).
 const IGNORABLE: &[(u32, u32)] = &[
     (0xAD, 0xAD),
     (0x34F, 0x34F),
@@ -352,7 +366,8 @@ const IGNORABLE: &[(u32, u32)] = &[
     (0xE0000, 0xE0FFF),
 ];
 
-/// Unicode 16.0 `Unified_Ideograph`, as inclusive ranges.
+/// Unicode 16.0 `Unified_Ideograph`, as inclusive ranges. Source:
+/// `https://www.unicode.org/Public/16.0.0/ucd/PropList.txt`.
 const IDEOGRAPHS: &[(u32, u32)] = &[
     (0x3400, 0x4DBF),
     (0x4E00, 0x9FFF),

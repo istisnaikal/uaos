@@ -5,9 +5,10 @@
 //!
 //! A selector resolves to node ids taken from the tape itself, in document order and without
 //! repeats, so it can never name anything outside the view. Its size is bounded (steps, nesting,
-//! keys, the values a predicate lists), and each step visits a node at most once, even when the
+//! keys, the values a predicate lists), and each step selects a node at most once, even when the
 //! nodes selected so far are nested inside one another. Every node a step or a predicate examines
-//! spends one visit from a [`Visits`] budget, each member a lookup examines included, and no
+//! spends one visit from a [`Visits`] budget, each member a lookup examines included, so a node
+//! examined twice in one step spends twice: the budget counts examinations, not nodes. No
 //! comparison decodes more than six times [`MAX_SELECTOR_TEXT`] bytes. With each visit O(log
 //! ranges) against a sealed mask, one call costs at most [`MAX_VISITS`] visits, each
 //! O(`MAX_SELECTOR_TEXT` + log ranges) (contract §7).
@@ -381,5 +382,41 @@ impl Selector {
             };
         }
         Ok(current.into_iter().collect())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test: a failed fixture fails the test")]
+mod tests {
+    use std::cell::Cell;
+    use std::collections::BTreeSet;
+
+    use uaos_json::{Limits, parse};
+
+    use super::{MAX_RAW_TEXT, MAX_SELECTOR_TEXT, in_values};
+    use crate::view::{DECODED, Mask, StructuralView};
+
+    #[test]
+    fn a_string_past_the_raw_bound_is_never_decoded() {
+        // PR-4c V1 review M3: past `MAX_RAW_TEXT` raw bytes a string equals no value and is not
+        // decoded; at the bound it is decoded and compared. 256 six-byte escapes are exactly the
+        // bound and decode to the value; one byte more decodes past it.
+        let values = BTreeSet::from(["A".repeat(MAX_SELECTOR_TEXT)]);
+        let escapes = "~u0041".repeat(MAX_SELECTOR_TEXT).replace('~', "\\");
+        for (tail, expected, decodes) in [("", true, 1), ("A", false, 0)] {
+            let doc = format!("{{\"k\":\"{escapes}{tail}\"}}");
+            let tape = parse(doc.as_bytes(), &Limits::DEFAULT).unwrap();
+            let none = Mask::new();
+            let view = StructuralView::new(&tape, &none);
+            let member = view.root().member("k").unwrap();
+            assert_eq!(member.and_then(|m| m.raw_text_len()), Some(MAX_RAW_TEXT + tail.len()));
+            let before = DECODED.with(Cell::get);
+            assert_eq!(in_values(member, &values), Ok(expected));
+            assert_eq!(
+                DECODED.with(Cell::get) - before,
+                decodes,
+                "a string past the raw bound was decoded"
+            );
+        }
     }
 }

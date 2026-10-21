@@ -254,19 +254,22 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       test, the joined data copy sized once, both read bounds pinned from below, and wording.
   - **Negatives:** 26 seeded violations.
 - P3 Move 1, PR-4c: the module socket's selector cost and the round-5 Lows split from PR-4 under
-  D-31 (`docs/adr/appendix/0010-module-socket.md` §2, §5, §7, §12), written before the code.
+  D-31 (`docs/adr/appendix/0010-module-socket.md` §2, §5, §7, §11, §12), written before the
+  code.
   Owed before PR-8.
   - **A per-call cost bound:** every member a lookup examines spends a visit, and no
     comparison decodes more than six times `MAX_SELECTOR_TEXT` bytes. One call costs at most
     `MAX_VISITS` visits, each O(`MAX_SELECTOR_TEXT` + log ranges).
   - **`ModuleText`:** a variation selector's base is visible, and an ideographic one follows
     a CJK ideograph.
-  - **Seals:** a seal belongs to its tape, and a key finding on a node with no key refuses it.
+  - **Seals:** `Mask::seal` returns a `Sealed` that holds its tape and builds the view, so a seal
+    is never used over another tape; a key finding on a node with no key refuses it.
   - **Procedure:** `Visits` is not `Copy`; a `RoleMap` carries one budget; the call procedure
     is the crate's own (`Admitted::call_hook`, `Admitted::call_event`).
   - **Tests:** a member scan charged per member; the raw bound at exactly six times
-    `MAX_SELECTOR_TEXT`; one `RoleMap` budget exhausted; seals bound to their tape and refusing
-    keyless key findings; visible bases and ideographic bases.
+    `MAX_SELECTOR_TEXT`, past which nothing is decoded; one `RoleMap` budget exhausted; a sealed
+    view over its own tape; keyless key findings refused; visible bases, ideographic bases and
+    the Mongolian free variation selectors.
   - **Negatives:** eight seeded violations, plus PR-4's variation-run seed retargeted to the
     new rule.
 - P3 Move 1, PR-4 (spec first): the module socket's contract,
