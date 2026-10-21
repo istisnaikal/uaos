@@ -402,6 +402,12 @@ mod canaries {
     }
 
     #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn std_channel() {
+        // canary: `std::sync::mpsc::channel`
+        let _canary = std::sync::mpsc::channel::<()>();
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
     fn task_spawn_blocking() {
         // canary: `tokio::task::spawn_blocking`
         let _canary = tokio::task::spawn_blocking(|| ());

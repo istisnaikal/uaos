@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::watch;
-use uaos_contracts::error::{ErrorCode, codes};
 use uaos_contracts::event::{Actor, Durability, EnvelopeError, EventEnvelope, InlinePayload, Metadata, types};
 use uaos_contracts::id::CorrelationId;
 use uaos_contracts::operation::{RiskTier, SideEffectClass};
@@ -68,20 +67,11 @@ impl StopReason {
             .find(|r| r.code() == code)
             .unwrap_or(Self::Unrecognized)
     }
-
-    /// The error a refusal under this stop carries.
-    #[must_use]
-    pub const fn error_code(self) -> ErrorCode {
-        match self {
-            Self::BudgetOverrun => codes::BUDGET_STREAM_OVERRUN,
-            _ => codes::RUNTIME_STOPPED,
-        }
-    }
 }
 
 struct Inner {
     engaged: AtomicBool,
-    /// The engaged stop's record was handed to the journal ([`Stop::unrecorded`]).
+    /// The engaged stop's record is in the journal ([`Stop::recorded`]).
     recorded: AtomicBool,
     reason: watch::Sender<Option<StopReason>>,
 }
@@ -162,15 +152,22 @@ impl Stop {
         *self.inner.reason.borrow()
     }
 
-    /// The engaged stop whose record has not been handed out yet, exactly once per engagement:
-    /// the state actor (PR-6b) takes it after the stop took effect, and journals
-    /// [`Engaged::draft`]. `None` while running, or once taken. Whoever engaged the stop need not
-    /// journal it, so a relay engages without a journal.
+    /// The engaged stop, while its record is not in the journal yet. The state actor (PR-6b)
+    /// journals [`Engaged::draft`] and then calls [`Stop::recorded`]; until it does, this keeps
+    /// returning the stop, so a failed write is retried and a restart never boots running for
+    /// want of a record (review L12). `None` while running, or once recorded. Whoever engaged
+    /// the stop need not journal it, so a relay engages without a journal.
     #[must_use]
     pub fn unrecorded(&self) -> Option<Engaged> {
         let reason = self.reason()?;
-        let taken = self.inner.recorded.swap(true, Ordering::SeqCst);
-        (!taken).then_some(Engaged { reason, first: true })
+        (!self.inner.recorded.load(Ordering::SeqCst)).then_some(Engaged { reason, first: true })
+    }
+
+    /// The stop's record is in the journal. A no-op while running.
+    pub fn recorded(&self) {
+        if self.is_engaged() {
+            self.inner.recorded.store(true, Ordering::SeqCst);
+        }
     }
 
     /// A watch on the stop. Subscribe before checking [`Stop::is_engaged`], and a stop engaged
@@ -275,7 +272,9 @@ pub enum BootState {
 }
 
 /// Reads the stop from verified journal records, oldest first: the last `kernel.stopped` or
-/// `kernel.resumed` decides (rule 4). A stop whose reason is missing or unknown still stops.
+/// `kernel.resumed` decides (rule 4). A stop whose reason is missing or unknown still stops,
+/// and only a human resumes: a `kernel.resumed` from any other actor is ignored (review L12;
+/// presence is M3's, ADR-0012).
 pub fn boot_state<'a>(records: impl IntoIterator<Item = &'a EventEnvelope>) -> BootState {
     let mut state = BootState::Running;
     for record in records {
@@ -287,7 +286,7 @@ pub fn boot_state<'a>(records: impl IntoIterator<Item = &'a EventEnvelope>) -> B
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
             state = BootState::Stopped(StopReason::from_code(code));
-        } else if record.event_type == types::KERNEL_RESUMED {
+        } else if record.event_type == types::KERNEL_RESUMED && record.actor == Actor::Human {
             state = BootState::Running;
         }
     }

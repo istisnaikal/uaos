@@ -9,6 +9,10 @@
 //! past the reservation cuts the stream. A cut forwards nothing more of the upstream, drops it,
 //! and ends in the caller's terminal frame or in an error: never in a clean end that a client
 //! could take for a complete answer.
+//!
+//! A priced cost is final only when the stream completed and the dialect's end came at or after
+//! its last usage report. Otherwise it is a lower bound on what the provider bills, and
+//! [`RelayReport::settlement`] settles the reservation in full (review H1).
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -26,8 +30,8 @@ use tokio::sync::oneshot;
 use tokio::time::{Instant, Sleep};
 use uaos_contracts::error::{ErrorCode, codes};
 use uaos_contracts::money::NanoUsd;
-use uaos_ledger::{InFlight, Reservation};
-use uaos_module_api::{Code, DialectCodec, FrameKind, Mask, SseEvent, StructuralView};
+use uaos_ledger::{InFlight, Reservation, Usage};
+use uaos_module_api::{Code, DialectCodec, FrameKind, Mask, SseEvent, StructuralView, UsageReport};
 
 use crate::price::{Price, PriceError};
 use crate::sse::{self, Segment, Splitter};
@@ -40,18 +44,21 @@ pub struct RelayLimits {
     pub max_event_bytes: usize,
     /// The most bytes one response may stream.
     pub max_body_bytes: u64,
-    /// How long the upstream may send nothing before the stream is cut.
+    /// How long the upstream may send nothing while the relay waits for it before the stream is
+    /// cut. The time counts from when the relay starts waiting, so a slow client never causes
+    /// an idle cut. A timeout too large to add to the clock disables the cut.
     pub idle_timeout: Duration,
 }
 
 impl Default for RelayLimits {
-    /// `[CONSCIOUS ASSUMPTION]` 1 MiB per event, 64 MiB per response, 120 s idle. Providers send
-    /// keep-alive pings well inside that.
+    /// `[CONSCIOUS ASSUMPTION]` 1 MiB per event, 64 MiB per response, 600 s idle. A reasoning
+    /// model can be silent for minutes before its first token, and not every dialect sends
+    /// keep-alives; WP3.0d measures the real gaps.
     fn default() -> Self {
         Self {
             max_event_bytes: 1024 * 1024,
             max_body_bytes: 64 * 1024 * 1024,
-            idle_timeout: Duration::from_secs(120),
+            idle_timeout: Duration::from_secs(600),
         }
     }
 }
@@ -62,6 +69,9 @@ impl Default for RelayLimits {
 pub enum CutReason {
     /// A usage report's cost passed the reservation. The kernel stop is engaged too.
     BudgetOverrun,
+    /// A usage report's cost passed nano-USD's range, so it is past any reservation. The
+    /// kernel stop is engaged too; the report keeps the last cost in range.
+    CostOutOfRange,
     /// The kernel stop was engaged.
     Stopped(StopReason),
     /// A billing dimension has no price.
@@ -86,6 +96,7 @@ impl CutReason {
     pub const fn code(self) -> &'static str {
         match self {
             Self::BudgetOverrun => "budget_overrun",
+            Self::CostOutOfRange => "cost_out_of_range",
             Self::Stopped(_) => "stopped",
             Self::Unpriced => "unpriced",
             Self::UnreadableUsage => "unreadable_usage",
@@ -97,18 +108,25 @@ impl CutReason {
         }
     }
 
-    /// The registered error code (contract §7.4).
+    /// The registered error code (contract §7.4). Only the stream that overran gets
+    /// `BUDGET_STREAM_OVERRUN`; every stream cut by the stop it engaged gets `RUNTIME_STOPPED`.
     #[must_use]
     pub const fn error_code(self) -> ErrorCode {
         match self {
-            Self::BudgetOverrun => codes::BUDGET_STREAM_OVERRUN,
-            Self::Stopped(reason) => reason.error_code(),
+            Self::BudgetOverrun | Self::CostOutOfRange => codes::BUDGET_STREAM_OVERRUN,
+            Self::Stopped(_) => codes::RUNTIME_STOPPED,
             Self::Unpriced => codes::BUDGET_UNKNOWN_PRICING,
             Self::UnreadableUsage | Self::Malformed | Self::EventTooLarge | Self::BodyTooLarge => {
                 codes::EGRESS_UNUSABLE_RESPONSE
             }
             Self::Idle | Self::UpstreamFailed => codes::EGRESS_INTERRUPTED,
         }
+    }
+
+    /// Whether this cut engages the kernel stop.
+    #[must_use]
+    pub const fn engages_stop(self) -> bool {
+        matches!(self, Self::BudgetOverrun | Self::CostOutOfRange)
     }
 }
 
@@ -130,12 +148,34 @@ pub struct RelayReport {
     pub end: RelayEnd,
     /// Upstream bytes forwarded to the client. A terminal frame is not counted.
     pub forwarded_bytes: u64,
-    /// Event-stream segments forwarded: events, comments and keep-alives.
+    /// Event-stream segments forwarded: events, comments and keep-alives. In bytes mode, the
+    /// upstream frames forwarded.
     pub segments: u64,
     /// The usage reported, merged per dimension by its highest count.
     pub usage: Vec<(Code, u64)>,
     /// What that usage cost, once a report was priced.
     pub cost: Option<NanoUsd>,
+    /// Whether `cost` is final: the stream completed, and the dialect's end came at or after
+    /// its last usage report. Otherwise `cost` is a running total, a lower bound on the bill.
+    pub usage_final: bool,
+    /// The reservation the relay metered against.
+    pub ceiling: NanoUsd,
+}
+
+impl RelayReport {
+    /// What to settle the Operation's reservation with (contract §7.5):
+    /// - a final cost, as reported;
+    /// - a cost past the reservation, as reported: the provider billed at least that much, and
+    ///   the ledger records the overrun (S1);
+    /// - anything else, the full reservation, estimated: a stream that did not finish may have
+    ///   been billed for every token up to the clamped `max_tokens`.
+    #[must_use]
+    pub fn settlement(&self) -> Usage {
+        match self.cost {
+            Some(cost) if self.usage_final || cost > self.ceiling => Usage::Reported(cost),
+            _ => Usage::Unknown,
+        }
+    }
 }
 
 /// The error the client's body ends in, or a relay that could not start.
@@ -150,8 +190,8 @@ pub enum RelayError {
     Compressed,
 }
 
-/// Builds a relay for one Operation.
-#[derive(Clone)]
+/// Builds a relay for one Operation. Not `Clone`: one relay meters one reservation, and a
+/// second relay over the same reservation would meter against the whole ceiling again.
 pub struct Relay {
     codec: Arc<dyn DialectCodec>,
     price: Arc<dyn Price>,
@@ -224,14 +264,17 @@ impl Relay {
             ceiling: self.ceiling,
             usage: Vec::new(),
             cost: None,
+            ended: false,
         };
         Ok(self.body(upstream, Some(meter)))
     }
 
     /// Relays a body that is not an event stream: frames untouched, under the same bounds and
-    /// the same stop, unmetered (contract §7.1).
+    /// the same stop, unmetered (contract §7.1). A cut always ends it in an error: an event
+    /// appended to a partial body would read as more body.
     #[must_use]
-    pub fn bytes<B>(self, upstream: B) -> (RelayBody<B>, oneshot::Receiver<RelayReport>) {
+    pub fn bytes<B>(mut self, upstream: B) -> (RelayBody<B>, oneshot::Receiver<RelayReport>) {
+        self.terminal = None;
         self.body(upstream, None)
     }
 
@@ -243,6 +286,8 @@ impl Relay {
             stopped: Some(Box::pin(self.stop.watch().stopped())),
             stop: self.stop,
             idle: None,
+            waiting: false,
+            ceiling: self.ceiling,
             limits: self.limits,
             received: 0,
             ready: VecDeque::new(),
@@ -257,7 +302,7 @@ impl Relay {
     }
 }
 
-/// Reads and prices usage frames.
+/// Reads and prices the usage events report.
 struct Meter {
     splitter: Splitter,
     codec: Arc<dyn DialectCodec>,
@@ -265,6 +310,8 @@ struct Meter {
     ceiling: NanoUsd,
     usage: Vec<(Code, u64)>,
     cost: Option<NanoUsd>,
+    /// The dialect's end came at or after the last usage report.
+    ended: bool,
 }
 
 impl Meter {
@@ -275,26 +322,45 @@ impl Meter {
             // A comment or a keep-alive: no event is dispatched.
             return Ok(());
         };
+        // An empty event name is the default type, as no name is (WHATWG).
         let event = match fields.event {
-            None => None,
+            None | Some(b"") => None,
             Some(name) => Some(std::str::from_utf8(name).map_err(|_| CutReason::Malformed)?),
         };
-        if self.codec.frame(&SseEvent::new(event, &data)) == FrameKind::Usage {
-            self.meter(&data)?;
+        let kind = self.codec.frame(&SseEvent::new(event, &data));
+        if kind == FrameKind::Ping {
+            return Ok(());
+        }
+        // Every other event is read, whatever its kind: a dialect may report usage on its last
+        // frame (review M2). A usage frame must yield a report.
+        match self.read(&data)? {
+            Some(report) => {
+                self.meter(&report)?;
+                self.ended = kind == FrameKind::End;
+            }
+            None if kind == FrameKind::Usage => return Err(CutReason::UnreadableUsage),
+            None => {}
+        }
+        if kind == FrameKind::End {
+            self.ended = true;
         }
         Ok(())
     }
 
-    fn meter(&mut self, data: &[u8]) -> Result<(), CutReason> {
-        // `uaos-json` refuses duplicate keys, so a repeated usage key cannot make the kernel
-        // meter less than a client reads (T19).
+    /// The usage an event's data reports, if any. Data shaped like a JSON object must parse,
+    /// and `uaos-json` refuses duplicate keys, so neither a repeated usage key nor a broken
+    /// object slips past metering while a client reads it (T19).
+    fn read(&self, data: &[u8]) -> Result<Option<UsageReport>, CutReason> {
+        if data.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
+            return Ok(None);
+        }
         let tape = uaos_json::parse(data, &uaos_json::Limits::DEFAULT).map_err(|_| CutReason::UnreadableUsage)?;
         let mut mask = Mask::new();
         mask.seal(&tape).map_err(|_| CutReason::UnreadableUsage)?;
-        let report = self
-            .codec
-            .usage(&StructuralView::new(&tape, &mask))
-            .ok_or(CutReason::UnreadableUsage)?;
+        Ok(self.codec.usage(&StructuralView::new(&tape, &mask)))
+    }
+
+    fn meter(&mut self, report: &UsageReport) -> Result<(), CutReason> {
         report
             .check(self.codec.dimensions())
             .map_err(|_| CutReason::UnreadableUsage)?;
@@ -306,8 +372,8 @@ impl Meter {
         }
         let cost = match self.price.cost(&self.usage) {
             Ok(cost) => cost,
-            // A cost past nano-USD's range is past any ceiling.
-            Err(PriceError::Overflow) => return Err(CutReason::BudgetOverrun),
+            // A cost past nano-USD's range is past any ceiling (review L1).
+            Err(PriceError::Overflow) => return Err(CutReason::CostOutOfRange),
             Err(_) => return Err(CutReason::Unpriced),
         };
         self.cost = Some(cost);
@@ -338,6 +404,9 @@ pub struct RelayBody<B> {
     /// The stop's watch, until it resolves.
     stopped: Option<Pin<Box<dyn Future<Output = StopReason> + Send>>>,
     idle: Option<Pin<Box<Sleep>>>,
+    /// The relay is waiting on the upstream, and the idle deadline runs.
+    waiting: bool,
+    ceiling: NanoUsd,
     limits: RelayLimits,
     received: u64,
     /// Segments cleared to forward, in order.
@@ -369,7 +438,7 @@ impl<B> RelayBody<B> {
     fn cut(&mut self, reason: CutReason) {
         self.ready.clear();
         self.upstream = None;
-        if reason == CutReason::BudgetOverrun {
+        if reason.engages_stop() {
             // The state actor journals the record through `Stop::unrecorded` (PR-6b).
             let _engaged = self.stop.engage(StopReason::BudgetOverrun);
         }
@@ -435,25 +504,36 @@ impl<B> RelayBody<B> {
         }
     }
 
+    /// Whether the upstream has sent nothing for the idle timeout since the relay began waiting
+    /// on it. The deadline is set when a wait begins, inside the runtime that polls the body.
     fn idle_expired(&mut self, cx: &mut Context<'_>) -> bool {
-        let timeout = self.limits.idle_timeout;
-        // Made on the first wait, inside the runtime that polls the body.
-        let sleep = self.idle.get_or_insert_with(|| Box::pin(tokio::time::sleep(timeout)));
-        sleep.as_mut().poll(cx).is_ready()
+        if !self.waiting {
+            let Some(deadline) = Instant::now().checked_add(self.limits.idle_timeout) else {
+                // Too far to reach: no idle cut.
+                return false;
+            };
+            self.waiting = true;
+            match self.idle.as_mut() {
+                Some(sleep) => sleep.as_mut().reset(deadline),
+                None => self.idle = Some(Box::pin(tokio::time::sleep_until(deadline))),
+            }
+        }
+        self.idle
+            .as_mut()
+            .is_some_and(|sleep| sleep.as_mut().poll(cx).is_ready())
     }
 
+    /// The upstream sent a frame: the next wait starts a new deadline.
     fn touch(&mut self) {
-        if let Some(sleep) = self.idle.as_mut() {
-            sleep.as_mut().reset(Instant::now() + self.limits.idle_timeout);
-        }
+        self.waiting = false;
     }
 
     fn send_report(&mut self, end: RelayEnd) {
         if let Some(tx) = self.report.take() {
-            let (usage, cost) = self
+            let (usage, cost, ended) = self
                 .meter
                 .as_ref()
-                .map_or((Vec::new(), None), |m| (m.usage.clone(), m.cost));
+                .map_or((Vec::new(), None, false), |m| (m.usage.clone(), m.cost, m.ended));
             // The receiver may be gone; the report then has no reader.
             let _unread = tx.send(RelayReport {
                 end,
@@ -461,6 +541,8 @@ impl<B> RelayBody<B> {
                 segments: self.segments,
                 usage,
                 cost,
+                usage_final: end == RelayEnd::Completed && ended,
+                ceiling: self.ceiling,
             });
         }
     }

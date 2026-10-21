@@ -59,11 +59,20 @@ fn a_stopped_kernel_admits_nothing() {
 }
 
 #[test]
-fn a_budget_overrun_stop_carries_its_own_code() {
-    let stop = Stop::running();
-    let _engaged = stop.engage(StopReason::BudgetOverrun);
-    let refusal = Admission::new(AdmissionLimits::default(), stop).admit(0).unwrap_err();
-    assert_eq!(refusal.code, codes::BUDGET_STREAM_OVERRUN);
+fn every_stopped_refusal_says_stopped() {
+    // Review M1: the overrun's own S1 code belongs to the stream that overran, not to every
+    // request refused after it.
+    for reason in StopReason::ENGAGEABLE {
+        let stop = Stop::running();
+        let _engaged = stop.engage(reason);
+        let refusal = Admission::new(AdmissionLimits::default(), stop).admit(0).unwrap_err();
+        assert_eq!(refusal.reason, RefusalReason::Stopped(reason));
+        assert_eq!(
+            refusal.code,
+            codes::RUNTIME_STOPPED,
+            "a stopped kernel's refusal carried another code"
+        );
+    }
 }
 
 #[test]
@@ -96,13 +105,19 @@ async fn a_stop_reaches_every_live_permit() {
 }
 
 #[test]
-fn the_record_is_handed_out_once() {
+fn the_record_is_handed_out_until_it_is_journaled() {
     let stop = Stop::running();
+    stop.recorded();
     assert!(stop.unrecorded().is_none(), "a running kernel had a stop to record");
     let _engaged = stop.engage(StopReason::DiskFull);
-    let record = stop.unrecorded().unwrap();
-    assert_eq!(record.reason(), StopReason::DiskFull);
-    assert!(stop.unrecorded().is_none(), "the stop's record was handed out twice");
+    assert_eq!(stop.unrecorded().map(|e| e.reason()), Some(StopReason::DiskFull));
+    // Review L12: a write that failed leaves the record to hand out again.
+    assert!(
+        stop.unrecorded().is_some(),
+        "a stop's record was handed out once and could be lost"
+    );
+    stop.recorded();
+    assert!(stop.unrecorded().is_none(), "a journaled stop was handed out again");
 }
 
 /// A journal on a simulated disk.
@@ -185,10 +200,18 @@ fn an_unknown_stop_reason_still_boots_stopped_and_a_resume_boots_running() {
         boot_state(&world.records()),
         BootState::Stopped(StopReason::Unrecognized)
     );
-    let mut resumed = stop_record(StopReason::Operator);
-    resumed.event_type = types::KERNEL_RESUMED;
-    resumed.payload_inline = None;
-    world.append(vec![resumed]);
+    let mut by_the_kernel = stop_record(StopReason::Operator);
+    by_the_kernel.event_type = types::KERNEL_RESUMED;
+    by_the_kernel.payload_inline = None;
+    let mut by_a_human = by_the_kernel.clone();
+    by_a_human.actor = Actor::Human;
+    world.append(vec![by_the_kernel]);
+    assert_eq!(
+        boot_state(&world.records()),
+        BootState::Stopped(StopReason::Unrecognized),
+        "a resume by a non-human actor booted the kernel running"
+    );
+    world.append(vec![by_a_human]);
     assert_eq!(boot_state(&world.records()), BootState::Running);
     world.append(vec![bare]);
     assert_eq!(
@@ -325,6 +348,16 @@ fn a_declared_price_costs_each_dimension() {
     assert_eq!(
         price.cost(&[(code("output_tokens"), half), (code("input_tokens"), half)]),
         Err(PriceError::Overflow)
+    );
+    // Review L1: a free dimension is free whatever its count.
+    let free = DeclaredPrice::new([
+        (code("cache_read"), NanoUsd::ZERO),
+        (code("output_tokens"), NanoUsd::new(1)),
+    ])
+    .unwrap();
+    assert_eq!(
+        free.cost(&[(code("cache_read"), u64::MAX), (code("output_tokens"), 2)]),
+        Ok(NanoUsd::new(2))
     );
 }
 

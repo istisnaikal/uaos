@@ -3021,11 +3021,11 @@ The journal is tamper-proof.
             id: "relay-forwards-over-ceiling",
             gate: "test",
             tool: None,
-            // Runtime contract §7.3: one unit over the reservation cuts.
-            seed: replace("crates/uaos-runtime/src/relay.rs", "        if cost > self.ceiling {\n", "        if cost.get() > self.ceiling.get() + 1_000 {\n"),
+            // Runtime contract §7.3: one nano-USD over the reservation cuts (review L6).
+            seed: replace("crates/uaos-runtime/src/relay.rs", "        if cost > self.ceiling {\n", "        if cost.get() > self.ceiling.get() + 1 {\n"),
             runner: Runner::Program {
                 program: "cargo",
-                args: &["test", "-p", "uaos-runtime", "--test", "relay", "one_unit_over_the_ceiling_is_never_forwarded"],
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "one_nano_usd_over_the_ceiling_is_never_forwarded"],
             },
             expect: "a usage report over the ceiling was forwarded",
         },
@@ -3112,6 +3112,90 @@ The journal is tamper-proof.
             ),
             runner: CLIPPY,
             expect: "tokio::sync::mpsc::unbounded_channel",
+        },
+        Case {
+            id: "stop-code-is-the-overrun",
+            gate: "test",
+            tool: None,
+            // Review M1: every refusal under a stop says RUNTIME_STOPPED.
+            seed: replace("crates/uaos-runtime/src/admission.rs", "            code: codes::RUNTIME_STOPPED,\n", "            code: if reason == StopReason::BudgetOverrun { codes::BUDGET_STREAM_OVERRUN } else { codes::RUNTIME_STOPPED },\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "stop", "every_stopped_refusal_says_stopped"],
+            },
+            expect: "a stopped kernel's refusal carried another code",
+        },
+        Case {
+            id: "stop-record-handed-out-once",
+            gate: "test",
+            tool: None,
+            // Review L12: the stop's record is handed out until it is journaled.
+            seed: replace("crates/uaos-runtime/src/stop.rs", "(!self.inner.recorded.load(Ordering::SeqCst))", "(!self.inner.recorded.swap(true, Ordering::SeqCst))"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "stop", "the_record_is_handed_out_until_it_is_journaled"],
+            },
+            expect: "a stop's record was handed out once and could be lost",
+        },
+        Case {
+            id: "boot-honours-any-resume",
+            gate: "test",
+            tool: None,
+            // Review L12: only a human resumes a stopped kernel.
+            seed: replace("crates/uaos-runtime/src/stop.rs", "record.event_type == types::KERNEL_RESUMED && record.actor == Actor::Human", "record.event_type == types::KERNEL_RESUMED"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "stop", "an_unknown_stop_reason_still_boots_stopped_and_a_resume_boots_running"],
+            },
+            expect: "a resume by a non-human actor booted the kernel running",
+        },
+        Case {
+            id: "relay-settles-running-total",
+            gate: "test",
+            tool: None,
+            // Review H1: a stream that did not finish settles the full reservation.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "usage_final: end == RelayEnd::Completed && ended,", "usage_final: ended || !ended,"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_stream_that_does_not_finish_settles_the_full_reservation"],
+            },
+            expect: "a stream that did not finish settled at its running total",
+        },
+        Case {
+            id: "relay-meters-usage-frames-only",
+            gate: "test",
+            tool: None,
+            // Review M2: usage is read from every event, whatever its kind.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "        match self.read(&data)? {\n", "        match if kind == FrameKind::Usage { self.read(&data)? } else { None } {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "usage_on_an_end_frame_is_metered"],
+            },
+            expect: "usage on an end frame went unmetered",
+        },
+        Case {
+            id: "relay-idle-deadline-never-resets",
+            gate: "test",
+            tool: None,
+            // Review L4: each wait on the upstream starts a new idle deadline.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "        if !self.waiting {\n", "        if self.idle.is_none() {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "upstream_activity_resets_the_idle_deadline"],
+            },
+            expect: "upstream activity did not reset the idle deadline",
+        },
+        Case {
+            id: "sse-empty-event-name-kept",
+            gate: "test",
+            tool: None,
+            // Review L3: an empty event name is the default type, as no name.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "            None | Some(b\"\") => None,\n", "            None => None,\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "an_empty_event_name_is_no_name"],
+            },
+            expect: "an empty event name reached the codec as a name",
         },
     ]
 }

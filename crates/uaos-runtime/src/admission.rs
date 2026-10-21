@@ -28,8 +28,9 @@ pub struct AdmissionLimits {
 }
 
 impl Default for AdmissionLimits {
-    /// `[CONSCIOUS ASSUMPTION]` 64 Operations and 256 MiB: about four copies of a 1.7 MB body
-    /// each. Measured under the overload test (PR-7) and the soak (M4).
+    /// `[CONSCIOUS ASSUMPTION]` 64 Operations and 256 MiB. At about four copies of a 1.7 MB body
+    /// each, the bytes bound binds first, at about 39 such Operations; smaller bodies reach the
+    /// Operations bound. Measured under the overload test (PR-7) and the soak (M4).
     fn default() -> Self {
         Self {
             max_operations: 64,
@@ -58,7 +59,7 @@ pub enum RefusalReason {
 pub struct Refusal {
     /// Why.
     pub reason: RefusalReason,
-    /// The registered code: `RUNTIME_STOPPED` (or the stop's own), or `RUNTIME_OVERLOAD`.
+    /// The registered code: `RUNTIME_STOPPED` or `RUNTIME_OVERLOAD`.
     pub code: ErrorCode,
     /// When to retry.
     pub retry_after: Duration,
@@ -87,9 +88,11 @@ impl Inner {
             return None;
         }
         let reason = self.stop.reason().unwrap_or(StopReason::Unrecognized);
+        // `RUNTIME_STOPPED` whatever engaged the stop: the overrun's own code belongs to the
+        // stream that overran, not to every request after it (review M1).
         Some(Refusal {
             reason: RefusalReason::Stopped(reason),
-            code: reason.error_code(),
+            code: codes::RUNTIME_STOPPED,
             retry_after: self.limits.stopped_retry_after,
         })
     }

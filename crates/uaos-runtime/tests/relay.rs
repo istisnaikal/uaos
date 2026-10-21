@@ -25,10 +25,11 @@ use http_body_util::BodyExt as _;
 use hyper::body::{Body, Frame};
 use proptest::prelude::*;
 use tokio::sync::mpsc;
+use uaos_contracts::error::codes;
 use uaos_contracts::event::Actor;
 use uaos_contracts::id::{PoolId, ReservationId, TypedId};
 use uaos_contracts::money::NanoUsd;
-use uaos_ledger::{InFlight, Ledger, MemorySink, Reservation};
+use uaos_ledger::{InFlight, Ledger, MemorySink, Reservation, Usage};
 use uaos_module_api::{
     Code, CodecError, DialectCodec, EndpointDecl, FrameKind, RoleMap, SseEvent, StructuralView, UsageReport, ViewNode,
     ViewText,
@@ -112,9 +113,9 @@ impl DialectCodec for Dialect {
             return FrameKind::Content;
         }
         match event.event {
-            Some("message_start" | "message_delta" | "response.completed") => FrameKind::Usage,
+            Some("message_start" | "message_delta") => FrameKind::Usage,
             Some("ping") => FrameKind::Ping,
-            Some("message_stop") => FrameKind::End,
+            Some("message_stop" | "response.completed") => FrameKind::End,
             Some("error") => FrameKind::Error,
             None if event.data == b"[DONE]" => FrameKind::End,
             None if event.data.windows(7).any(|w| w == b"\"usage\"") => FrameKind::Usage,
@@ -212,8 +213,12 @@ fn price() -> Arc<DeclaredPrice> {
 }
 
 fn relay(codec: &Arc<Dialect>, stop: &Stop, limits: RelayLimits) -> Relay {
+    relay_at(codec, stop, limits, CEILING)
+}
+
+fn relay_at(codec: &Arc<Dialect>, stop: &Stop, limits: RelayLimits, reserved: i64) -> Relay {
     let codec: Arc<dyn DialectCodec> = codec.clone();
-    Relay::new(codec, price(), &reservation(CEILING), stop.clone(), limits)
+    Relay::new(codec, price(), &reservation(reserved), stop.clone(), limits)
 }
 
 /// Everything the client receives, and the error the body ended in, if any.
@@ -277,6 +282,8 @@ async fn a_stream_within_its_reservation_is_relayed_byte_for_byte() {
         Some(NanoUsd::new(CEILING)),
         "a cost equal to the ceiling is within budget"
     );
+    assert!(report.usage_final, "the dialect's end came after the last report");
+    assert_eq!(report.settlement(), Usage::Reported(NanoUsd::new(CEILING)));
     assert!(!stop.is_engaged());
 }
 
@@ -300,7 +307,10 @@ async fn openai_shaped_streams_are_relayed_and_metered() {
             .unwrap();
         let (out, error) = drain(&mut body).await;
         assert_eq!((out, error), (concat(parts), None));
-        assert_eq!(report(rx).await.cost, Some(NanoUsd::new(CEILING)));
+        let report = report(rx).await;
+        assert_eq!(report.cost, Some(NanoUsd::new(CEILING)));
+        assert!(report.usage_final);
+        assert_eq!(report.settlement(), Usage::Reported(NanoUsd::new(CEILING)));
     }
 }
 
@@ -332,6 +342,134 @@ async fn one_unit_over_the_ceiling_is_never_forwarded() {
         report.usage,
         vec![(code("input_tokens"), 50), (code("output_tokens"), 101)]
     );
+}
+
+#[tokio::test]
+async fn one_nano_usd_over_the_ceiling_is_never_forwarded() {
+    // Review L6: the reservation is one nano-USD short of the stream's cost.
+    let codec = Arc::new(Dialect::new());
+    let (up, _, _) = upstream(&[START, DELTA, DELTA_100, STOP], false);
+    let (mut body, rx) = relay_at(&codec, &Stop::running(), RelayLimits::default(), CEILING - 1)
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let (out, error) = drain(&mut body).await;
+    assert_eq!(
+        out,
+        concat(&[START, DELTA]),
+        "a usage report over the ceiling was forwarded"
+    );
+    assert_eq!(error, Some(RelayError::Cut(CutReason::BudgetOverrun)));
+    assert_eq!(report(rx).await.cost, Some(NanoUsd::new(CEILING)));
+}
+
+#[tokio::test]
+async fn usage_on_an_end_frame_is_metered() {
+    // Review M2: usage is read from every event, whatever its kind.
+    let completed: &[u8] = b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"usage\":{\"input_tokens\":50,\"output_tokens\":101}}}\n\n";
+    let content: &[u8] =
+        b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"usage\":{\"output_tokens\":101}}\n\n";
+    for over in [completed, content] {
+        let codec = Arc::new(Dialect::new());
+        let (up, _, _) = upstream(&[START, over], false);
+        let (mut body, _rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+            .sse(up, &HeaderMap::new())
+            .unwrap();
+        let (out, error) = drain(&mut body).await;
+        assert_eq!(
+            (out, error),
+            (START.to_vec(), Some(RelayError::Cut(CutReason::BudgetOverrun))),
+            "usage on an end frame went unmetered"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_stream_that_does_not_finish_settles_the_full_reservation() {
+    // Review H1: a running total is a lower bound on the bill unless the dialect's end follows it.
+    let codec = Arc::new(Dialect::new());
+    let (up, _, _keep) = upstream(&[START, DELTA], true);
+    let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let _first = body.frame().await.unwrap().unwrap();
+    drop(body);
+    let gone = report(rx).await;
+    assert_eq!(
+        (gone.end, gone.cost, gone.usage_final),
+        (RelayEnd::ClientGone, Some(NanoUsd::new(6_000)), false),
+        "a stream that did not finish settled at its running total"
+    );
+    assert_eq!(
+        gone.settlement(),
+        Usage::Unknown,
+        "a stream that did not finish settled at its running total"
+    );
+    // The upstream ends without the dialect's end.
+    let (up, _, _) = upstream(&[START, DELTA, DELTA_100], false);
+    let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    assert_eq!(drain(&mut body).await.1, None);
+    let unfinished = report(rx).await;
+    assert_eq!(
+        (unfinished.end, unfinished.usage_final),
+        (RelayEnd::Completed, false),
+        "a stream that did not finish settled at its running total"
+    );
+    assert_eq!(
+        unfinished.settlement(),
+        Usage::Unknown,
+        "a stream that did not finish settled at its running total"
+    );
+    // A stop cuts it.
+    let stop = Stop::running();
+    let (up, _, _keep) = upstream(&[START], true);
+    let (mut body, rx) = relay(&codec, &stop, RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let _first = body.frame().await.unwrap().unwrap();
+    let _engaged = stop.engage(StopReason::Operator);
+    assert!(drain(&mut body).await.1.is_some());
+    assert_eq!(report(rx).await.settlement(), Usage::Unknown);
+}
+
+#[tokio::test]
+async fn an_overrun_settles_at_least_its_cost() {
+    let codec = Arc::new(Dialect::new());
+    let (up, _, _) = upstream(&[START, DELTA_101], false);
+    let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let _drained = drain(&mut body).await;
+    let report = report(rx).await;
+    assert!(!report.usage_final);
+    assert_eq!(report.settlement(), Usage::Reported(NanoUsd::new(CEILING + 1_000)));
+}
+
+#[tokio::test]
+async fn a_cost_out_of_range_cuts_and_stops_the_kernel() {
+    let huge: &[u8] =
+        b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":18446744073709551615}}\n\n";
+    let codec = Arc::new(Dialect::new());
+    let stop = Stop::running();
+    let (up, _, _) = upstream(&[START, huge], false);
+    let (mut body, rx) = relay(&codec, &stop, RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let (out, error) = drain(&mut body).await;
+    assert_eq!(
+        (out, error),
+        (START.to_vec(), Some(RelayError::Cut(CutReason::CostOutOfRange)))
+    );
+    assert_eq!(stop.reason(), Some(StopReason::BudgetOverrun));
+    let report = report(rx).await;
+    assert_eq!(
+        report.cost,
+        Some(NanoUsd::new(6_000)),
+        "the report keeps the last cost in range"
+    );
+    assert_eq!(report.settlement(), Usage::Unknown);
+    assert_eq!(CutReason::CostOutOfRange.error_code(), codes::BUDGET_STREAM_OVERRUN);
 }
 
 #[tokio::test]
@@ -438,6 +576,11 @@ async fn a_stop_cuts_a_waiting_stream() {
         report(rx).await.end,
         RelayEnd::Cut(CutReason::Stopped(StopReason::Operator))
     );
+    assert_eq!(
+        CutReason::Stopped(StopReason::BudgetOverrun).error_code(),
+        codes::RUNTIME_STOPPED,
+        "a stream another one's overrun stopped was reported as overrunning"
+    );
 }
 
 #[tokio::test]
@@ -503,6 +646,75 @@ async fn an_idle_upstream_cuts() {
     assert!(dropped.load(Ordering::SeqCst));
 }
 
+#[tokio::test(start_paused = true)]
+async fn upstream_activity_resets_the_idle_deadline() {
+    // Review L4: a ping every 100 s keeps a 120 s idle timeout from firing.
+    let limits = RelayLimits {
+        idle_timeout: Duration::from_secs(120),
+        ..RelayLimits::default()
+    };
+    let codec = Arc::new(Dialect::new());
+    let (up, _, keep) = upstream(&[], true);
+    let tx = keep.unwrap();
+    let (mut body, _rx) = relay(&codec, &Stop::running(), limits)
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let feeder = async move {
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_secs(100)).await;
+            // A cut drops the upstream; the assertion below then says why.
+            if tx.send(Ok(Bytes::from_static(PING))).await.is_err() {
+                break;
+            }
+        }
+    };
+    let ((out, error), ()) = tokio::join!(drain(&mut body), feeder);
+    assert_eq!(error, None, "upstream activity did not reset the idle deadline");
+    assert_eq!(out, PING.repeat(3));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_client_never_causes_an_idle_cut() {
+    // Review L4: the deadline runs from when the relay waits, not from the last frame.
+    let limits = RelayLimits {
+        idle_timeout: Duration::from_secs(10),
+        ..RelayLimits::default()
+    };
+    let codec = Arc::new(Dialect::new());
+    let (up, _, keep) = upstream(&[], true);
+    let tx = keep.unwrap();
+    let (mut body, _rx) = relay(&codec, &Stop::running(), limits)
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let send = |tx: Feed| async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tx.send(Ok(Bytes::from_static(PING))).await.unwrap();
+        tx
+    };
+    let (first, tx) = tokio::join!(body.frame(), send(tx));
+    assert!(matches!(first, Some(Ok(_))));
+    // The client reads nothing for three timeouts.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let (next, _tx) = tokio::join!(body.frame(), send(tx));
+    assert!(matches!(next, Some(Ok(_))), "a slow client caused an idle cut");
+}
+
+#[tokio::test]
+async fn an_empty_event_name_is_no_name() {
+    // Review L3: WHATWG reads an empty event type as the default, as no `event` field.
+    let chat: &[u8] = b"event:\ndata: {\"choices\":[],\"usage\":{\"input_tokens\":50,\"output_tokens\":100}}\n\n";
+    let codec = Arc::new(Dialect::new());
+    let (up, _, _) = upstream(&[chat], false);
+    let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let _drained = drain(&mut body).await;
+    let seen = codec.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, None, "an empty event name reached the codec as a name");
+    assert_eq!(report(rx).await.cost, Some(NanoUsd::new(CEILING)));
+}
+
 #[tokio::test]
 async fn usage_that_cannot_be_read_or_priced_cuts() {
     let duplicate: &[u8] =
@@ -530,6 +742,12 @@ async fn usage_that_cannot_be_read_or_priced_cuts() {
     assert_eq!(
         cut_reason(&[no_report], Dialect::new(), RelayLimits::default()).await,
         Some(RelayError::Cut(CutReason::UnreadableUsage))
+    );
+    let broken_content: &[u8] = b"event: content_block_delta\ndata: {\"type\":\n\n";
+    assert_eq!(
+        cut_reason(&[broken_content], Dialect::new(), RelayLimits::default()).await,
+        Some(RelayError::Cut(CutReason::UnreadableUsage)),
+        "a broken JSON object slipped past metering"
     );
     let bad_name: &[u8] = b"event: \xFF\ndata: {}\n\n";
     assert_eq!(
@@ -624,9 +842,11 @@ async fn bytes_mode_relays_untouched_under_the_same_stop() {
     );
     let _engaged = stop.engage(StopReason::Operator);
     let (up, _, _) = upstream(&parts, false);
-    let (mut body, _rx) = relay(&codec, &stop, RelayLimits::default()).bytes(up);
+    let (mut body, _rx) = relay(&codec, &stop, RelayLimits::default())
+        .terminal(Bytes::from_static(b"event: error\ndata: {}\n\n"))
+        .bytes(up);
     let (out, error) = drain(&mut body).await;
-    assert!(out.is_empty());
+    assert!(out.is_empty(), "bytes mode appended a terminal frame to a body");
     assert_eq!(error, Some(RelayError::Cut(CutReason::Stopped(StopReason::Operator))));
 }
 
@@ -644,7 +864,9 @@ const CORPUS: [&str; 9] = [
     "\u{bf}A\u{f1}adir? \u{a1}S\u{ed}!",
     "Perch\u{e9} \u{e8} cos\u{ec}",
     "\u{645}\u{64e}\u{631}\u{652}\u{62d}\u{64e}\u{628}\u{64b}\u{627} \u{200f}\u{61c}",
-    "{\"type\":\"x\",\"text\":\"\u{1f600}\"}",
+    // Not shaped like a JSON object: the relay reads every object-shaped event as one JSON
+    // document and cuts one that is not, which dedicated tests cover.
+    "emoji \u{1f600} and {\"braces\":1}",
 ];
 
 const ENDINGS: [&str; 3] = ["\n", "\r\n", "\r"];
@@ -660,7 +882,7 @@ struct GenEvent {
 fn gen_event() -> impl Strategy<Value = GenEvent> {
     (
         any::<bool>(),
-        prop::option::of(prop::sample::select(vec!["content_block_delta", "ping", "x"])),
+        prop::option::of(prop::sample::select(vec!["content_block_delta", "ping", "x", ""])),
         prop::collection::vec(0..CORPUS.len(), 0..3),
         any::<bool>(),
     )
@@ -748,7 +970,8 @@ fn reference(body: &[u8]) -> Vec<(Option<String>, Vec<u8>)> {
             None => (line, &line[line.len()..]),
         };
         match name {
-            b"event" => event = Some(String::from_utf8(value.to_vec()).unwrap()),
+            // An empty event type is the default, as no `event` field.
+            b"event" => event = (!value.is_empty()).then(|| String::from_utf8(value.to_vec()).unwrap()),
             b"data" => match data.as_mut() {
                 Some(d) => {
                     d.push(b'\n');
