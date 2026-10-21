@@ -3070,7 +3070,7 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // Runtime contract §7.4 rule 3: without a terminal frame a cut ends in an error (red line 9).
-            seed: replace("crates/uaos-runtime/src/relay.rs", "                    return Poll::Ready(Some(Err(RelayError::Cut(reason))));\n", "                    let _reason = reason;\n                    return Poll::Ready(None);\n"),
+            seed: replace("crates/uaos-runtime/src/relay.rs", "        Some(Poll::Ready(Some(Err(RelayError::Cut(reason)))))\n", "        let _reason = reason;\n        Some(Poll::Ready(None))\n"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_cut_without_a_terminal_frame_ends_in_an_error"],
@@ -3214,7 +3214,7 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // Scoped round L-a: a report after the dialect's end is not final.
-            seed: replace("crates/uaos-runtime/src/relay.rs", "                self.ended = kind == FrameKind::End;\n", "                self.ended |= kind == FrameKind::End;\n"),
+            seed: replace("crates/uaos-runtime/src/relay.rs", "            self.ended = kind == FrameKind::End;\n", "            self.ended |= kind == FrameKind::End;\n"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_report_after_the_end_is_not_final"],

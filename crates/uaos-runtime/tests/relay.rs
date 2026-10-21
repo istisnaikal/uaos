@@ -1266,17 +1266,18 @@ fn reference(body: &[u8]) -> Vec<(Option<String>, Vec<u8>)> {
             Some(c) => (&line[..c], line[c + 1..].strip_prefix(b" ").unwrap_or(&line[c + 1..])),
             None => (line, &line[line.len()..]),
         };
-        match name {
+        // `id`, `retry` and any other field set nothing compared here.
+        if name == b"event" {
             // An empty event type is the default, as no `event` field.
-            b"event" => event = (!value.is_empty()).then(|| String::from_utf8(value.to_vec()).unwrap()),
-            b"data" => match data.as_mut() {
+            event = (!value.is_empty()).then(|| String::from_utf8(value.to_vec()).unwrap());
+        } else if name == b"data" {
+            match data.as_mut() {
                 Some(d) => {
                     d.push(b'\n');
                     d.extend_from_slice(value);
                 }
                 None => data = Some(value.to_vec()),
-            },
-            _ => {}
+            }
         }
     }
     if let Some(d) = data {
