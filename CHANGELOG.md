@@ -789,6 +789,15 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Changed
 
+- **Maintainer decisions of 2026-10-20.**
+  - **D-31, review convergence:** the rule goes into `GOVERNANCE.md`.
+  - **D-32, chunk storage:** prepared pack segments before the RC-1 freeze, through an
+    ADR-0018 and ADR-0007 amendment owed before PR-6. Windows CI stays over budget.
+  - **D-34:** booking the external audit and the legal review, and searching for a second
+    reviewer.
+  - D-31 and D-32 were decided inside their 48 h window; the register records this as a
+    deviation.
+
 - **Seven locales above a language-neutral kernel (ADR-0020, Proposed; D-36).**
   - CLAUDE.md now names seven GA locales: EN, TR, DE, FR, ES, IT and AR (right-to-left). It
     replaces "TR/EN initial".
