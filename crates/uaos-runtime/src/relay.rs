@@ -34,13 +34,13 @@ use uaos_ledger::{InFlight, Reservation, Usage};
 use uaos_module_api::{Code, DialectCodec, FrameKind, Mask, SseEvent, StructuralView, UsageReport};
 
 use crate::price::{Price, PriceError};
-use crate::sse::{self, Segment, Splitter};
+use crate::sse::{self, PushError, Splitter};
 use crate::stop::{Stop, StopReason};
 
-/// The most JSON values one event's data may hold when it is read for usage: about 1.5 MiB of
-/// transient tape at 24 bytes a node (scoped round L-d). `[CONSCIOUS ASSUMPTION]` Enough for
-/// a provider's last event, which can repeat the whole output; WP3.0d counts real ones.
-const MAX_EVENT_NODES: u32 = 65_536;
+/// The most JSON values the data of a frame read for usage may hold: the request's own bound,
+/// since the `OpenAI` Responses API's last event echoes the request (final review M2). At 24
+/// bytes a node, at most 24 MiB of transient tape, freed before the next event.
+const MAX_EVENT_NODES: u32 = 1 << 20;
 
 /// The deepest nesting one event's data may hold when it is read for usage.
 const MAX_EVENT_DEPTH: u16 = 128;
@@ -52,6 +52,9 @@ const EVENT_PARSE_FALLBACK: uaos_json::Limits = match uaos_json::Limits::new(1 <
     Err(_) => uaos_json::Limits::DEFAULT,
 };
 
+/// The longest idle timeout that arms a timer; a longer one disables the idle cut.
+const MAX_IDLE_TIMEOUT: Duration = Duration::from_hours(365 * 24);
+
 /// The relay's bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelayLimits {
@@ -61,17 +64,22 @@ pub struct RelayLimits {
     pub max_body_bytes: u64,
     /// How long the upstream may send nothing while the relay waits for it before the stream is
     /// cut. The time counts from when the relay starts waiting, so a slow client never causes
-    /// an idle cut. A timeout too large to add to the clock disables the cut.
+    /// an idle cut. A timeout over a year disables the cut.
     pub idle_timeout: Duration,
 }
 
 impl Default for RelayLimits {
-    /// `[CONSCIOUS ASSUMPTION]` 1 MiB per event, 64 MiB per response, 600 s idle. A reasoning
-    /// model can be silent for minutes before its first token, and not every dialect sends
-    /// keep-alives; WP3.0d measures the real gaps.
+    /// `[CONSCIOUS ASSUMPTION]` 32 MiB per event, 64 MiB per response, 600 s idle.
+    /// - 32 MiB is the door's request bound: a provider's last event may echo the request, and
+    ///   a server tool's result (a fetched page, a file) arrives whole in one event (final
+    ///   review M2).
+    /// - A reasoning model can be silent for minutes before its first token, and not every
+    ///   dialect sends keep-alives.
+    ///
+    /// WP3.0d measures real events and gaps.
     fn default() -> Self {
         Self {
-            max_event_bytes: 1024 * 1024,
+            max_event_bytes: 32 * 1024 * 1024,
             max_body_bytes: 64 * 1024 * 1024,
             idle_timeout: Duration::from_secs(600),
         }
@@ -273,8 +281,8 @@ impl Relay {
         if compressed {
             return Err(RelayError::Compressed);
         }
+        let splitter = Splitter::new(self.limits.max_event_bytes);
         let meter = Meter {
-            splitter: Splitter::new(self.limits.max_event_bytes),
             parse: uaos_json::Limits::new(
                 u32::try_from(self.limits.max_event_bytes)
                     .unwrap_or(u32::MAX)
@@ -290,7 +298,7 @@ impl Relay {
             cost: None,
             ended: false,
         };
-        Ok(self.body(upstream, Some(meter)))
+        Ok(self.body(upstream, Some((splitter, meter))))
     }
 
     /// Relays a body that is not an event stream: frames untouched, under the same bounds and
@@ -302,10 +310,12 @@ impl Relay {
         self.body(upstream, None)
     }
 
-    fn body<B>(self, upstream: B, meter: Option<Meter>) -> (RelayBody<B>, oneshot::Receiver<RelayReport>) {
+    fn body<B>(self, upstream: B, sse: Option<(Splitter, Meter)>) -> (RelayBody<B>, oneshot::Receiver<RelayReport>) {
         let (tx, rx) = oneshot::channel();
+        let (splitter, meter) = sse.unzip();
         let body = RelayBody {
             upstream: Some(upstream),
+            splitter,
             meter,
             stopped: Some(Box::pin(self.stop.watch().stopped())),
             stop: self.stop,
@@ -315,7 +325,6 @@ impl Relay {
             limits: self.limits,
             received: 0,
             ready: VecDeque::new(),
-            staged: Vec::new(),
             terminal: self.terminal,
             phase: Phase::Streaming,
             forwarded_bytes: 0,
@@ -328,7 +337,6 @@ impl Relay {
 
 /// Reads and prices the usage events report.
 struct Meter {
-    splitter: Splitter,
     /// Bounds for reading one event's data.
     parse: uaos_json::Limits,
     codec: Arc<dyn DialectCodec>,
@@ -341,9 +349,9 @@ struct Meter {
 }
 
 impl Meter {
-    /// Whether `segment` may be forwarded.
-    fn check(&mut self, segment: &Segment) -> Result<(), CutReason> {
-        let fields = sse::fields(segment.parsed());
+    /// Whether an event, as its parser reads it, may be forwarded.
+    fn check(&mut self, parsed: &[u8]) -> Result<(), CutReason> {
+        let fields = sse::fields(parsed);
         let Some(data) = fields.data else {
             // A comment or a keep-alive: no event is dispatched.
             return Ok(());
@@ -354,11 +362,14 @@ impl Meter {
             Some(name) => Some(std::str::from_utf8(name).map_err(|_| CutReason::Malformed)?),
         };
         let kind = self.codec.frame(&SseEvent::new(event, &data));
-        if kind == FrameKind::Ping {
+        // A content, other or ping frame is forwarded unread. Its data is the model's output,
+        // which can hold a lone surrogate escape (an emoji split across two text deltas) or a
+        // whole fetched document, and neither may cut a stream (final review M2). A usage, end
+        // or error frame, and any kind the codec contract adds later, is read: a dialect may
+        // report usage on its last frame (review M2). A usage frame must yield a report.
+        if matches!(kind, FrameKind::Ping | FrameKind::Content | FrameKind::Other) {
             return Ok(());
         }
-        // Every other event is read, whatever its kind: a dialect may report usage on its last
-        // frame (review M2). A usage frame must yield a report.
         match self.read(&data)? {
             Some(report) => {
                 self.meter(&report)?;
@@ -434,6 +445,8 @@ enum Phase {
 /// The client's body. See the module docs.
 pub struct RelayBody<B> {
     upstream: Option<B>,
+    /// The event-stream splitter; `None` in bytes mode.
+    splitter: Option<Splitter>,
     meter: Option<Meter>,
     stop: Stop,
     /// The stop's watch, until it resolves.
@@ -444,10 +457,9 @@ pub struct RelayBody<B> {
     ceiling: NanoUsd,
     limits: RelayLimits,
     received: u64,
-    /// Segments cleared to forward, in order.
-    ready: VecDeque<Bytes>,
-    /// Reused scratch for one chunk's segments.
-    staged: Vec<Segment>,
+    /// Bytes cleared to forward, in order, each with the events it holds: at most two runs
+    /// per upstream frame (final review M1).
+    ready: VecDeque<(Bytes, u64)>,
     terminal: Option<Bytes>,
     phase: Phase,
     forwarded_bytes: u64,
@@ -488,38 +500,42 @@ impl<B> RelayBody<B> {
             self.cut(CutReason::BodyTooLarge);
             return;
         }
-        let Some(meter) = self.meter.as_mut() else {
+        let (Some(splitter), Some(meter)) = (self.splitter.as_mut(), self.meter.as_mut()) else {
             if !data.is_empty() {
-                self.ready.push_back(data);
+                self.ready.push_back((data, 1));
             }
             return;
         };
-        self.staged.clear();
-        let split = meter.splitter.push(&data, &mut self.staged);
-        let mut verdict = split.map_err(|_| CutReason::EventTooLarge);
-        for segment in self.staged.drain(..) {
-            if let Err(reason) = meter.check(&segment) {
-                verdict = Err(reason);
-                break;
+        // Each event is metered as the splitter finds it, and what the frame clears comes back
+        // as at most two runs, so nothing is kept per event (final review M1).
+        match splitter.push(&data, |event| meter.check(event.parsed())) {
+            Ok(cleared) => {
+                let copied = u64::from(cleared.copied.is_some());
+                if let Some(event) = cleared.copied {
+                    self.ready.push_back((event, 1));
+                }
+                if let Some(run) = cleared.run {
+                    self.ready.push_back((run, cleared.events - copied));
+                }
             }
-            self.ready.push_back(segment.bytes);
-        }
-        if let Err(reason) = verdict {
-            self.cut(reason);
+            Err(PushError::TooLarge) => self.cut(CutReason::EventTooLarge),
+            Err(PushError::Refused(reason)) => self.cut(reason),
         }
     }
 
     /// The upstream ended cleanly.
     fn complete(&mut self) {
         self.upstream = None;
-        if let Some(meter) = self.meter.as_mut()
-            && let Some(tail) = meter.splitter.finish()
-        {
-            if let Err(reason) = meter.check(&tail) {
+        if let Some((tail, skip)) = self.splitter.as_mut().and_then(Splitter::finish) {
+            let verdict = self
+                .meter
+                .as_mut()
+                .map_or(Ok(()), |meter| meter.check(tail.get(skip..).unwrap_or_default()));
+            if let Err(reason) = verdict {
                 self.cut(reason);
                 return;
             }
-            self.ready.push_back(tail.bytes);
+            self.ready.push_back((tail, 1));
         }
         self.phase = Phase::Ending(RelayEnd::Completed);
     }
@@ -542,6 +558,11 @@ impl<B> RelayBody<B> {
     /// Whether the upstream has sent nothing for the idle timeout since the relay began waiting
     /// on it. The deadline is set when a wait begins, inside the runtime that polls the body.
     fn idle_expired(&mut self, cx: &mut Context<'_>) -> bool {
+        // tokio's timer adds to the deadline itself, so one near the clock's end would panic
+        // there (final review L1).
+        if self.limits.idle_timeout > MAX_IDLE_TIMEOUT {
+            return false;
+        }
         if !self.waiting {
             let Some(deadline) = Instant::now().checked_add(self.limits.idle_timeout) else {
                 // Too far to reach: no idle cut.
@@ -582,11 +603,11 @@ impl<B> RelayBody<B> {
         }
     }
 
-    fn forward(&mut self, bytes: Bytes) -> Poll<Option<Result<Frame<Bytes>, RelayError>>> {
+    fn forward(&mut self, (bytes, events): (Bytes, u64)) -> Poll<Option<Result<Frame<Bytes>, RelayError>>> {
         self.forwarded_bytes = self
             .forwarded_bytes
             .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-        self.segments += 1;
+        self.segments = self.segments.saturating_add(events);
         Poll::Ready(Some(Ok(Frame::data(bytes))))
     }
 }

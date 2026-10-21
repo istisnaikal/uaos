@@ -368,11 +368,9 @@ async fn one_nano_usd_over_the_ceiling_is_never_forwarded() {
 
 #[tokio::test]
 async fn usage_on_an_end_frame_is_metered() {
-    // Review M2: usage is read from every event, whatever its kind.
+    // Review M2: usage is read from an end frame, not only from a usage frame.
     let completed: &[u8] = b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"usage\":{\"input_tokens\":50,\"output_tokens\":101}}}\n\n";
-    let content: &[u8] =
-        b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"usage\":{\"output_tokens\":101}}\n\n";
-    for over in [completed, content] {
+    for over in [completed] {
         let codec = Arc::new(Dialect::new());
         let (up, _, _) = upstream(&[START, over], false);
         let (mut body, _rx) = relay(&codec, &Stop::running(), RelayLimits::default())
@@ -385,6 +383,66 @@ async fn usage_on_an_end_frame_is_metered() {
             "usage on an end frame went unmetered"
         );
     }
+}
+
+#[tokio::test]
+async fn a_content_frame_is_forwarded_unread() {
+    // Final review M2: a content frame is the model's output, and its JSON never cuts a stream.
+    // A lone surrogate escape: an emoji split across two text deltas, which `uaos-json` refuses.
+    let lone = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"~ud83d\"}}\n\n"
+        .replace("~u", "\\u");
+    // Usage on a frame the codec calls content is the codec's defect, not metered here.
+    let usage_on_content: &[u8] =
+        b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"usage\":{\"output_tokens\":999}}\n\n";
+    // A server tool's result arrives whole in one event: 2 MiB, past the old 1 MiB bound.
+    let document = "A".repeat(2 * 1024 * 1024);
+    let tool_result = format!(
+        "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{{\"type\":\"web_fetch_tool_result\",\"content\":{{\"type\":\"document\",\"source\":{{\"data\":\"{document}\"}}}}}}}}\n\n"
+    );
+    let parts: [&[u8]; 6] = [
+        START,
+        lone.as_bytes(),
+        usage_on_content,
+        tool_result.as_bytes(),
+        DELTA_100,
+        STOP,
+    ];
+    let codec = Arc::new(Dialect::new());
+    let (up, _, _) = upstream(&parts, false);
+    let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let (out, error) = drain(&mut body).await;
+    assert_eq!(
+        (error, out == concat(&parts)),
+        (None, true),
+        "a content frame was cut for its JSON"
+    );
+    assert_eq!(report(rx).await.cost, Some(NanoUsd::new(CEILING)));
+}
+
+#[tokio::test]
+async fn one_upstream_frame_is_forwarded_in_at_most_two_pieces() {
+    // Final review M1: an event completed from an earlier frame, then the frame's own events as
+    // one slice; nothing is kept per event.
+    let head: &[u8] = b"event: content_block_delta\ndata: {}";
+    let rest = [&b"\n\n"[..], "\n".repeat(10_000).as_bytes(), DELTA].concat();
+    let codec = Arc::new(Dialect::new());
+    let (up, _, _) = upstream(&[head, &rest], false);
+    let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let (mut frames, mut out) = (0, Vec::new());
+    while let Some(frame) = body.frame().await {
+        out.extend_from_slice(&frame.unwrap().into_data().unwrap());
+        frames += 1;
+    }
+    let report = report(rx).await;
+    assert_eq!(
+        (frames, out == [head, &rest[..]].concat(), report.segments),
+        (2, true, 1 + 10_000 + 1),
+        "one upstream frame was forwarded in more than two pieces"
+    );
 }
 
 #[tokio::test]
@@ -502,9 +560,10 @@ async fn an_empty_usage_report_is_no_report() {
 
 #[tokio::test]
 async fn an_event_past_the_node_bound_cuts() {
-    // Scoped round L-d: reading an event for usage is bounded in nodes, not only in bytes.
-    let zeros = vec!["0"; 70_000].join(",");
-    let wide = format!("event: content_block_delta\ndata: {{\"a\":[{zeros}]}}\n\n");
+    // Scoped round L-d: reading a frame for usage is bounded in nodes, not only in bytes, at
+    // the request's own bound (final review M2).
+    let zeros = vec!["0"; (1 << 20) + 16].join(",");
+    let wide = format!("event: message_delta\ndata: {{\"usage\":{{\"output_tokens\":1}},\"a\":[{zeros}]}}\n\n");
     assert!(wide.len() < RelayLimits::default().max_event_bytes);
     assert_eq!(
         cut_reason(&[wide.as_bytes()], Dialect::new(), RelayLimits::default()).await,
@@ -699,9 +758,18 @@ async fn an_event_past_its_bound_cuts() {
         max_event_bytes: 64,
         ..RelayLimits::default()
     };
+    // Final review L3: data that is not object-shaped and an event no blank line ends, so only
+    // the splitter's bound can stop it.
+    let text = "x".repeat(100);
+    let parts: [&[u8]; 2] = [b"event: content_block_delta\ndata: ", text.as_bytes()];
+    let codec = Arc::new(Dialect::new());
+    let (up, _, _) = upstream(&parts, false);
+    let (mut body, _rx) = relay(&codec, &Stop::running(), limits)
+        .sse(up, &HeaderMap::new())
+        .unwrap();
     assert_eq!(
-        cut_reason(&[DELTA], Dialect::new(), limits).await,
-        Some(RelayError::Cut(CutReason::EventTooLarge)),
+        drain(&mut body).await,
+        (Vec::new(), Some(RelayError::Cut(CutReason::EventTooLarge))),
         "an event past its bound was forwarded"
     );
 }
@@ -785,6 +853,28 @@ async fn a_slow_client_never_causes_an_idle_cut() {
     assert!(matches!(next, Some(Ok(_))), "a slow client caused an idle cut");
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_huge_idle_timeout_disables_the_cut_without_a_panic() {
+    // Final review L1: tokio's timer adds to a deadline itself, so a timeout near the clock's
+    // end must not arm one.
+    let limits = RelayLimits {
+        idle_timeout: Duration::MAX,
+        ..RelayLimits::default()
+    };
+    let codec = Arc::new(Dialect::new());
+    let (up, _, keep) = upstream(&[], true);
+    let tx = keep.unwrap();
+    let (mut body, _rx) = relay(&codec, &Stop::running(), limits)
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let feeder = async move {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        tx.send(Ok(Bytes::from_static(PING))).await.unwrap();
+    };
+    let ((out, error), ()) = tokio::join!(drain(&mut body), feeder);
+    assert_eq!((out, error), (PING.to_vec(), None));
+}
+
 #[tokio::test]
 async fn an_empty_event_name_is_no_name() {
     // Review L3: WHATWG reads an empty event type as the default, as no `event` field.
@@ -829,9 +919,9 @@ async fn usage_that_cannot_be_read_or_priced_cuts() {
         cut_reason(&[no_report], Dialect::new(), RelayLimits::default()).await,
         Some(RelayError::Cut(CutReason::UnreadableUsage))
     );
-    let broken_content: &[u8] = b"event: content_block_delta\ndata: {\"type\":\n\n";
+    let broken_end: &[u8] = b"event: message_stop\ndata: {\"type\":\n\n";
     assert_eq!(
-        cut_reason(&[broken_content], Dialect::new(), RelayLimits::default()).await,
+        cut_reason(&[broken_end], Dialect::new(), RelayLimits::default()).await,
         Some(RelayError::Cut(CutReason::UnreadableUsage)),
         "a broken JSON object slipped past metering"
     );

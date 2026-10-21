@@ -91,12 +91,15 @@ async fn a_stop_reaches_every_live_permit() {
     let stop = Stop::running();
     let admission = Admission::new(AdmissionLimits::default(), stop.clone());
     let permits: Vec<_> = (0..3).map(|_| admission.admit(1).unwrap()).collect();
-    let waiting = permits[0].stop().clone().stopped();
-    let _engaged = stop.engage(StopReason::CanaryHit);
+    // Final review L2: the watch is polled, and waiting, before the stop engages.
+    let waiting = tokio::time::timeout(Duration::from_secs(5), permits[0].stop().clone().stopped());
+    let (reached, ()) = tokio::join!(waiting, async {
+        tokio::task::yield_now().await;
+        let _engaged = stop.engage(StopReason::CanaryHit);
+    });
     for permit in &permits {
         assert_eq!(permit.stop().engaged(), Some(StopReason::CanaryHit));
     }
-    let reached = tokio::time::timeout(Duration::from_secs(5), waiting).await;
     assert_eq!(
         reached.ok(),
         Some(StopReason::CanaryHit),
@@ -242,14 +245,34 @@ fn admission_counts_bytes_in_flight() {
 fn a_permit_grows_only_inside_the_bound() {
     let admission = Admission::new(limits(64, 10 * MIB), Stop::running());
     let mut permit = admission.admit(4 * MIB).unwrap();
-    permit.charge(5 * MIB).unwrap();
+    let other = admission.admit(4 * MIB).unwrap();
+    permit.charge(MIB).unwrap();
     let refused = permit.charge(2 * MIB).unwrap_err();
     assert_eq!(refused.reason, RefusalReason::Bytes);
     assert_eq!(refused.code, codes::RUNTIME_OVERLOAD);
-    assert_eq!(permit.bytes(), 9 * MIB, "a refused charge was charged");
-    assert_eq!(admission.in_flight(), (1, 9 * MIB));
-    drop(permit);
+    assert_eq!(permit.bytes(), 5 * MIB, "a refused charge was charged");
+    assert_eq!(admission.in_flight(), (2, 9 * MIB));
+    let alone = permit.charge(6 * MIB).unwrap_err();
+    assert_eq!(
+        alone.reason,
+        RefusalReason::TooLarge,
+        "a charge that can never fit was told to retry"
+    );
+    drop((permit, other));
     assert_eq!(admission.in_flight(), (0, 0), "a dropped permit kept its bytes");
+}
+
+#[test]
+fn a_request_that_can_never_fit_is_not_told_to_retry() {
+    // Final review L6: past the bytes bound on its own, a request is refused for good.
+    let admission = Admission::new(limits(64, 10 * MIB), Stop::running());
+    let refusal = admission.admit(11 * MIB).unwrap_err();
+    assert_eq!(
+        (refusal.reason, refusal.code, refusal.retry_after),
+        (RefusalReason::TooLarge, codes::INGRESS_TOO_LARGE, Duration::ZERO),
+        "a request that can never fit was told to retry"
+    );
+    assert_eq!(admission.in_flight(), (0, 0));
 }
 
 #[test]
