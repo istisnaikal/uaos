@@ -2956,6 +2956,18 @@ The journal is tamper-proof.
             },
             expect: "the engine loaded a grant the wire cannot hold",
         },
+        Case {
+            id: "grant-id-twice-loaded",
+            gate: "test",
+            tool: None,
+            // PR-4b's V1 review L2: the engine refuses a grant id twice.
+            seed: replace("crates/uaos-policy/src/engine.rs", "        if !ids.insert(grant.id) {\n", "        if !ids.insert(grant.id) && false {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-policy", "--test", "policy", "a_grant_id_twice_is_refused"],
+            },
+            expect: "a grant id was loaded twice",
+        },
     ]
 }
 

@@ -196,7 +196,7 @@
           "$ref": "#/$defs/GrantId"
         },
         "injection": {
-          "description": "For `memory.read` on a pocket only: what may happen to what is read.",
+          "description": "For a cross-pocket `memory.read` only: what may happen to what is read.",
           "anyOf": [
             {
               "$ref": "#/$defs/InjectionPolicy"
@@ -327,7 +327,7 @@
           ]
         },
         {
-          "description": "Another pocket, for `memory.read`.",
+          "description": "A pocket, for `memory.read`: another pocket (a cross-pocket read, which needs consent), or\nthe reading pocket itself (behind an ask).",
           "type": "object",
           "properties": {
             "id": {
@@ -388,7 +388,16 @@
     },
     "PolicyId": {
       "type": "string",
-      "pattern": "^(?!grant:)[A-Za-z0-9._:-]{1,128}$"
+      "allOf": [
+        {
+          "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+        },
+        {
+          "not": {
+            "pattern": "^grant:"
+          }
+        }
+      ]
     },
     "PoolId": {
       "type": "string",

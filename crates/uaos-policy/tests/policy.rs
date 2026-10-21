@@ -288,7 +288,9 @@ proptest! {
         req in (any::<u8>(), any::<u8>()),
     ) {
         let text: Vec<String> = pieces.iter().enumerate().map(|(i, (k, a, f))| policy_piece(i, *k, *a, *f)).collect();
-        let grants: Vec<Grant> = grants.into_iter().map(random_grant).collect();
+        // One grant per id: the engine refuses an id twice (PR-4b's scoped review M1).
+        let mut seen = BTreeSet::new();
+        let grants: Vec<Grant> = grants.into_iter().map(random_grant).filter(|g| seen.insert(g.id)).collect();
         let e = PolicyEngine::load(&text.join("\n"), &grants, NOW).unwrap();
         let r = random_request(req.0, req.1);
         prop_assert_eq!(e.authorize(&r), e.authorize_unsliced(&r));
@@ -1236,8 +1238,76 @@ fn a_finer_expiry_floors_on_reload() {
 #[test]
 fn a_grant_id_twice_is_refused() {
     let grant = memory_grant(1, NOW + 60_000);
+    let refused = PolicyEngine::load("", &[grant.clone(), grant], NOW);
     assert!(
-        PolicyEngine::load("", &[grant.clone(), grant], NOW).is_err(),
+        matches!(&refused, Err(PolicyError::Rule { problem, .. }) if problem.contains("used twice")),
         "a grant id was loaded twice"
     );
+}
+
+/// A grant valid by construction: every principal, every action with its own resource kind,
+/// names up to 128 bytes, up to 8 classes and asks, a live expiry.
+fn any_valid_grant() -> impl Strategy<Value = Grant> {
+    let name = || prop_oneof!["[A-Za-z0-9._:-]{1,12}", "[a-z]{128}"].prop_map(|s| Name::new(s).unwrap());
+    let principal = prop_oneof![
+        any::<u8>().prop_map(|n| Principal::Agent(CredentialId::from_parts(u64::from(n), [n; 10]))),
+        Just(Principal::Human),
+        Just(Principal::Module(ModuleName::new("mod-x").unwrap())),
+        Just(Principal::System),
+    ];
+    let target = prop_oneof![
+        (
+            prop::sample::select(vec![Action::ModelCall, Action::CountTokens]),
+            name(),
+            name()
+        )
+            .prop_map(|(a, provider, model)| (a, Resource::Model { provider, model })),
+        (prop::sample::select(vec![Action::ToolCall, Action::Exec]), name()).prop_map(|(a, n)| (a, Resource::Tool(n))),
+        any::<u8>().prop_map(|n| (
+            Action::BudgetTransfer,
+            Resource::Pool(PoolId::from_parts(u64::from(n), [n; 10]))
+        )),
+        name().prop_map(|n| (Action::ConfigChange, Resource::ConfigKey(n))),
+        (0_u8..2).prop_map(|n| (Action::MemoryRead, Resource::Pocket(pocket(n)))),
+    ];
+    (
+        principal,
+        target,
+        0_u8..2,
+        NOW + 1..NOW + 1_000_000,
+        0_u8..4,
+        prop::collection::btree_set(name(), 0..=8),
+        prop::collection::btree_set("[a-f][a-z0-9._:-]{0,12}", 0..=8),
+    )
+        .prop_map(
+            |(principal, (action, resource), place, expires_at_ms, tier, data_classes, approves)| Grant {
+                id: GrantId::from_parts(1, [1; 10]),
+                principal,
+                action,
+                resource,
+                pocket: pocket(place),
+                expires_at_ms,
+                max_risk_tier: RiskTier::new(tier).unwrap(),
+                data_classes,
+                approves,
+            },
+        )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// PR-4b's scoped review L1: every grant that is valid by construction loads, journals and
+    /// reloads unchanged, own-pocket reads included, so `check_grant` refuses nothing it should
+    /// accept.
+    #[test]
+    fn every_valid_grant_loads_and_round_trips(grant in any_valid_grant()) {
+        prop_assert!(check_grant(&grant).is_ok(), "check_grant refused a valid grant");
+        prop_assert!(PolicyEngine::load("", std::slice::from_ref(&grant), NOW).is_ok(), "the engine refused a valid grant");
+        let injection = grant_crosses_pockets(&grant).then_some(InjectionPolicy::Ask);
+        let issued_at = WallTime::from_unix_nanos(i128::from(NOW) * 1_000_000).unwrap();
+        let record = grant_record(&grant, ApprovalId::from_parts(1, [3; 10]), issued_at, injection);
+        prop_assert!(record.is_ok(), "a valid grant could not be journaled: {:?}", record);
+        prop_assert_eq!(Grant::try_from(&record.unwrap()).unwrap(), grant);
+    }
 }

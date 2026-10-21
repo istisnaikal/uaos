@@ -126,7 +126,34 @@ impl PolicyId {
     }
 }
 
-string_token_serde!(PolicyId, "^(?!grant:)[A-Za-z0-9._:-]{1,128}$");
+impl Serialize for PolicyId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for PolicyId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for PolicyId {
+    fn schema_name() -> Cow<'static, str> {
+        "PolicyId".into()
+    }
+
+    // The `grant:` rule as `not`, not as a lookahead, which validators outside ECMA-262 refuse.
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "allOf": [
+                { "pattern": "^[A-Za-z0-9._:-]{1,128}$" },
+                { "not": { "pattern": "^grant:" } }
+            ]
+        })
+    }
+}
 
 /// A data class a grant's approved content carried (`secret.aws`, `pii.email`), in the policy
 /// engine's `Name` grammar.
@@ -202,7 +229,8 @@ pub enum GrantResource {
         /// The key.
         name: GrantName,
     },
-    /// Another pocket, for `memory.read`.
+    /// A pocket, for `memory.read`: another pocket (a cross-pocket read, which needs consent), or
+    /// the reading pocket itself (behind an ask).
     Pocket {
         /// The pocket whose memory may be read.
         id: PocketId,
@@ -250,7 +278,7 @@ pub struct GrantRecord {
     /// `@id`s of the ask policies the grant was issued to satisfy.
     #[schemars(length(max = 8))]
     pub approves: BTreeSet<PolicyId>,
-    /// For `memory.read` on a pocket only: what may happen to what is read.
+    /// For a cross-pocket `memory.read` only: what may happen to what is read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub injection: Option<InjectionPolicy>,
 }

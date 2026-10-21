@@ -49,12 +49,17 @@ grants).
 `uaos.grant/1` is the journaled form of the engine's `Grant`. A grant journaled when issued must
 reload into the engine at boot exactly. So the engine loads only grants the wire can hold
 (`check_grant`, run both at load and when journaling), and each of them has a record and
-back. Grants that fail it:
+back. Grants that fail `check_grant`:
 - a model provider with `/`, which the engine's provider entity cannot hold;
 - more than 8 data classes or approved asks;
 - an expiry after the wire's maximum, 9999-12-30T22:00Z;
-- `memory.read` without a pocket, or a pocket on another action;
-- a grant id used twice in one set.
+- `memory.read` without a pocket, or a pocket on another action.
+
+Separately, `PolicyEngine::load` refuses a set that holds one grant id twice. Each grant is
+issued under a fresh id, and issuing refuses an id it already knows. A journal that still
+holds an id twice (a retried append, say) is the runtime's to resolve at boot: it keeps the
+first entry, raises an alarm, and never lets one duplicate refuse every grant. That is a
+PR-6/PR-8 obligation.
 
 The field-by-field mapping:
 
@@ -102,6 +107,9 @@ the caller's.
     `check_grant` accepts, and every grant it loads goes to a record and back unchanged;
   - the two crates' name grammars accept the same strings;
   - policy identifiers match the engine's `@id`s;
+  - every grant valid by construction (every principal, action and its resource kind,
+    own-pocket reads, names up to 128 bytes, up to 8 classes and asks) loads, journals and
+    reloads unchanged, so `check_grant` refuses nothing it should accept;
   - a finer expiry floors;
   - a grant id twice is refused;
 - rule 3: an own-pocket read behind an ask is approved by a grant that the wire journals;
@@ -120,6 +128,7 @@ the caller's.
 | `grant-unnamed-cross-pocket-allowed` | a cross-pocket read naming no grant keeps every grant | `only_the_carried_grant_allows_a_cross_pocket_read` |
 | `grant-own-pocket-unjournalable` | own-pocket grants must carry an injection policy | `an_own_pocket_read_grant_carries_no_injection_policy` |
 | `engine-loads-unjournalable-grant` | the engine loads grants the wire refuses | `every_engine_grant_round_trips_through_the_wire` |
+| `grant-id-twice-loaded` | the engine loads a grant id twice | `a_grant_id_twice_is_refused` |
 
 `schema-compat` checks `grant.v1.json` like every schema; its own seeded violation lives on
 another schema.
