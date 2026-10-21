@@ -61,7 +61,10 @@ waits for P5 sidecars.
    bidirectional controls U+202A–U+202E and U+2066–U+2069 (ADR-0020 rule 5); and the Unicode
    tag characters U+E0000–U+E007F, which a model reads and a person cannot see; and a
    variation selector that follows no base character (a run of them encodes bytes nobody
-   sees). Declarations reach the host through a `DeclsMut` handle, by value, so a module
+   sees). A base is a visible character: not whitespace, not a control, and not a
+   default-ignorable code point (PR-4c). An ideographic variation selector, U+E0100–U+E01EF,
+   follows only a CJK unified ideograph. Declarations reach the host through a `DeclsMut`
+   handle, by value, so a module
    cannot swap the collector for a larger one.
 5. **Redacted by default.** A module sees the redacted structural view. Detection scans keys
    as well as values, so the mask covers strings, numbers and object keys. A masked value or
@@ -70,7 +73,10 @@ waits for P5 sidecars.
    it, so a finding placed on the wrong node fails closed. Structure stays visible: kinds,
    counts and nesting, inside a masked container too; findings are strings, numbers and keys.
    A finding the host cannot place on a value or a key refuses the view, and so does one that
-   names a node off the tape (`Mask::seal`). A module's `Strip` selector is resolved over the masked
+   names a node off the tape, or a key finding on a node that has no key (`Mask::seal`). A seal
+   belongs to the tape it was sealed against: a view over any other tape ignores it and reads
+   the mask unsealed, which is as correct and slower (PR-4c). A module's `Strip` selector is
+   resolved over the masked
    view, never over the raw tape. **Frames and errors** reach a hook as the provider sent
    them: before rehydration (ADR-0017), never rehydrated. A secret masked on the way out
    therefore never comes back to a module on the way in. No raw view exists at RC-1.
@@ -188,7 +194,9 @@ never shared between pockets (C-18).
   handle offers the bounded changes and nothing else, so a module can neither swap the state
   for another (which would clear the mark below and raise its bound) nor keep the handle. Each
   change is atomic, and a refused one marks the state `exceeded`. The host runs every call on a copy and keeps the copy only if
-  it is not exceeded and its declarations pass. Otherwise the call is a strike
+  it is not exceeded and its declarations pass. The procedure is the crate's own
+  (`Admitted::call_hook`, `Admitted::call_event`, PR-4c), so no host can run it differently;
+  the host adds only the strikes it alone can make. Otherwise the call is a strike
   (`state_exceeded`), and the state is left as it was before the call. **Every strike refuses
   all of the call's declarations.** A static strike (from `check_decls`) and `state_exceeded`
   also discard the call's state changes. A host-side strike keeps them: one the host makes on
@@ -277,13 +285,21 @@ forbidden role is refused. A strip may remove what lies inside its anchor, never
 itself, and never anything that touches masked content: a codec assigns roles through the
 masked view, so masked content may hide a forbidding role (`RoleMap::may_strip`).
 
-**Cost.** Each step visits a node at most once, and each visit is O(log ranges) against a
-sealed mask; the host seals before it builds a view. Every resolution spends a `Visits`
-budget, and running out is a host-side strike (`budget_exceeded`). **No per-call cost bound is
-claimed yet.** The budget does not charge two costs: the member scan behind a `Key` step or a
-predicate's lookup, O(members), and decoding a member's string for a comparison, O(length).
-Charging both, and with them a bound per call, is PR-4c's, split from this PR under D-31. It
-is owed before PR-8, the first code to resolve a module's selectors (§12).
+**Cost (PR-4c).** Each step visits a node at most once, and every node a step or a predicate
+examines spends one visit from a `Visits` budget, each member a lookup examines included.
+No comparison decodes more than six times `MAX_SELECTOR_TEXT` bytes:
+- a key is compared with the selector's key as it decodes, and stops at the first difference;
+- a string whose raw text is longer than six times `MAX_SELECTOR_TEXT` is equal to no value,
+  without decoding: an escape shrinks at most six bytes to one, so it decodes to more than
+  `MAX_SELECTOR_TEXT` bytes, longer than any value a selector names. A masked string is
+  equal to no value either, so the shortcut reveals nothing about masked text.
+
+Each visit also costs O(log ranges) against a sealed mask; the host seals before it builds a
+view. One call's selectors share one budget of `MAX_VISITS`, and running out is a host-side
+strike (`budget_exceeded`). **So one call costs at most `MAX_VISITS` visits, each
+O(`MAX_SELECTOR_TEXT` + log ranges).** A codec's `roles()` is bounded the same way: its
+`RoleMap` carries one budget for all the selectors it assigns. `Visits` is not `Copy`, so a
+budget is never duplicated.
 
 ## 8. Kernel contract additions (all additive)
 
@@ -423,7 +439,7 @@ make the `language-neutrality` gate active (ADR-0020):
     spell, for the C-61 paper module (L8);
   - binding a `ModuleState` to its pocket in the host's store; this crate only checks the
     cursor (L5).
-- **Split to PR-4c under D-31 (round 5), owed before PR-8:**
+- **Split to PR-4c under D-31 (round 5), owed before PR-8; built by PR-4c:**
   - M1: the visit budget charges one visit per member a lookup examines, and string
     comparisons stop past `MAX_SELECTOR_TEXT` without decoding the whole value. That gives
     the per-call cost bound §7 does not claim yet, with tests for `Key`, `Each` and `Where` on
@@ -432,8 +448,8 @@ make the `language-neutrality` gate active (ADR-0020):
     a default-ignorable code point, and U+E0100–U+E01EF only after a CJK ideograph;
   - L3: a seal is tied to its tape (a view built from a sealed mask checks it), and a key
     finding on a node with no key refuses the seal;
-  - L4: `Visits` becomes move-only; `RoleMap::assign_within` gives a codec's `roles()` one
-    budget; the host procedure moves into the crate.
+  - L4: `Visits` becomes move-only; a `RoleMap` carries one budget for a codec's `roles()`;
+    the host procedure moves into the crate.
 - **Owned by PR-8:** the codec's `dimensions()`, snapshot at admission like a module's
   manifest (round 5, L4).
 - **PR-8 proof obligations, from the final review:**
