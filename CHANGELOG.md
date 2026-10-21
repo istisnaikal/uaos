@@ -223,6 +223,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - A strip may not enclose a forbidden role (`RoleMap::touching`, `RoleMap::may_strip`), and
       a masked container masks everything inside it.
     - `ModuleText` refuses Unicode tag characters and accepts CRLF.
+    - The `language-neutrality` merge gate (ADR-0020) is active: the seven-locale corpus runs in
+      the `test` job, and three seeded violations prove it bites (a case fold in selectors, an
+      accepted bidi override, an accepted tag character).
     - **Language-neutral (ADR-0020).** No type names a locale. `ModuleText` keeps any language
       byte for byte and refuses explicit bidi controls (U+202A–U+202E, U+2066–U+2069). A
       seven-locale corpus (EN, TR, DE, FR, ES, IT, AR) crosses five stages with 0 byte

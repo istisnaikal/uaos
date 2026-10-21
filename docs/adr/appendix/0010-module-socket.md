@@ -331,8 +331,9 @@ selector's keys and values, a frame, state bytes or `ModuleText` (I-11).
   strings. Selectors never fold case (Turkish i, German `ß`). NFC and NFD stay distinct.
   `ModuleText` refuses explicit bidi controls and keeps the implicit marks.
 
-**Seeded violations** (`cargo xtask negative`, gate `test`; the two language cases move to
-the `language-neutrality` gate once ADR-0020's PR registers it):
+**Seeded violations** (`cargo xtask negative`): gate `test`, except the three language cases
+(`selector-folds-case`, `module-text-accepts-bidi-override`, `module-text-accepts-tag`), which
+make the `language-neutrality` gate active (ADR-0020):
 
 | id | Seed | Caught by |
 |---|---|---|
