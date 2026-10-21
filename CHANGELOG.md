@@ -161,6 +161,12 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P3 Move 1, PR-6b (spec first): the runtime's boot recovery
+  (`docs/adr/appendix/0013-runtime-boot-recovery.md`, WP3.A6b). After the journal opens, boot
+  refuses a configuration older than the journal's (`CONFIG_DRIFT`), restores the stop, replays
+  and recovers the ledger, makes every open intent `Indeterminate` once, and explains the boot in
+  one `kernel.booted` record. A crash at any point during boot converges on the next. The state
+  actor is PR-6c's; the bus, CPU pool and DST are PR-6d's.
 - P3 Move 1, PR-6a (WP3.A6a): the crate `uaos-runtime`, first half of the runtime spine: the
   kernel stop, admission, the pinned configuration snapshot, declared pricing, the metered relay
   and the supervisor. Contract: `docs/adr/appendix/0013-runtime-relay-and-stop.md`, written before
