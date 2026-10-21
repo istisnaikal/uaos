@@ -2920,6 +2920,42 @@ The journal is tamper-proof.
             },
             expect: "a grant changed through the wire",
         },
+        Case {
+            id: "grant-unnamed-cross-pocket-allowed",
+            gate: "test",
+            tool: None,
+            // ADR-0008 appendix §2 rule 4: a cross-pocket read that names no grant has none.
+            seed: replace("crates/uaos-policy/src/engine.rs", "        if request.crosses_pockets() && request.grant.is_none() {\n            return Ok(Vec::new());\n        }\n", ""),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-policy", "--test", "policy", "only_the_carried_grant_allows_a_cross_pocket_read"],
+            },
+            expect: "a cross-pocket read naming no grant was allowed",
+        },
+        Case {
+            id: "grant-own-pocket-unjournalable",
+            gate: "test",
+            tool: None,
+            // PR-4b V1 review M1: only a cross-pocket grant carries an injection policy, so an own-pocket one can be journaled.
+            seed: replace("crates/uaos-contracts/src/grant.rs", "let cross_pocket = memory_read && source != Some(self.pocket);", "let cross_pocket = memory_read;"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-contracts", "--lib", "an_own_pocket_read_grant_carries_no_injection_policy"],
+            },
+            expect: "an own-pocket grant took an injection policy",
+        },
+        Case {
+            id: "engine-loads-unjournalable-grant",
+            gate: "test",
+            tool: None,
+            // PR-4b V1 review M2: the engine loads no grant the wire cannot journal.
+            seed: replace("crates/uaos-policy/src/engine.rs", "        check_grant(grant).map_err(|e| PolicyError::Rule {", "        Ok::<(), crate::WireError>(()).map_err(|e| PolicyError::Rule {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-policy", "--test", "policy", "every_engine_grant_round_trips_through_the_wire"],
+            },
+            expect: "the engine loaded a grant the wire cannot hold",
+        },
     ]
 }
 

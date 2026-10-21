@@ -388,7 +388,7 @@
     },
     "PolicyId": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+      "pattern": "^(?!grant:)[A-Za-z0-9._:-]{1,128}$"
     },
     "PoolId": {
       "type": "string",

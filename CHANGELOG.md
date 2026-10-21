@@ -276,8 +276,13 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - Humans and the kernel can hold grants.
     - `uaos-policy::wire` converts both ways: `Grant::try_from(&GrantRecord)` and
       `grant_record`.
-    - Properties: every engine grant round-trips through the wire, and the two crates' name
-      grammars accept the same strings.
+    - The engine loads only grants the wire can hold (`check_grant`, at load and when
+      journaling) and no grant id twice. Properties show that every grant it loads round-trips
+      and that the name and policy-identifier grammars agree.
+    - A `memory.read` grant on the requesting pocket itself is valid, carrying no injection
+      policy, so an ask on an own-pocket read can be approved and journaled.
+    - V1 review (`docs/reviews/WP3.A4b-grant-path.md`): 0 High, 2 Medium, 5 Low, all
+      resolved. 8 seeded violations.
     - `schemas/grant.v1.json` follows; the contract is new on main, so no reader is broken.
 - P3 Move 1, PR-2 (WP3.A2): `uaos-json`, the one structural tokenizer (ADR-0014). Nothing calls
   it yet; `uaos-redact` and its final scan are untouched.
@@ -807,6 +812,12 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Fixed
 
+- **`WallTime::from_unix_nanos` no longer panics on far out-of-range values.**
+  - For nanoseconds far outside jiff's range (for example `u64::MAX` milliseconds as nanoseconds),
+    jiff 0.2.38 reached an internal assertion instead of returning its error.
+  - The range is now checked first, and such values return `WallTimeError::Range`.
+  - Found by PR-4b's wire property, which converts a "never expires" `u64::MAX` grant.
+  - Test: `out_of_range_nanos_are_refused_without_a_panic`.
 - **A crash during the journal's very first open no longer bricks the data directory.** A writer
   killed between creating the first segment and storing the manifest left an empty segment and
   no manifest, and every later open refused it ("refusing to start a new history"), so the

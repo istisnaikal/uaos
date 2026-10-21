@@ -38,6 +38,12 @@ impl WallTime {
     /// # Errors
     /// Returns [`WallTimeError::Range`] if the value is outside the supported range.
     pub fn from_unix_nanos(nanos: i128) -> Result<Self, WallTimeError> {
+        // Checked before jiff sees it: for values far outside its range, jiff 0.2.38 reaches an
+        // internal assertion instead of returning its error (found by PR-4b's wire property).
+        let range = jiff::Timestamp::MIN.as_nanosecond()..=jiff::Timestamp::MAX.as_nanosecond();
+        if !range.contains(&nanos) {
+            return Err(WallTimeError::Range);
+        }
         jiff::Timestamp::from_nanosecond(nanos)
             .map(Self)
             .map_err(|_| WallTimeError::Range)
@@ -117,6 +123,17 @@ pub struct EventTime {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// Out-of-range values return an error; none of them reaches jiff's internal assertion.
+    #[test]
+    fn out_of_range_nanos_are_refused_without_a_panic() {
+        let max = jiff::Timestamp::MAX.as_nanosecond();
+        let min = jiff::Timestamp::MIN.as_nanosecond();
+        for nanos in [i128::MAX, i128::MIN, i128::from(u64::MAX) * 1_000_000, max + 1, min - 1] {
+            assert_eq!(WallTime::from_unix_nanos(nanos), Err(WallTimeError::Range), "{nanos}");
+        }
+        assert!(WallTime::from_unix_nanos(max).is_ok() && WallTime::from_unix_nanos(min).is_ok());
+    }
 
     #[test]
     fn rejects_non_utc_offsets() {
