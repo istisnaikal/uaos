@@ -125,6 +125,7 @@ ban = []
     "crates/uaos-platform/src/real", # owner of clocks, randomness and the filesystem (D15)
     "crates/uaos-egress/src/connect.rs", # owner of outbound sockets: the one door (I-07, ADR-0013)
     "crates/uaos-egress/src/resolve.rs", # owner of outbound name resolution (ADR-0013)
+    "crates/uaos-runtime/src/supervisor.rs", # owner of spawning: the runtime's only spawner (ADR-0013 Decision 1)
     "crates/*/tests/",
     "crates/*/benches/",
     "crates/uaos-testkit/", # dev-only harnesses that need real processes and real time

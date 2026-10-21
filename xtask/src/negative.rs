@@ -2981,6 +2981,138 @@ The journal is tamper-proof.
             },
             expect: "a principal took a field it does not have",
         },
+        Case {
+            id: "stop-admits-new-op",
+            gate: "test",
+            tool: None,
+            // Runtime contract §3 rule 1: admission checks the stop first.
+            seed: replace("crates/uaos-runtime/src/admission.rs", "        let watch = self.inner.stop.watch();\n        if let Some(refusal) = self.inner.stopped() {\n            return Err(refusal);\n        }\n", "        let watch = self.inner.stop.watch();\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "stop", "a_stopped_kernel_admits_nothing"],
+            },
+            expect: "a stopped kernel admitted an Operation",
+        },
+        Case {
+            id: "stop-not-persisted",
+            gate: "test",
+            tool: None,
+            // Runtime contract §3 rule 4: a journaled stop is honoured at boot.
+            seed: replace("crates/uaos-runtime/src/stop.rs", "            state = BootState::Stopped(StopReason::from_code(code));\n", "            let _ignored = code;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "stop", "a_journaled_stop_survives_a_restart"],
+            },
+            expect: "a journaled stop did not survive a restart",
+        },
+        Case {
+            id: "admission-counts-requests",
+            gate: "test",
+            tool: None,
+            // Runtime contract §4: admission counts bytes in flight, not only requests.
+            seed: replace("crates/uaos-runtime/src/admission.rs", "            Some(total) if total <= self.inner.limits.max_bytes => {\n                used.operations += 1;\n", "            Some(total) if total <= u64::MAX => {\n                used.operations += 1;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "stop", "admission_counts_bytes_in_flight"],
+            },
+            expect: "admission counted requests, not bytes",
+        },
+        Case {
+            id: "relay-forwards-over-ceiling",
+            gate: "test",
+            tool: None,
+            // Runtime contract §7.3: one unit over the reservation cuts.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "        if cost > self.ceiling {\n", "        if cost.get() > self.ceiling.get() + 1_000 {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "one_unit_over_the_ceiling_is_never_forwarded"],
+            },
+            expect: "a usage report over the ceiling was forwarded",
+        },
+        Case {
+            id: "relay-overrun-keeps-kernel-running",
+            gate: "test",
+            tool: None,
+            // Runtime contract §7.4: an overrun engages the kernel stop.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "            let _engaged = self.stop.engage(StopReason::BudgetOverrun);\n", "            let _engaged = StopReason::BudgetOverrun;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "an_overrun_stops_the_kernel"],
+            },
+            expect: "an overrun left the kernel running",
+        },
+        Case {
+            id: "relay-ignores-stop",
+            gate: "test",
+            tool: None,
+            // Runtime contract §3 rule 2: a live relay cuts at its next poll.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "    fn poll_stop(&mut self, cx: &mut Context<'_>) -> Option<StopReason> {\n", "    fn poll_stop(&mut self, cx: &mut Context<'_>) -> Option<StopReason> {\n        if cx.waker().will_wake(cx.waker()) {\n            return None;\n        }\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_stop_cuts_a_waiting_stream"],
+            },
+            expect: "a stop did not cut a waiting stream",
+        },
+        Case {
+            id: "relay-keeps-upstream-after-cut",
+            gate: "test",
+            tool: None,
+            // Runtime contract §7.4 rule 2: a cut drops the upstream before the body yields again.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "        self.ready.clear();\n        self.upstream = None;\n", "        self.ready.clear();\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_cut_drops_the_upstream_at_once"],
+            },
+            expect: "a cut kept the upstream",
+        },
+        Case {
+            id: "relay-cut-ends-clean",
+            gate: "test",
+            tool: None,
+            // Runtime contract §7.4 rule 3: without a terminal frame a cut ends in an error (red line 9).
+            seed: replace("crates/uaos-runtime/src/relay.rs", "                    return Poll::Ready(Some(Err(RelayError::Cut(reason))));\n", "                    let _reason = reason;\n                    return Poll::Ready(None);\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_cut_without_a_terminal_frame_ends_in_an_error"],
+            },
+            expect: "a cut ended cleanly, as if the answer were complete",
+        },
+        Case {
+            id: "relay-event-unbounded",
+            gate: "test",
+            tool: None,
+            // Runtime contract §7.1: an event past its bound cuts (T11).
+            seed: replace("crates/uaos-runtime/src/sse.rs", "            max_event,\n        }\n", "            max_event: usize::MAX,\n        }\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "an_event_past_its_bound_cuts"],
+            },
+            expect: "an event past its bound was forwarded",
+        },
+        Case {
+            id: "sse-split-crlf-twice",
+            gate: "test",
+            tool: None,
+            // Runtime contract §7.2: a CRLF split across two pieces is one line ending.
+            seed: replace("crates/uaos-runtime/src/sse.rs", "            if next == b'\\n' {\n                i += 1;\n            }\n", ""),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "any_chunking_relays_the_same_bytes_and_events"],
+            },
+            expect: "the relay saw different events than an event-stream parser",
+        },
+        Case {
+            id: "unbounded-channel",
+            gate: "clippy",
+            tool: None,
+            // Runtime contract §8, PD-19: every channel is bounded.
+            seed: append(
+                "crates/uaos-runtime/src/lib.rs",
+                "\n/// Seeded.\npub fn seeded_violation() {\n    drop(tokio::sync::mpsc::unbounded_channel::<()>());\n}\n",
+            ),
+            runner: CLIPPY,
+            expect: "tokio::sync::mpsc::unbounded_channel",
+        },
     ]
 }
 

@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "uaos-runtime"
+description = "UAOS runtime: the kernel stop, admission by bytes in flight, the pinned configuration snapshot, declared pricing and the metered stream relay. Its supervisor is the only spawner."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+http.workspace = true
+# Body and executor traits only; the runtime opens no socket (the door does, ADR-0013).
+hyper.workspace = true
+memchr.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+uaos-contracts.workspace = true
+uaos-json.workspace = true
+uaos-ledger.workspace = true
+uaos-module-api.workspace = true
+uaos-state.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+proptest.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
+uaos-platform.workspace = true
+
+[[bench]]
+name = "relay"
+harness = false
+
+[lints]
+workspace = true

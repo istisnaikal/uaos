@@ -161,21 +161,60 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
-- P3 Move 1, PR-6a (spec first): the runtime's relay, stop and admission
-  (`docs/adr/appendix/0013-runtime-relay-and-stop.md`, WP3.A6a). It is the first half of the
-  runtime spine, with the relay core brought forward from PR-7.
-  - **The stop:** an atomic flag, checked first by admission and watched by every admitted
-    Operation. It acts before its record, and a journaled stop is honoured at boot. Resume
-    needs presence (M3). The ADR-0010 amendment is open as D-37.
-  - **Admission** counts bytes in flight, not only requests.
-  - **The relay:** a pulled hyper body over the provider's event stream. It holds one event,
-    forwards exact bytes, and prices every usage report against the Operation's reservation.
-    The first report over it cuts the stream, drops the upstream and engages the kernel stop.
-    A cut is never silent to the client, and never called a rollback.
-  - **The configuration snapshot** pins the locale per Operation as an opaque tag: no locale
-    list in Ring 0.
-  - **Planned contract additions:** event types `kernel.stopped` and `kernel.resumed`; error
-    codes `RUNTIME_STOPPED` and `BUDGET_STREAM_OVERRUN`.
+- P3 Move 1, PR-6a (WP3.A6a): the crate `uaos-runtime`, first half of the runtime spine: the
+  kernel stop, admission, the pinned configuration snapshot, declared pricing, the metered relay
+  and the supervisor. Contract: `docs/adr/appendix/0013-runtime-relay-and-stop.md`, written before
+  the code. The relay core comes forward from PR-7; the state actor, bus and boot recovery are
+  PR-6b's.
+  - **The stop, the kill switch:**
+    - an atomic flag, set before any watcher wakes;
+    - admission checks it first (`RUNTIME_STOPPED`, `retry-after` 120 s);
+    - every admitted Operation watches it, and every live relay cuts at its next poll;
+    - it acts before its record. `Stop::unrecorded` hands the `kernel.stopped` record to the
+      journal exactly once, and `boot_state` honours it at the next start;
+    - resume needs presence (M3); the ADR-0010 amendment is open as D-37.
+  - **Admission** counts bytes in flight as well as Operations. A permit grows as copies are
+    made, and dropping it releases both.
+  - **The relay** is a hyper body the client's connection pulls:
+    - no task and no channel;
+    - at most one incomplete event held;
+    - each event's exact bytes forwarded, zero-copy inside one upstream frame;
+    - every usage report parsed by `uaos-json` (duplicate keys refused), read by the codec,
+      checked against its dimensions and priced against the Operation's reservation.
+  - **A cut.** The first report one unit over the reservation cuts the stream and engages the
+    kernel stop (`BUDGET_STREAM_OVERRUN`, S1). So do an unreadable or unpriced report, a
+    malformed or oversized event, an oversized body, an idle or failed upstream, and a stop.
+    A cut:
+    - forwards nothing more;
+    - drops the upstream at once;
+    - ends in the dialect's terminal frame or in an error, never in a clean end.
+
+    A compressed event stream is refused before any byte (D-29).
+  - **Not claimed:**
+    - tokens between provider reports are not counted;
+    - bytes already forwarded cannot be recalled;
+    - tokens generated before the disconnect are billed.
+
+    The hard cap stays the pre-request reservation at the clamped `max_tokens` (WP3.5).
+  - **Locales:** the configuration snapshot pins an opaque `LocaleTag` per Operation. A publish
+    reaches the next pin only, and no Ring 0 type names a locale.
+  - **The supervisor** is the runtime's only spawner. Its tasks are bounded, and it is hyper's
+    executor for the door. `tokio::sync::mpsc::unbounded_channel` is banned workspace-wide
+    (PD-19), with a canary.
+  - **Contract additions:**
+    - event types `kernel.stopped` and `kernel.resumed`;
+    - error codes `RUNTIME_STOPPED` and `BUDGET_STREAM_OVERRUN`.
+
+    No schema change: types and codes are strings.
+  - **Tests:** 41.
+    - A property over random events, line endings and chunking (CRLF and the byte-order mark
+      split across chunks, the seven-locale corpus): the bytes received are the bytes sent, and
+      the events the codec sees are the ones a whole-body event-stream parser reads. 256 cases
+      per merge; 20,000 once locally.
+    - A journaled stop survives a restart on a real journal.
+  - **Measured:** per event on the reference machine, p95 0.3 µs for content and 1.1 µs for a
+    usage report (the budget is 1 ms). About 650 MB/s.
+  - **Negatives:** 11 seeded violations.
 - P3 Move 1, PR-4 (spec first): the module socket's contract,
   `docs/adr/appendix/0010-module-socket.md`, before any code.
   - **`uaos.module/1` (draft):** a manifest built through a builder, with `requires`, a closed set

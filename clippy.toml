@@ -151,6 +151,8 @@ disallowed-methods = [
   { path = "tokio::task::JoinSet::spawn_local_on", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
   { path = "tokio::task::JoinSet::spawn_blocking_on", reason = "CPU work runs on the supervisor's bounded pool (owner: uaos-runtime)" },
   { path = "tokio::task::LocalSet::spawn_local", reason = "spawn via the runtime supervisor (owner: uaos-runtime)" },
+  # Channels: every one is bounded and sized to admission (ADR-0013 Decision 1, PD-19). No owner.
+  { path = "tokio::sync::mpsc::unbounded_channel", reason = "every channel is bounded (ADR-0013 Decision 1, PD-19); no crate owns an unbounded one" },
   # The door: built in one place and handed only to the runtime (ADR-0010; where, ADR-0013 amendment).
   { path = "uaos_egress::Door::new", reason = "the one door is built in one place and handed only to the runtime (ADR-0010)" },
   # Hidden inputs: configuration arrives through uaos-config snapshots, not ambient env reads.
