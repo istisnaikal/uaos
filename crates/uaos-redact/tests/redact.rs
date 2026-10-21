@@ -265,6 +265,19 @@ fn text_with_secrets(seed: u64, count: usize) -> (String, Vec<String>) {
     (parts.join(separator), secrets)
 }
 
+#[test]
+fn the_ci_seed_that_found_a_url_password_gap_is_redacted() {
+    // CI, 2026-10-21 (PR #41's Windows run): a URL password starting with `//` survived, as in
+    // `https://u://…@10.0.0.5`. The input `text_redaction_removes_every_secret_and_is_a_fixpoint`
+    // reported, kept as a fixed case.
+    let (text, secrets) = text_with_secrets(4_814_893_562_051_029_426, 3);
+    let r = redactor().redact_text(&text).unwrap();
+    for s in &secrets {
+        assert!(!r.output().contains(s.as_str()), "a secret survived redaction");
+    }
+    assert!(scanner(&[]).check_bytes(r.output().as_bytes()).is_ok());
+}
+
 fn json_value() -> impl Strategy<Value = Value> {
     let leaf = prop_oneof![
         (any::<u64>(), 0..3_usize).prop_map(|(seed, n)| Value::String(text_with_secrets(seed, n).0)),

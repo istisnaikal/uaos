@@ -180,7 +180,11 @@ equals the full scan).
   - an anchor glued on its left to an alphanumeric byte (`xAKIA…`): by design it reads as part
     of a longer token;
   - URL passwords:
-    - containing an unencoded `"`, `<`, `>`, backtick or `://`, which end a URL in text;
+    - containing an unencoded `"`, `<`, `>` or backtick, which end a URL in text;
+    - containing a `://` whose scheme-like run follows a list or nesting byte (`,` `;` `|` `=`
+      `&` `?` `/` `(` `[` `{` `'`), which reads as another URL starting there (`p,ss://x`).
+      Any other `://` in a password is covered, and so is a password that starts with `//`
+      (Amendment 2);
     - with userinfo longer than 512 bytes;
     - that start with a port number and `/`, `?` or `#` after a host-like user, or continue as a
       lowercase path;
@@ -189,8 +193,9 @@ equals the full scan).
 
     Each reads as something else, as URL parsers would read it.
 - **Over-redaction.** A URL whose path contains `@` after a password is redacted up to that
-  `@`, host and path included; a key glued to more of its own characters is redacted with them.
-  Both fail closed.
+  `@`, host and path included; a key glued to more of its own characters is redacted with them;
+  two URLs glued by a byte that is not a list or nesting byte (`a://u:p@h)b://v:q@k`) read as
+  one userinfo, redacted up to the last `@`. All fail closed.
 - **Exposed history.** Secrets already sent before a session pinned v1 are not retro-redacted;
   P3 raises "already exposed — rotate" (plan §2.5).
 - **Deferred to P3.**
@@ -266,3 +271,26 @@ those are fixed here too. The first review's findings were:
 
 The placeholder format, the HMAC tag and the class names are unchanged, so placeholders already
 produced stay valid.
+
+## Amendment 2 (2026-10-21): a password may hold `://`
+
+**Found by:** CI. On PR #41's Windows run, `text_redaction_removes_every_secret_and_is_a_fixpoint`
+drew seed 4814893562051029426, and a URL password starting with `//` survived redaction:
+`https://u://…@10.0.0.5`. The user's `:` and the password's `//` read as a `://`. The userinfo
+window ended at every next `://`, so neither anchor found the password. The final scan uses
+the same detectors, so it missed it too.
+
+**Decision:**
+- The window still ends at the next `://`, but the userinfo runs on past it unless another URL
+  starts there. Another URL needs a scheme after a list or nesting byte.
+- The anchor at that `://` continues the open userinfo. The scan visits every anchor in order,
+  so each window is examined once and the scan stays linear
+  (`adversarial_inputs_are_scanned_in_linear_work`).
+- An open userinfo never runs past `USERINFO_MAX` bytes.
+- The corpus generator now leaves out the one shape still missed, which the limits above
+  state, so the property claims what the rule does. The CI seed is kept as a fixed case.
+
+**Precision:**
+- Two URLs a list byte separates stay two passwords.
+- A URL list or a redirect parameter (`?next=https://git@github.com`) is not a password.
+- Both are tested (`another_url_after_a_list_byte_stays_another_url`) and seeded.
