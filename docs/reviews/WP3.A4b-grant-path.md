@@ -32,3 +32,23 @@ all). Under D-31, a scoped round over the fixes follows, then a final fresh full
   internal assertion instead of returning its error. `uaos-contracts` now checks the range first
   (`out_of_range_nanos_are_refused_without_a_panic`). The wire's maximum is jiff's,
   9999-12-30T22:00Z.
+
+## Scoped round (D-31)
+
+**Reviewed:** `be612e9..d010903`, by a fresh-context agent reading only, 2026-10-21.
+**Result:** 0 High · 1 Medium · 5 Low.
+**Verified:**
+- no consent hole: an own-pocket grant's key names both pockets;
+- `check_grant` matches the wire;
+- the time bounds;
+- the schema pattern;
+- all three new seeds.
+
+| | Finding | Fix |
+|---|---|---|
+| M1 | `slicing_preserves_decisions` drew grants that could share an id, so the new duplicate-id refusal made it fail about 28% of runs. | One grant per id, as in the equivalence property. |
+| L1 | The widened property held by construction and rarely reached a round trip, so a `check_grant` that refused too much would pass. | `every_valid_grant_loads_and_round_trips`: grants valid by construction must load, journal and reload. |
+| L2 | Docs: a misplaced `GrantKey` comment, the duplicate rule credited to `check_grant`, `load`'s errors, appendix §3. | Corrected. |
+| L3 | Stale `grant.rs` docs ("another pocket", "on a pocket only"), carried into the schema. | Reworded; schema regenerated. |
+| L4 | A duplicate id refuses the whole set at boot, the boot behaviour is unspecified, and the test was weak. | §3: issuing refuses a known id, and boot keeps the first and alarms (PR-6/PR-8). The test asserts the reason; negative `grant-id-twice-loaded`. |
+| L5 | The `(?!` lookahead is not portable across schema validators. | `PolicyId`'s schema is `allOf` a pattern and `not` a `^grant:` pattern. |

@@ -23,7 +23,7 @@
 //!   and only live while `now_ms` is before their expiry. Evaluating them costs a map lookup, not
 //!   a Cedar policy each; a property test proves the result equals compiling the grant to a Cedar
 //!   permit, except for a cross-pocket read, where a compiled permit would only ask. The engine
-//!   loads no grant `uaos.grant/1` cannot journal and no grant id twice (`check_grant`).
+//!   loads no grant `uaos.grant/1` cannot journal (`check_grant`) and no grant id twice.
 //! * **Slicing.** Policies are partitioned at load by their action constraint (following the
 //!   schema's action groups) and, within an action, by an exact `resource ==` constraint. A
 //!   decision evaluates the action's common policies plus those for its resource, merging the
@@ -94,7 +94,6 @@ pub enum PolicyError {
     Invalid(String),
 }
 
-/// What a grant matches exactly: action, principal, resource and pocket.
 /// The engine loads no grant the wire cannot journal, and no grant id twice (V1 review of PR-4b,
 /// M2 and L2): every grant it holds can be journaled and reloaded exactly.
 fn check_grants(grants: &[Grant]) -> Result<(), PolicyError> {
@@ -115,6 +114,7 @@ fn check_grants(grants: &[Grant]) -> Result<(), PolicyError> {
     Ok(())
 }
 
+/// What a grant matches exactly: action, principal, resource and pocket.
 type GrantKey = (Action, String, String, String);
 
 /// A live grant in the index, with what its approval covered.
@@ -247,8 +247,9 @@ impl PolicyEngine {
     ///
     /// # Errors
     /// [`PolicyError`] if anything exceeds the text bounds, fails to parse, breaks a loading
-    /// rule, or fails strict schema validation, or if a grant names something that cannot be
-    /// named. Nothing is partially loaded.
+    /// rule, or fails strict schema validation; if a grant names something that cannot be named,
+    /// is one `uaos.grant/1` cannot journal (`check_grant`), or shares its id with another.
+    /// Nothing is partially loaded.
     pub fn load(policies: &str, grants: &[Grant], now_ms: u64) -> Result<Self, PolicyError> {
         Self::load_with(schema()?, policies, grants, now_ms)
     }
