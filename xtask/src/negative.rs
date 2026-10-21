@@ -3267,7 +3267,7 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // Runtime boot contract (PR-6b): §2 step 3, open reservations are settled at boot, never left open or released.
-            seed: replace("crates/uaos-runtime/src/boot.rs", "        ledger.recover(&mut sink, &Actor::System).map_err(BootError::Ledger)?\n", "        { let _ = &mut sink; uaos_ledger::Recovery::default() }\n"),
+            seed: replace("crates/uaos-runtime/src/boot.rs", "        match ledger.recover(&mut sink, &Actor::System) {\n", "        match Ok::<_, uaos_ledger::LedgerError>(uaos_ledger::Recovery::default()) {\n"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-runtime", "--test", "boot", "an_open_reservation_settles_in_full_and_is_never_released"],
@@ -3339,12 +3339,12 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // Runtime boot contract (PR-6b): V1 review M1, a journal failure in recovery keeps its code.
-            seed: replace("crates/uaos-runtime/src/boot.rs", "            Self::Ledger(error) => error.code(),\n", "            Self::Ledger(_) => codes::BUDGET_LEDGER_INCONSISTENT,\n"),
+            seed: replace("crates/uaos-runtime/src/boot.rs", "            Err(error) => return Err(sink.take_refusal().map_or(BootError::Ledger(error), BootError::Journal)),\n", "            Err(error) => return Err(BootError::Ledger(error)),\n"),
             runner: Runner::Program {
                 program: "cargo",
-                args: &["test", "-p", "uaos-runtime", "--test", "boot", "a_journal_failure_during_recovery_keeps_its_code"],
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "a_full_disk_reads_the_same_wherever_boot_meets_it"],
             },
-            expect: "a journal failure during recovery was reported as a ledger inconsistency",
+            expect: "a journal failure during recovery lost its code",
         },
         Case {
             id: "boot-intent-effect-dropped",
@@ -3375,12 +3375,36 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // Runtime boot contract (PR-6b): §2 step 0 and V1 review L2, records that are not the journal's are refused.
-            seed: replace("crates/uaos-runtime/src/boot.rs", "        && records_end != journal.next_seq()\n", "        && records_end != journal.next_seq() && false\n"),
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    if !(ends_at_head && from_genesis) {\n", "    if !(ends_at_head && from_genesis) && false {\n"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-runtime", "--test", "boot", "records_that_are_not_the_journals_are_refused_before_anything_is_written"],
             },
             expect: "boot wrote over records that are not the journal's",
+        },
+        Case {
+            id: "boot-partial-records-accepted",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 0 and scoped round M1, the records are the whole journal.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    let from_genesis = records.first().is_none_or(|first| first.envelope.seq == Seq(0));\n", "    let from_genesis = true;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "records_that_are_not_the_journals_are_refused_before_anything_is_written"],
+            },
+            expect: "boot accepted records that are not the journal's",
+        },
+        Case {
+            id: "boot-interrupted-boot-unseen",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 5 and scoped round L2, an interrupted boot is evidence of a crash.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    let crashed = interrupted\n", "    let crashed = interrupted && false\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "a_crash_during_boot_converges"],
+            },
+            expect: "an interrupted boot hid a lost stop",
         },
         Case {
             id: "relay-content-json-cuts",

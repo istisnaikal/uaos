@@ -164,22 +164,26 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 - P3 Move 1, PR-6b (WP3.A6b): the runtime's boot recovery, `uaos_runtime::boot`. Contract:
   `docs/adr/appendix/0013-runtime-boot-recovery.md`, written before the code. The state actor
   is PR-6c's; the bus, CPU pool and DST are PR-6d's.
-  - **The procedure:** after the journal opens, boot does four things, then explains itself:
-    - it refuses a configuration older than the journal's (`CONFIG_DRIFT`), before anything
-      is written;
+  - **The procedure:** after the journal opens, boot does five things, then explains itself:
+    - it refuses records that are not the whole journal (`RUNTIME_BOOT_RECORDS_STALE`) and a
+      configuration older than the journal's (`CONFIG_DRIFT`), before anything is written;
     - it restores the stop;
     - it replays and recovers the ledger, settling open reservations as estimated and never
       releasing them;
-    - it makes every open intent `Indeterminate` once (`crash_recovery`).
+    - it makes every open intent `Indeterminate` once (`crash_recovery`), with the effect the
+      intent declared and `may_have_taken_effect`;
+    - a full disk keeps the journal's own code, during the ledger's recovery too (the ledger's
+      `JournalSink::take_refusal`, additive).
 
-    The explanation is one critical `kernel.booted` record with the counts.
+    The explanation is one critical `kernel.booted` record with the counts, saying when a stop
+    may have been lost.
   - **Contract:** the event type `kernel.booted` (`types::ALL` grows from 15 to 16), and the
     error code `RUNTIME_BOOT_RECORDS_STALE` (Runtime 4).
   - **Tests:** drift, the stop, the ledger, intents, the boot record, and a convergence
     property: a boot cut after its n-th append, for every n, converges on the next boot.
   - **Bench (§7):** 49,751 records after a crash boot in 867 ms median on the reference
     machine, about a tenth of it in `boot` itself.
-  - **Negatives:** eleven seeded violations.
+  - **Negatives:** thirteen seeded violations.
   - **Review:** the V1 review (0 High, 7 Medium, 9 Low) is filed in
     `docs/reviews/WP3.A6b-boot-recovery.md`.
 - P3 Move 1, PR-6a (WP3.A6a): the crate `uaos-runtime`, first half of the runtime spine: the

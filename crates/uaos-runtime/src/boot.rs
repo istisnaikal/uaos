@@ -73,10 +73,13 @@ pub struct Booted {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BootError {
-    /// The records do not end where the journal does: boot would journal against records that are
-    /// not the journal's, and a retry with the same records would repeat its writes (§2 step 0).
-    /// Nothing was written.
-    #[error("the records end before {records_end}, but the journal's next record is {journal_next}")]
+    /// The records are not the whole journal, from its genesis to its head: boot would journal
+    /// against records that are not the journal's, and a retry with the same records would repeat
+    /// its writes (§2 step 0). Nothing was written.
+    #[error(
+        "the records are not the journal's: they end before {records_end}, the journal's next is \
+         {journal_next}, or they miss its genesis or its head"
+    )]
     StaleRecords {
         /// The sequence number after the last record handed to boot.
         records_end: Seq,
@@ -95,7 +98,7 @@ pub enum BootError {
     /// A ledger entry in the journal does not decode. Nothing was written.
     #[error("a budget entry in the journal does not decode: {0}")]
     LedgerEntries(String),
-    /// The ledger's entries do not replay, or recovery could not record its entries.
+    /// The ledger's entries do not replay, or its recovery failed other than at the journal.
     #[error("the budget ledger could not be rebuilt: {0}")]
     Ledger(#[source] LedgerError),
     /// The journal refused a recovery record. The next boot resumes where this one stopped.
@@ -107,15 +110,15 @@ pub enum BootError {
 }
 
 impl BootError {
-    /// The registered error code. A journal failure keeps its own code wherever it lands, in the
-    /// ledger's recovery or in boot's own records.
+    /// The registered error code. A journal failure keeps the journal's own code wherever it lands,
+    /// in the ledger's recovery or in boot's own records; anything else the ledger reports is an
+    /// inconsistent ledger.
     #[must_use]
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::StaleRecords { .. } => codes::RUNTIME_BOOT_RECORDS_STALE,
             Self::ConfigDrift { .. } => codes::CONFIG_DRIFT,
-            Self::LedgerEntries(_) => codes::BUDGET_LEDGER_INCONSISTENT,
-            Self::Ledger(error) => error.code(),
+            Self::LedgerEntries(_) | Self::Ledger(_) => codes::BUDGET_LEDGER_INCONSISTENT,
             Self::Journal(error) => error.code(),
             Self::Envelope(_) => codes::JOURNAL_WRITE_FAILED,
         }
@@ -135,11 +138,16 @@ pub fn boot(
     config: &ConfigSnapshot,
     correlation: CorrelationId,
 ) -> Result<Booted, BootError> {
-    // 0. The records are the journal's: they end where it goes on.
-    let tip = records.last().map(|r| Seq(r.envelope.seq.0.saturating_add(1)));
-    if let Some(records_end) = tip
-        && records_end != journal.next_seq()
-    {
+    // 0. The records are the whole journal: from its genesis to its head. A journal never drops
+    // a verified record, so an empty slice means an empty journal.
+    let records_end = records
+        .last()
+        .map_or(Seq(0), |last| Seq(last.envelope.seq.0.saturating_add(1)));
+    let ends_at_head = records.last().map_or(journal.next_seq() == Seq(0), |last| {
+        records_end == journal.next_seq() && last.hash == journal.head()
+    });
+    let from_genesis = records.first().is_none_or(|first| first.envelope.seq == Seq(0));
+    if !(ends_at_head && from_genesis) {
         return Err(BootError::StaleRecords {
             records_end,
             journal_next: journal.next_seq(),
@@ -167,7 +175,11 @@ pub fn boot(
     let mut ledger = Ledger::replay(&entries).map_err(BootError::Ledger)?;
     let recovery = {
         let mut sink = JournalSink::new(journal, correlation, None, config.version());
-        ledger.recover(&mut sink, &Actor::System).map_err(BootError::Ledger)?
+        match ledger.recover(&mut sink, &Actor::System) {
+            Ok(recovery) => recovery,
+            // A journal failure keeps the journal's own code, as it does at boot's own records.
+            Err(error) => return Err(sink.take_refusal().map_or(BootError::Ledger(error), BootError::Journal)),
+        }
     };
 
     // 4. Every intent with no outcome becomes indeterminate, once, with the effect it declared.
@@ -177,8 +189,18 @@ pub fn boot(
     }
 
     // 5. The boot, explained.
-    let crashed = !intents.is_empty()
-        || recovery.settled_estimated + recovery.completed + recovery.transfers_completed + recovery.stuck.len() > 0;
+    // Evidence of a crash: work left open, or an interrupted boot's `op.indeterminate` with no
+    // `kernel.booted` after it. A stuck item is not: it stays from boot to boot.
+    let last_boot = records
+        .iter()
+        .rposition(|r| r.envelope.event_type == types::KERNEL_BOOTED);
+    let interrupted = records
+        .iter()
+        .skip(last_boot.map_or(0, |at| at + 1))
+        .any(|r| r.envelope.event_type == types::OP_INDETERMINATE);
+    let crashed = interrupted
+        || !intents.is_empty()
+        || recovery.settled_estimated + recovery.completed + recovery.transfers_completed > 0;
     let stop_may_be_lost = stop_state == BootState::Running && crashed;
     let report = BootReport {
         records: u64::try_from(records.len()).unwrap_or(u64::MAX),

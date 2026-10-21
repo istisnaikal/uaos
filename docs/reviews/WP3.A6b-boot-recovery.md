@@ -63,3 +63,30 @@ full review before the PR leaves draft.
 | L7 | An equal version with different content boots silently. | A conscious assumption in §2 step 1. The digest is M3's write side. |
 | L8 | Boot depends on today's two-record intent without saying so. | Named in §1, owned by PR-6c. |
 | L9 | The `else Recovery::default()` branch was dead. A historical review names "PR-6b's DST". | A replayed ledger always recovers. The historical record is left as written. |
+
+## D-31 scoped round (over `eceab95`)
+
+**Reviewer:** a fresh-context agent, read-only. It covered the fix diff and every invariant and
+caller it touches.
+**Result:** 0 High · 2 Medium · 4 Low. With a correct caller, nothing breaks an invariant.
+
+**Verified clean:**
+- **Step 0's normal path:** it runs before any write, and records read after open end at
+  `next_seq`, even when open journals `chunk.lost`.
+- **The new code:** `RUNTIME_BOOT_RECORDS_STALE` follows the registry's conventions.
+- **Intents:** `open_intents` keeps the first intent's position and effect, and closes for good.
+- **Payloads:** the `op.indeterminate` envelope and payload, and the nine `kernel.booted` fields,
+  match the contract.
+- **The fixtures:** `Fate::Denied` is valid ledger use. The disk-full test fails at the ledger's
+  first append.
+- **Seeds and docs:** every seed bites, and the docs' counts are right.
+
+| | Finding | What was done |
+|---|---|---|
+| M1 | Step 0 skipped an empty slice on a false premise: a journal never drops a verified record. An empty slice, a suffix, or another journal's records of the same length passed. A journaled stop would then boot running, and the ledger would be rebuilt wrong. | The records must start at the genesis (sequence 0) and end at the head (next sequence and chain hash). An empty slice must mean an empty journal. The test covers a retry, an empty slice, a suffix and another journal's records. Negatives `boot-stale-records-accepted` (retargeted) and `boot-partial-records-accepted`. |
+| M2 | V1's M1 was not resolved. `JournalSink` turns the journal's error into text, so a full disk read `JOURNAL_WRITE_FAILED` during recovery and `JOURNAL_DISK_FULL` at boot's own records. The test asserted the erased code. | The ledger's `JournalSink` keeps the journal's error (`take_refusal`, additive), and boot reports it as `BootError::Journal`. `a_full_disk_reads_the_same_wherever_boot_meets_it` checks both places. Negative `boot-ledger-error-erased` (retargeted). |
+| L1 | Replay errors lost `BUDGET_LEDGER_INCONSISTENT` and read as user-class codes. | Anything the ledger reports, other than a journal failure, is `BUDGET_LEDGER_INCONSISTENT`. |
+| L2 | `stop_may_be_lost` repeated while a stuck item stayed, and was lost after a crash during boot. | Stuck items are no evidence. An interrupted boot's `op.indeterminate` with no `kernel.booted` after it is. The property checks the flag for every cut before the boot record. Negative `boot-interrupted-boot-unseen`. The one residual, a boot interrupted after closing only a reservation that no intent named, is stated. |
+| L3 | §2 called stuck S2 "until a later recovery closes them", while the code is S3 and retryable, and a stuck item is deterministic. | §2 states the mismatch. The repair and surfacing stuck items are a conscious assumption owned by PR-6c. |
+| L4 | The CHANGELOG and the crate docs lagged the contract, and §7 named no commit. | Both follow the contract, and §7 names `d503a43`. |
+
