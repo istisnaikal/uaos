@@ -70,7 +70,9 @@ reorders inside Train A.
    - **The window.** A restart before the record is durable boots running: a kill, a crash, a
      power loss, or a write that keeps failing (a `disk_full` stop on a full disk) followed
      by a restart. Rule 3 accepts that window by acting before the record. PR-6d's DST bounds
-     it, and the explanation of such a boot says a stop may have been lost.
+     it. The explanation of such a boot says a stop may have been lost when a crash shows:
+     work left open, or an interrupted boot (boot contract §2 step 5). With nothing else in
+     flight it cannot say so, until PR-6c journals a clean shutdown.
    - This PR builds the record and the hand-off, and reads the record at boot.
    - A record that fails to write leaves the stop engaged, so it fails closed.
 4. **Persisted.** At boot, the last `kernel.stopped` or `kernel.resumed` decides. A stop whose

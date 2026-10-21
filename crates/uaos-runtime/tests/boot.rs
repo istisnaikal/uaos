@@ -127,6 +127,8 @@ enum Fate {
     AlreadyIndeterminate,
     /// Refused before it ran: the reservation released, the Operation denied.
     Denied,
+    /// The crash fell between the reserve entry and the intent: a reservation no intent names.
+    ReservedOnly,
 }
 
 /// Writes a journal in which each Operation reserved `RESERVED` and then met its fate. An open
@@ -160,11 +162,15 @@ fn build(world: &World, fates: &[Fate], version: u64) {
                 )
                 .unwrap()
         };
+        if *fate == Fate::ReservedOnly {
+            drop(held);
+            continue;
+        }
         journal
             .append(op_event(operation, types::OP_RESERVED_INTENT, version))
             .unwrap();
         match fate {
-            Fate::Open => drop(held.begin()),
+            Fate::Open | Fate::ReservedOnly => drop(held.begin()),
             Fate::Denied => {
                 let mut sink = JournalSink::new(&mut journal, correlation(), Some(operation), ConfigVersion(version));
                 ledger.release(&mut sink, held, &Actor::System).unwrap();
@@ -355,6 +361,13 @@ fn a_journaled_stop_boots_stopped_and_recovery_still_runs() {
         "a stopped kernel left its ledger open"
     );
     assert!(!booted.report.stop_may_be_lost, "a journaled stop was called lost");
+    let envelopes = world.envelopes();
+    let record = envelopes.iter().find(|e| e.event_type == types::KERNEL_BOOTED).unwrap();
+    assert_eq!(
+        record.payload_inline.as_ref().unwrap().as_value()["stopped"],
+        serde_json::json!(true),
+        "a stopped boot was journaled as running"
+    );
 }
 
 #[test]
@@ -374,6 +387,15 @@ fn a_boot_after_a_crash_says_a_stop_may_be_lost() {
     assert!(
         !clean.report.stop_may_be_lost,
         "a boot with nothing open claimed a lost stop"
+    );
+    // Final review M2: a crash between a reserve and its intent leaves only the ledger's work.
+    let world = World::new();
+    build(&world, &[Fate::ReservedOnly], 1);
+    let booted = world.boot(&config(1)).unwrap();
+    assert!(booted.report.indeterminate.is_empty());
+    assert!(
+        booted.report.stop_may_be_lost,
+        "a crash that may have lost a stop was not said so"
     );
 }
 
@@ -435,10 +457,21 @@ fn records_that_are_not_the_journals_are_refused_before_anything_is_written() {
     let other = World::new();
     build(&other, &[Fate::Open, Fate::Committed], 1);
     let foreign = other.records();
+    // Final review L1: a gap, or a record twice, between a genuine first and last.
+    let gapped: Vec<_> = records
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != 1)
+        .map(|(_, r)| r.clone())
+        .collect();
+    let mut doubled = records.clone();
+    doubled.insert(1, records[1].clone());
     for (case, slice) in [
         ("empty", &records[..0]),
         ("a suffix", &records[1..]),
         ("another journal's", &foreign[..records.len().min(foreign.len())]),
+        ("a gap", gapped.as_slice()),
+        ("a record twice", doubled.as_slice()),
     ] {
         assert!(
             matches!(
@@ -520,6 +553,7 @@ fn fates() -> impl Strategy<Value = Vec<Fate>> {
             Fate::Failed,
             Fate::AlreadyIndeterminate,
             Fate::Denied,
+            Fate::ReservedOnly,
         ]),
         1..6,
     )
@@ -596,9 +630,132 @@ proptest! {
             prop_assert_eq!(outcome(&world), expected.clone(), "a crash during boot did not converge");
             // Scoped round L2: the first complete boot after a crash says what an uncut boot
             // says, even when the interrupted boot closed everything.
-            if n < appended.len() {
+            // A cut after recovering a reservation no intent named leaves no evidence: the residual
+            // §2 step 5 states, which PR-6c's one-record intent removes.
+            let residual = !fates.iter().any(|f| matches!(f, Fate::Open | Fate::AlreadyIndeterminate))
+                && fates.contains(&Fate::ReservedOnly);
+            if n < appended.len() && !residual {
                 prop_assert_eq!(report.stop_may_be_lost, says_lost, "an interrupted boot hid a lost stop");
             }
         }
     }
+}
+
+// ── What the records carry (final review L2, L4) ───────────────────────────────────────────
+
+#[test]
+fn a_closed_operation_stays_closed_and_its_first_intent_speaks() {
+    // V1 review L1: an intent after an outcome does not reopen the Operation. An open Operation's
+    // record carries its first intent's effect.
+    let world = World::new();
+    build(&world, &[Fate::Committed], 1);
+    {
+        let mut journal = world.open();
+        journal.append(op_event(op(0), types::OP_RESERVED_INTENT, 1)).unwrap();
+        journal.append(op_event(op(7), types::OP_RESERVED_INTENT, 1)).unwrap();
+        let quieter = EventDraft {
+            side_effect_class: SideEffectClass::None,
+            ..op_event(op(7), types::OP_RESERVED_INTENT, 1)
+        };
+        journal.append(quieter).unwrap();
+    }
+    world.fs.crash();
+    let booted = world.boot(&config(1)).unwrap();
+    assert_eq!(
+        booted.report.indeterminate,
+        vec![op(7)],
+        "a closed Operation was reopened"
+    );
+    let made = world
+        .envelopes()
+        .into_iter()
+        .find(|e| e.event_type == types::OP_INDETERMINATE && e.operation_id == Some(op(7)))
+        .unwrap();
+    assert_eq!(
+        made.side_effect_class,
+        SideEffectClass::External,
+        "the indeterminate record did not carry the first intent's effect"
+    );
+}
+
+#[test]
+fn a_boot_after_complete_boots_claims_no_lost_stop() {
+    // The evidence of an interrupted boot is read after the last boot record, not the first.
+    let world = World::new();
+    build(&world, &[Fate::Open], 1);
+    assert!(world.boot(&config(1)).unwrap().report.stop_may_be_lost);
+    world.fs.crash();
+    {
+        let mut journal = world.open();
+        journal.append(op_event(op(8), types::OP_RESERVED_INTENT, 1)).unwrap();
+    }
+    world.fs.crash();
+    assert!(world.boot(&config(1)).unwrap().report.stop_may_be_lost);
+    world.fs.crash();
+    assert!(
+        !world.boot(&config(1)).unwrap().report.stop_may_be_lost,
+        "a clean boot after complete boots claimed a lost stop"
+    );
+}
+
+#[test]
+fn recovery_records_carry_the_operations_ids_and_honest_flags() {
+    // The indeterminate record carries the intent's correlation and links to it, is not
+    // compensable, and is critical. Recovery settles as the system. The boot record is critical,
+    // surfaces when it recovered, and is routine when nothing was open.
+    let world = World::new();
+    build(&world, &[Fate::Open], 1);
+    let mut journal = world.open();
+    let records = world.records();
+    let boot_correlation = CorrelationId::from_parts(5, [5; 10]);
+    let booted = boot(&mut journal, &records, &config(1), boot_correlation).unwrap();
+    drop(journal);
+    let envelopes = world.envelopes();
+    let intent = envelopes
+        .iter()
+        .find(|e| e.event_type == types::OP_RESERVED_INTENT)
+        .unwrap();
+    let made = envelopes
+        .iter()
+        .find(|e| e.event_type == types::OP_INDETERMINATE)
+        .unwrap();
+    assert_eq!(
+        made.parent_id,
+        Some(intent.id),
+        "the indeterminate record lost its intent"
+    );
+    assert_eq!(
+        made.correlation_id, intent.correlation_id,
+        "the indeterminate record lost the Operation's correlation"
+    );
+    assert!(
+        !made.compensable && made.durability == Durability::Critical,
+        "the indeterminate record claims what it cannot"
+    );
+    let settle = entries_from_journal(&world.records())
+        .unwrap()
+        .into_iter()
+        .find(|tx| tx.kind == BudgetTxKind::Settle && tx.estimated)
+        .unwrap();
+    assert_eq!(settle.principal, Actor::System, "recovery settled as someone else");
+    let first = envelopes.iter().find(|e| e.event_type == types::KERNEL_BOOTED).unwrap();
+    assert_eq!(
+        (first.durability, first.risk_tier, first.correlation_id),
+        (Durability::Critical, RiskTier::MAX, boot_correlation),
+        "a recovering boot was journaled as routine"
+    );
+    drop(booted);
+    world.fs.crash();
+    assert!(world.boot(&config(1)).is_ok());
+    let clean = world
+        .envelopes()
+        .into_iter()
+        .rev()
+        .find(|e| e.event_type == types::KERNEL_BOOTED)
+        .unwrap();
+    assert_eq!(
+        clean.risk_tier,
+        RiskTier::MIN,
+        "a clean boot was journaled as a recovery"
+    );
 }

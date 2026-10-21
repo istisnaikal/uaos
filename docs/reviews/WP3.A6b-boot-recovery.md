@@ -90,3 +90,29 @@ caller it touches.
 | L3 | §2 called stuck S2 "until a later recovery closes them", while the code is S3 and retryable, and a stuck item is deterministic. | §2 states the mismatch. The repair and surfacing stuck items are a conscious assumption owned by PR-6c. |
 | L4 | The CHANGELOG and the crate docs lagged the contract, and §7 named no commit. | Both follow the contract, and §7 names `d503a43`. |
 
+## D-31 final fresh full review (`51b0f78`)
+
+**Reviewer:** a fresh-context agent, read-only, over the whole five-commit diff.
+**Result:** 0 High · 2 Medium · 7 Low. Nothing breaks an invariant or a red line. Another fresh
+full review follows these fixes, within D-31's five rounds.
+
+**Verified clean:**
+- **Step 0** refuses no legitimate journal.
+- **Drift and the stop** behave as specified.
+- **`take_refusal`** can never return a stale refusal within boot.
+- **The codes, the payload fields, and the crash model of the convergence property** match the
+  contract.
+- **All 13 seeds** bite.
+- **Every earlier fix** is real.
+
+| | Finding | What was done |
+|---|---|---|
+| M1 | The relay contract said, without condition, that the explanation of a boot after a lost stop says so. Boot says so only when a crash shows. | The sentence names the evidence rule, and the clean shutdown PR-6c journals. |
+| M2 | Removing the ledger term from the crash evidence passed everything. No fixture had a reservation without an intent. | `Fate::ReservedOnly` (a crash between the reserve and the intent), in the fixtures and the property. The property encodes the one stated residual exactly. Negative `boot-ledger-evidence-ignored`. A stuck-only crash is a third stated residual. |
+| L1 | Step 0 checked only the ends, so a gap or a doubled record passed. | The records must follow one another, by sequence and chain link. Gap and doubled cases are tested; negative `boot-gapped-records-accepted`. |
+| L2 | Several mutants survived: `or_insert` → `insert`, the first intent's effect, `rposition` → `position`, compensable, durability, `"stopped"`, recovery's principal. | `a_closed_operation_stays_closed_and_its_first_intent_speaks`, `a_boot_after_complete_boots_claims_no_lost_stop`, `recovery_records_carry_the_operations_ids_and_honest_flags`, and the stopped payload check. Negatives `boot-closed-reopened`, `boot-evidence-from-first-boot`. |
+| L3 | A crash between a denied Operation's release and `op.denied` is journaled as `may_have_taken_effect`. | A conscious assumption in §2 step 4: it overstates, never hides; PR-6c's one-record transitions close it. |
+| L4 | Recovery records dropped the Operation's ids, correlation and a parent link. `kernel.booted` was MAX on every clean boot. | `op.indeterminate` carries the intent's ids and correlation and links to it. `kernel.booted` is MAX only when it recovered, and `RiskTier::MIN` when clean (new constant). The ledger's entries' attribution is PR-6c's (§1). |
+| L5 | Error texts lagged the checks. | The stale-records message and Display describe the whole-journal check. `CONFIG_DRIFT`'s approval path is named as M3's in §2 step 1. |
+| L6 | §7 said the procedure changed "only in checks". | §7 says what changed, and that the appends are the same. |
+| L7 | Doc drift: ADR-0018's appendix owner, "every boot", step 4's first bullet, the CHANGELOG's review line. | Fixed. |
