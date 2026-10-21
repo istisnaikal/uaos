@@ -78,7 +78,10 @@ waits for P5 sidecars.
    holds the tape it was sealed against and the mask, and builds the view itself
    (`Sealed::view`), so it is never used over another tape and the mask cannot change under it
    (PR-4c; its V1 review M2 found a fingerprint of the tape matched a refilled buffer). An
-   unsealed view is as correct and slower. A module's `Strip` selector is
+   unsealed view (`StructuralView::new`) cannot refuse: a finding off its tape, or a key finding
+   on a node with no key, masks nothing in it. So the host hands a module or a codec only the
+   view of a seal. `HookCx::with_view` takes a `Sealed` (PR-4c final review M2), and PR-8's host
+   does the same for `roles()` and `usage()` (§12). A module's `Strip` selector is
    resolved over the masked
    view, never over the raw tape. **Frames and errors** reach a hook as the provider sent
    them: before rehydration (ADR-0017), never rehydrated. A secret masked on the way out
@@ -200,7 +203,7 @@ never shared between pockets (C-18).
   it is not exceeded and its declarations pass. The procedure is the crate's own
   (`Admitted::call_hook`, `Admitted::call_event`, PR-4c), so every host gets the same one. A
   module's own entry points stay public for tests, and PR-8's host calls only these (§12);
-  the host adds only the strikes it alone can make. Otherwise the call is a strike
+  the host adds only the strikes it alone can make. A call that outgrew its state is a strike
   (`state_exceeded`), and the state is left as it was before the call. **Every strike refuses
   all of the call's declarations.** A static strike (from `check_decls`) and `state_exceeded`
   also discard the call's state changes. A host-side strike keeps them: one the host makes on
@@ -302,9 +305,13 @@ No comparison decodes more than six times `MAX_SELECTOR_TEXT` bytes:
 Each visit also costs O(log ranges) against a sealed mask; the host builds the view from the
 seal (`Sealed::view`). One call's selectors share one budget of `MAX_VISITS`, and running out is a host-side
 strike (`budget_exceeded`). **So one call costs at most `MAX_VISITS` visits, each
-O(`MAX_SELECTOR_TEXT` + log ranges).** A codec's `roles()` is bounded the same way: its
-`RoleMap` carries one budget for all the selectors it assigns. `Visits` is not `Copy`, so a
-budget is never duplicated.
+O(`MAX_SELECTOR_TEXT` + log ranges).** A codec's `roles()` is bounded the same way, for a host
+that hands it one `RoleMap` per call: the map carries one budget for all the selectors it
+assigns. `Visits` is not `Copy`, so a budget is not duplicated by copying. The bound holds
+for a host that follows §5's procedure. `Visits::new`, `Visits::per_call` and
+`RoleMap::default` are public for hosts and tests, and `Selector::resolve` starts its own
+budget, so a codec that builds its own budgets is outside it (trusted code with minimized
+authority, §12). Two maps with the same roles are equal whatever they spent.
 
 ## 8. Kernel contract additions (all additive)
 
@@ -434,6 +441,9 @@ selector's keys and values, a frame, state bytes or `ModuleText` (I-11).
 | `module-text-invisible-base` | any character is a variation selector's base (PR-4c) | `module_text_needs_a_visible_base` |
 | `module-text-ideographic-any-base` | an ideographic selector follows any base (PR-4c) | `module_text_needs_a_visible_base` |
 | `selector-raw-bound-too-loose` | a string past the raw bound is decoded (PR-4c V1 review M3) | `a_string_past_the_raw_bound_is_never_decoded` |
+| `call-event-manifest-reread` | an event is checked against a manifest grown after admission (PR-4c scoped round L-b) | `a_module_is_checked_against_its_admitted_manifest` |
+| `call-event-keeps-outgrown-state` | the event procedure keeps an event that outgrew its state (PR-4c final review M1) | `an_event_that_outgrows_its_state_is_struck_whole` |
+| `view-masked-key-matched-by-name` | a masked key matches its name in the selectors' key check (PR-4c final review L3) | `masked_keys_and_numbers_read_as_masked` |
 | `mask-seal-keyless-key` | a key finding on a keyless node seals (PR-4c) | `a_key_finding_on_a_keyless_node_refuses_the_seal` |
 | `rolemap-fresh-budget-per-assign` | each assignment gets a fresh budget (PR-4c) | `a_codecs_roles_share_one_budget` |
 | `host-procedure-keeps-outgrown-state` | the crate's procedure keeps a call that outgrew its state (PR-4c) | `a_call_that_outgrows_its_state_is_struck_whole` |
@@ -487,18 +497,36 @@ selector's keys and values, a frame, state bytes or `ModuleText` (I-11).
   - every call is checked against the admitted manifest snapshot;
   - the host calls a module only through `Admitted::call_hook` and `Admitted::call_event`,
     never its `on_hook` or `on_event` directly (PR-4c V1 review L5);
-  - a host builds a module's view from the seal (`Sealed::view`), so every visit is O(log
-    ranges);
+  - a host builds every view it hands a module or a codec (`roles()`, `usage()`) from a seal
+    (`Sealed::view`). The seal refuses a finding it cannot place, where an unsealed view would
+    mask nothing for it, and every visit is O(log ranges) (PR-4c final review M2);
+  - the Messages codec's `roles()` is measured at the parser's node limit. The `RoleMap` budget,
+    `MAX_VISITS`, equals that limit (2^20), so one any-depth role selector on a node-dense
+    request near it spends the whole budget, and the request is refused. That fails closed,
+    but it would refuse a request the parser accepted, so such selectors are avoided or
+    budgeted (PR-4c final review L2);
   - one `Visits` budget per call, a strike (`budget_exceeded`) when spent;
   - `not_own_child` and `unknown_candidate` strike what they name.
 - `[CONSCIOUS ASSUMPTION]` (PR-4c V1 review L6) `ModuleText` refuses a variation selector
   that follows no visible base, and nothing else invisible beyond the controls, explicit bidi
   controls and tags of rule 4. Every other default-ignorable code point is accepted, alone or
-  in runs, assigned or not: for example U+00AD, U+034F, U+180E, U+200B–U+200D, U+2060–U+206F,
-  U+FEFF and the Hangul fillers. A format, private-use or noncharacter code point counts as a
-  visible base. ZWJ and ZWNJ are needed in emoji sequences and in scripts such as Persian and the
+  in runs, assigned or not: for example U+00AD, U+034F, U+180E, U+200B–U+200D, U+2060–U+2065,
+  U+206A–U+206F, U+FEFF and the Hangul fillers. The bidi isolates U+2066–U+2069 are refused by
+  rule 4. A format code point that is not default-ignorable, a private-use code point or a
+  noncharacter counts as a visible base. ZWJ and ZWNJ are needed in emoji sequences and in scripts such as Persian and the
   Indic scripts, so which others to refuse belongs to ADR-0020 (D-36). The kernel's final scan
   stays the backstop. Owner: ADR-0020's PR, before PR-8.
+- `[CONSCIOUS ASSUMPTION]` (PR-4c final review L6) One variation selector after each visible
+  base is allowed. So hidden text can still ride on visible text: about 4.3 bits per letter
+  (the 16 standard selectors), around 1.1 KB in 8 KiB of text, or about 7.9 bits per CJK
+  ideograph (240 ideographic selectors). The rule closes runs, not single selectors. The final
+  scan stays the backstop. Owner: ADR-0020's PR, with the rest of L6.
+- `[CONSCIOUS ASSUMPTION]` (PR-4c final review L7) The RGI subdivision-flag emoji (England,
+  Scotland, Wales) are written with tag characters, which rule 4 refuses, so `ModuleText`
+  cannot hold them. Owner: ADR-0020's PR.
+- **Debt (PR-4c final review L4):** that comparing a key stops at the first difference is
+  `uaos-json`'s `Node::key_is`, and nothing proves it. A full decode would pass every test here.
+  Owner: a `uaos-json` work counter, before PR-8.
 - **Debt (PR-4c V1 review L7):** the Unicode tables in `decl.rs` and in the test oracle name
   their Unicode 16.0 sources, but nothing checks them against an independent copy of the UCD.
   Owner: WP3.9, before RC-1.

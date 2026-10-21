@@ -51,12 +51,22 @@ impl Role {
 
 /// The roles a codec assigned, by node. A node's roles govern its whole subtree. An edit's check
 /// ([`RoleMap::touching`]) covers the node's ancestors and its whole subtree, a range of ids.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct RoleMap {
     roles: BTreeMap<NodeId, BTreeSet<Role>>,
     /// Visits its assignments have spent, from one budget of [`MAX_VISITS`] (contract §7).
     spent: usize,
 }
+
+/// Two maps are equal when they assign the same roles; the visits spent assigning them are not
+/// compared (PR-4c final review L5).
+impl PartialEq for RoleMap {
+    fn eq(&self, other: &Self) -> bool {
+        self.roles == other.roles
+    }
+}
+
+impl Eq for RoleMap {}
 
 impl RoleMap {
     /// An empty map.

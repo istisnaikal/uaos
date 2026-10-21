@@ -78,8 +78,8 @@ caller the diff touches.
   so the old pattern no longer compiles.
 - **Variation selectors:** the set matches Unicode 16.0, and the oracle agrees with the code,
   U+180E included.
-- **Registration:** all 37 §11 rows, the gates, and every anchor in the module socket and the
-  relay.
+- **Registration:** the §11 rows (39 then, before the final review's additions), the gates, and
+  every anchor in the module socket and the relay.
 
 | | Finding | What was done |
 |---|---|---|
@@ -89,3 +89,31 @@ caller the diff touches.
 | L-c | `MemberNotIn` and `StringOrArrayWith` had no per-member charge test. | `a_lookup_spends_a_visit_per_member` covers all four lookups. |
 | L-d | The L6 assumption listed a sample of what `ModuleText` accepts. | It states the rule. |
 | L-e | Wording: the review claimed every older seed bit; two `decl.rs` tables did not name `PropList.txt`; `inside_masked`'s doc still spoke of a mask sealed against a tape. | Fixed. The suggested `compile_fail` doctest is not added: it passes on any compile error, so it would prove little beyond the borrow rule itself. |
+
+## D-31 final fresh full review (`2633697`)
+
+**Reviewer:** a fresh-context agent, read-only, over the whole five-commit diff.
+**Result:** 0 High · 2 Medium · 8 Low. A second final full review follows these fixes, as D-31
+allows up to round 5.
+
+**Verified clean:**
+- **Selector cost:** every examination is charged, and the raw-length shortcut is correct and
+  leaks nothing.
+- **`Sealed`:** sound lifetimes; `Clone` and `Debug` are harmless.
+- **The procedures and the relay** match their contracts.
+- **Unicode:** the tables match Unicode 16.0. Emoji ZWJ sequences, keycaps, CJK IVS and the
+  Mongolian selectors are accepted.
+- **Seeds:** all 192 anchors are unique, and every seed bites.
+
+| | Finding | What was done |
+|---|---|---|
+| M1 | Nothing tested or seeded `call_event`'s state-exceeded strike. | The test module grows its state in `on_event` too. `an_event_that_outgrows_its_state_is_struck_whole` covers the event procedure live and on replay. Negative `call-event-keeps-outgrown-state`. The default `on_event` is checked through a module that has none, by the procedure, not on the real state. |
+| M2 | "An unsealed view is as correct" was false: it cannot refuse a finding it cannot place, so such a finding masks nothing. `HookCx::with_view` took any view. | `HookCx::with_view` takes a `Sealed`. Rule 5 and the view's docs say what an unsealed view cannot do. PR-8 owes building every module and codec view from a seal (§12). |
+| L1 | §11 had no row for `call-event-manifest-reread`; the counts were off. | The rows are added, with this round's two new seeds. The CHANGELOG counts them. |
+| L2 | The `RoleMap` budget equals the parser's node limit, so a node-dense request near it can be refused. | A PR-8 obligation: the Messages codec's `roles()` is measured at the limit (§12). |
+| L3 | No seed covered the selectors' masked-key check in `ViewNode::key_is`. | Negative `view-masked-key-matched-by-name`. |
+| L4 | Nothing proves a key comparison stops at the first difference. | Debt: it is `uaos-json`'s `Node::key_is`. A work counter there is owed before PR-8 (§12). |
+| L5 | §7 overclaimed: `roles()` bounded and a budget never duplicated, while `Visits::new`, `RoleMap::default` and `Selector::resolve` are public. `RoleMap` equality compared the visits spent. | §7 states the bound for a host that follows §5. `RoleMap` equality compares roles only. |
+| L6 | The remaining covert channel was not stated: one selector after each visible base. | A conscious assumption in §12, with the numbers. |
+| L7 | Subdivision-flag emoji are refused by the tag rule, unrecorded. | A conscious assumption in §12. |
+| L8 | Wording: §5's "Otherwise", the L6 ranges (U+2066–U+2069 are refused), format bases, and the CHANGELOG's `ModuleText` line. | Fixed. |

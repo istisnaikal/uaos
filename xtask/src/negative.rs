@@ -3390,6 +3390,30 @@ The journal is tamper-proof.
             expect: "an event was checked against a manifest grown after admission",
         },
         Case {
+            id: "call-event-keeps-outgrown-state",
+            gate: "test",
+            tool: None,
+            // PR-4c final review M1: the event procedure strikes an event that outgrew its state.
+            seed: replace("crates/uaos-module-api/src/module.rs", "        if copy.exceeded() {\n            return Err(Strike::StateExceeded);\n        }\n        check_decls(self.manifest(), None, out.as_slice())?;\n", "        check_decls(self.manifest(), None, out.as_slice())?;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "an_event_that_outgrows_its_state_is_struck_whole"],
+            },
+            expect: "an outgrown event was kept",
+        },
+        Case {
+            id: "view-masked-key-matched-by-name",
+            gate: "test",
+            tool: None,
+            // PR-4c final review L3: a masked key matches no name in the selectors' key check either.
+            seed: replace("crates/uaos-module-api/src/view.rs", "    pub fn key_is(&self, name: &str) -> Result<bool, JsonError> {\n        if self.key_masked() {\n            return Ok(false);\n        }\n", "    pub fn key_is(&self, name: &str) -> Result<bool, JsonError> {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "masked_keys_and_numbers_read_as_masked"],
+            },
+            expect: "a masked key matched its name",
+        },
+        Case {
             id: "host-procedure-keeps-outgrown-state",
             gate: "test",
             tool: None,
