@@ -2557,7 +2557,7 @@ The journal is tamper-proof.
         },
         Case {
             id: "module-text-accepts-bidi-override",
-            gate: "test",
+            gate: "language-neutrality",
             tool: None,
             // ADR-0020 rule 5: module text refuses explicit bidirectional controls.
             seed: replace("crates/uaos-module-api/src/decl.rs", "if text.chars().any(is_explicit_bidi) {", "if text.chars().any(|_| false) {"),
@@ -2605,7 +2605,7 @@ The journal is tamper-proof.
         },
         Case {
             id: "selector-folds-case",
-            gate: "test",
+            gate: "language-neutrality",
             tool: None,
             // ADR-0020 rule 2: selectors compare bytes and never fold case.
             seed: replace("crates/uaos-module-api/src/selector.rs", "Some(ViewText::Plain(text)) => Ok(values.contains(text.as_ref())),", "Some(ViewText::Plain(text)) => Ok(values.iter().any(|v| v.to_lowercase() == text.to_lowercase())),"),
@@ -2717,7 +2717,7 @@ The journal is tamper-proof.
         },
         Case {
             id: "module-text-accepts-tag",
-            gate: "test",
+            gate: "language-neutrality",
             tool: None,
             // Final review L10: module text refuses Unicode tag characters.
             seed: replace("crates/uaos-module-api/src/decl.rs", "if text.chars().any(is_tag) {", "if text.chars().any(|_| false) {"),
