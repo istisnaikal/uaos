@@ -232,7 +232,7 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - error codes `RUNTIME_STOPPED` and `BUDGET_STREAM_OVERRUN`.
 
     No schema change: types and codes are strings.
-  - **Tests:** 59.
+  - **Tests:** 60.
     - A property over random events, line endings and chunking (CRLF and the byte-order mark
       split across chunks, the seven-locale corpus): the bytes received are the bytes sent, and
       the events the codec sees are the ones a whole-body event-stream parser reads. 256 cases
@@ -248,8 +248,11 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       by PR-7, which owns the permit and the response: charging the relay's memory to the
       permit, and a close-delimited client.
     - round 4, scoped: 0 High, 2 Medium and 6 Low, all resolved. Content frames are read best
-      effort, so a mislabelled usage frame does not fail open; the codec's duty is stated.
-  - **Negatives:** 25 seeded violations.
+      effort, so a usage frame mislabelled as content or other is metered when it parses;
+      the codec's duty is stated.
+    - round 5, scoped: 0 High, 0 Medium and 5 Low, all resolved: a content-labelled usage
+      test, the joined data copy sized once, both read bounds pinned from below, and wording.
+  - **Negatives:** 26 seeded violations.
 - P3 Move 1, PR-4 (spec first): the module socket's contract,
   `docs/adr/appendix/0010-module-socket.md`, before any code.
   - **`uaos.module/1` (draft):** a manifest built through a builder, with `requires`, a closed set

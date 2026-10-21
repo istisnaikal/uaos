@@ -6,9 +6,9 @@
 //! [`RelayBody`] is a hyper body that the client's connection pulls. No task runs it and no
 //! channel feeds it, so the client's socket is the backpressure. It holds at most one incomplete
 //! event and forwards each event's exact bytes. Every usage report the codec finds is priced,
-//! and the first one past the reservation cuts the stream. A cut forwards nothing more of the upstream, drops it,
-//! and ends in the caller's terminal frame or in an error: never in a clean end that a client
-//! could take for a complete answer.
+//! and the first one past the reservation cuts the stream. A cut forwards nothing more of the
+//! upstream, drops it, and ends in the caller's terminal frame or in an error: never in a clean
+//! end that a client could take for a complete answer.
 //!
 //! A priced cost is final only when the stream completed and the dialect's end came at or after
 //! its last usage report. Otherwise it is a lower bound on what the provider bills, and
@@ -264,7 +264,7 @@ impl Relay {
         self
     }
 
-    /// Relays an event stream, metering every usage report.
+    /// Relays an event stream, metering every usage report the codec finds (contract §7.3).
     ///
     /// # Errors
     /// [`RelayError::Compressed`] before any byte if `headers` name a content coding other than
@@ -368,10 +368,10 @@ impl Meter {
         // A content or other frame is read best effort. Its data is the model's output, which
         // can hold a lone surrogate escape (an emoji split across two text deltas) or a whole
         // fetched document, so a parse failure never cuts it (final review M2). A report the
-        // codec still finds on it is metered, so a usage frame the codec mislabels does not
-        // fail open (round 4 M-1). A usage, end or error frame, and any kind the codec
-        // contract adds later, is read strictly: a dialect may report usage on its last frame
-        // (review M2), and a usage frame must yield a report.
+        // codec still finds on it is metered, so a usage frame the codec mislabels as content
+        // is metered when it parses (round 4 M-1). A usage, end or error frame, and any kind
+        // the codec contract adds later, is read strictly: a dialect may report usage on its
+        // last frame (review M2), and a usage frame must yield a report.
         let report = if matches!(kind, FrameKind::Content | FrameKind::Other) {
             self.read(&data).unwrap_or(None)
         } else {
@@ -391,9 +391,10 @@ impl Meter {
         Ok(())
     }
 
-    /// The usage an event's data reports, if any. Data shaped like a JSON object must parse,
-    /// and `uaos-json` refuses duplicate keys, so neither a repeated usage key nor a broken
-    /// object slips past metering while a client reads it (T19).
+    /// The usage an event's data reports, if any; data not shaped like a JSON object reports
+    /// none. Object-shaped data must parse, and `uaos-json` refuses duplicate keys: on a frame
+    /// read strictly, neither a repeated usage key nor a broken object slips past metering
+    /// while a client reads it (T19).
     fn read(&self, data: &[u8]) -> Result<Option<UsageReport>, CutReason> {
         if data.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
             return Ok(None);

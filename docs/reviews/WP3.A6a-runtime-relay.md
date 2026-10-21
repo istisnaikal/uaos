@@ -122,3 +122,27 @@ fresh-context agent reading only, 2026-10-21.
 | L-5 | A first frame of one or two bytes still copies the next frame. | Stated as the one other copy in §7.1. |
 | L-6 | The CHANGELOG did not record the `INGRESS_TOO_LARGE` refusal or the idle cap. | Recorded. |
 | nit | A one-element loop. | Removed. |
+
+## Round 5, scoped (D-31): the last round
+
+**Reviewed:** `f2abb1b..fc67d79`, plus the invariants and callers it touches, by a
+fresh-context agent reading only, 2026-10-21.
+**Result:** 0 High · 0 Medium · 5 Low. Nothing meets D-31's split threshold.
+**Verified:**
+- **Best-effort reading:** pings skipped; content and other read best effort; usage, end, error
+  and future kinds read strictly.
+- **A report found on a content frame:** still metered strictly, so an overrun on one engages
+  the stop.
+- **`ended`:** correct.
+- **No fail-open:** none left for a correct codec.
+- **The idle-cap test:** against tokio 1.53.3's source. It reaches the clock's last instant on
+  every OS, cannot hang, and the panic is contained.
+- **Seeds:** all five new or retargeted ones bite on their first assertion.
+
+| | Finding | Fix |
+|---|---|---|
+| L-1 | Usage on a `Content` frame was untested and unseeded; only `Other` was proven. A nameless chat usage chunk defaulted to content is the likeliest real mislabel. | `usage_on_a_frame_the_codec_calls_content_is_metered`; negative `relay-skips-content-usage`. |
+| L-2 | §10 still said twice `max_event_bytes`, and the joined `data` copy could double as it grew, so the worst case was about 160 MiB, not 130. | The joined copy is sized once to the event, so three times holds; §10 matches §7.1. |
+| L-3 | The large end-frame test held about 200,000 nodes in about 400 KB, so a tighter node bound or the old 1 MiB byte bound passed. | 2^20 − 64 values, about 2 MiB, pins both bounds from below. |
+| L-4 | "Does not fail open" was unqualified, the duty did not say pings are never read or that only object-shaped data cuts, and `usage()`'s doc did not say it is shown every frame but a ping. | Worded as "metered when it parses"; the duty, `usage()`'s doc and the socket table say so. |
+| L-5 | Stale comments: the test codec's `content_only`, the property's corpus and serializer notes, a seed's description; an unwrapped doc line. | Corrected. |

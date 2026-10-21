@@ -321,8 +321,17 @@ pub(crate) fn fields(raw: &[u8]) -> Fields<'_> {
             b"data" => {
                 data = Some(match data.take() {
                     None => Cow::Borrowed(value),
-                    Some(earlier) => {
-                        let mut joined = earlier.into_owned();
+                    Some(Cow::Borrowed(first)) => {
+                        // Sized once: the joined lines are never longer than the event, so the
+                        // copy holds at most `raw.len()` and never grows by doubling (round 5
+                        // L-2).
+                        let mut joined = Vec::with_capacity(raw.len());
+                        joined.extend_from_slice(first);
+                        joined.push(b'\n');
+                        joined.extend_from_slice(value);
+                        Cow::Owned(joined)
+                    }
+                    Some(Cow::Owned(mut joined)) => {
                         joined.push(b'\n');
                         joined.extend_from_slice(value);
                         Cow::Owned(joined)
