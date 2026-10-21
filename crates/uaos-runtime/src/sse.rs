@@ -316,29 +316,28 @@ pub(crate) fn fields(raw: &[u8]) -> Fields<'_> {
             }
             None => (line, &line[line.len()..]),
         };
-        match name {
-            b"event" => event = Some(value),
-            b"data" => {
-                data = Some(match data.take() {
-                    None => Cow::Borrowed(value),
-                    Some(Cow::Borrowed(first)) => {
-                        // Sized once: the joined lines are never longer than the event, so the
-                        // copy holds at most `raw.len()` and never grows by doubling (round 5
-                        // L-2).
-                        let mut joined = Vec::with_capacity(raw.len());
-                        joined.extend_from_slice(first);
-                        joined.push(b'\n');
-                        joined.extend_from_slice(value);
-                        Cow::Owned(joined)
-                    }
-                    Some(Cow::Owned(mut joined)) => {
-                        joined.push(b'\n');
-                        joined.extend_from_slice(value);
-                        Cow::Owned(joined)
-                    }
-                });
-            }
-            _ => {}
+        // Of the fields, the relay reads `event` and `data`; `id`, `retry` and any other name
+        // set nothing it uses.
+        if name == b"event" {
+            event = Some(value);
+        } else if name == b"data" {
+            data = Some(match data.take() {
+                None => Cow::Borrowed(value),
+                Some(Cow::Borrowed(first)) => {
+                    // Sized once: the joined lines are never longer than the event, so the copy
+                    // holds at most `raw.len()` and never grows by doubling (round 5 L-2).
+                    let mut joined = Vec::with_capacity(raw.len());
+                    joined.extend_from_slice(first);
+                    joined.push(b'\n');
+                    joined.extend_from_slice(value);
+                    Cow::Owned(joined)
+                }
+                Some(Cow::Owned(mut joined)) => {
+                    joined.push(b'\n');
+                    joined.extend_from_slice(value);
+                    Cow::Owned(joined)
+                }
+            });
         }
     }
     Fields { event, data }

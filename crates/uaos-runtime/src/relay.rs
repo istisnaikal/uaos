@@ -377,13 +377,11 @@ impl Meter {
         } else {
             self.read(&data)?
         };
-        match report {
-            Some(report) => {
-                self.meter(&report)?;
-                self.ended = kind == FrameKind::End;
-            }
-            None if kind == FrameKind::Usage => return Err(CutReason::UnreadableUsage),
-            None => {}
+        if let Some(report) = report {
+            self.meter(&report)?;
+            self.ended = kind == FrameKind::End;
+        } else if kind == FrameKind::Usage {
+            return Err(CutReason::UnreadableUsage);
         }
         if kind == FrameKind::End {
             self.ended = true;
@@ -437,6 +435,9 @@ impl Meter {
         Ok(())
     }
 }
+
+/// What one poll of the client's body yields.
+type Polled = Poll<Option<Result<Frame<Bytes>, RelayError>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -611,12 +612,89 @@ impl<B> RelayBody<B> {
         }
     }
 
-    fn forward(&mut self, (bytes, events): (Bytes, u64)) -> Poll<Option<Result<Frame<Bytes>, RelayError>>> {
+    /// One pass once the upstream is done or dropped: what was cleared, then the end. `None`
+    /// asks for another pass.
+    fn step_ending(&mut self, end: RelayEnd, cx: &mut Context<'_>) -> Option<Polled> {
+        // Only a completed stream still holds cleared segments (a cut clears them). A stop
+        // engaged now turns it into a cut: nothing more is forwarded, and the client is not
+        // told the answer was complete.
+        if !self.ready.is_empty() {
+            if let Some(reason) = self.poll_stop(cx) {
+                self.cut(CutReason::Stopped(reason));
+                return None;
+            }
+            if let Some(bytes) = self.ready.pop_front() {
+                return Some(self.forward(bytes));
+            }
+        }
+        let RelayEnd::Cut(reason) = end else {
+            self.phase = Phase::Done;
+            self.send_report(end);
+            return Some(Poll::Ready(None));
+        };
+        if let Some(frame) = self.terminal.take() {
+            self.phase = Phase::Closing(end);
+            return Some(Poll::Ready(Some(Ok(Frame::data(frame)))));
+        }
+        // No terminal frame: the error tells the client the answer is not complete.
+        self.phase = Phase::Done;
+        self.send_report(end);
+        Some(Poll::Ready(Some(Err(RelayError::Cut(reason)))))
+    }
+
+    fn forward(&mut self, (bytes, events): (Bytes, u64)) -> Polled {
         self.forwarded_bytes = self
             .forwarded_bytes
             .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         self.segments = self.segments.saturating_add(events);
         Poll::Ready(Some(Ok(Frame::data(bytes))))
+    }
+}
+
+impl<B> RelayBody<B>
+where
+    B: Body<Data = Bytes> + Unpin,
+{
+    /// One pass while streaming: the stop first, then what is cleared, then the upstream.
+    /// `None` asks for another pass.
+    fn step_streaming(&mut self, cx: &mut Context<'_>) -> Option<Polled> {
+        // The stop comes first: from it on, nothing is forwarded or read (§3 rule 2).
+        if let Some(reason) = self.poll_stop(cx) {
+            self.cut(CutReason::Stopped(reason));
+            return None;
+        }
+        if let Some(bytes) = self.ready.pop_front() {
+            return Some(self.forward(bytes));
+        }
+        let Some(upstream) = self.upstream.as_mut() else {
+            self.complete();
+            return None;
+        };
+        match Pin::new(upstream).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                self.touch();
+                // Trailers carry no body bytes and are not forwarded.
+                if let Ok(data) = frame.into_data() {
+                    self.feed(data);
+                }
+                None
+            }
+            Poll::Ready(Some(Err(_))) => {
+                self.cut(CutReason::UpstreamFailed);
+                None
+            }
+            Poll::Ready(None) => {
+                self.complete();
+                None
+            }
+            Poll::Pending => {
+                if self.idle_expired(cx) {
+                    self.cut(CutReason::Idle);
+                    return None;
+                }
+                Some(Poll::Pending)
+            }
+        }
     }
 }
 
@@ -627,74 +705,21 @@ where
     type Data = Bytes;
     type Error = RelayError;
 
-    fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, RelayError>>> {
+    fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Polled {
         let this = self.get_mut();
         loop {
-            match this.phase {
-                Phase::Done => return Poll::Ready(None),
+            let step = match this.phase {
+                Phase::Done => Some(Poll::Ready(None)),
                 Phase::Closing(end) => {
                     this.phase = Phase::Done;
                     this.send_report(end);
-                    return Poll::Ready(None);
+                    Some(Poll::Ready(None))
                 }
-                Phase::Ending(end) => {
-                    // Only a completed stream still holds cleared segments (a cut clears them).
-                    // A stop engaged now turns it into a cut: nothing more is forwarded, and the
-                    // client is not told the answer was complete.
-                    if !this.ready.is_empty() {
-                        if let Some(reason) = this.poll_stop(cx) {
-                            this.cut(CutReason::Stopped(reason));
-                            continue;
-                        }
-                        if let Some(bytes) = this.ready.pop_front() {
-                            return this.forward(bytes);
-                        }
-                    }
-                    let RelayEnd::Cut(reason) = end else {
-                        this.phase = Phase::Done;
-                        this.send_report(end);
-                        return Poll::Ready(None);
-                    };
-                    if let Some(frame) = this.terminal.take() {
-                        this.phase = Phase::Closing(end);
-                        return Poll::Ready(Some(Ok(Frame::data(frame))));
-                    }
-                    // No terminal frame: the error tells the client the answer is not complete.
-                    this.phase = Phase::Done;
-                    this.send_report(end);
-                    return Poll::Ready(Some(Err(RelayError::Cut(reason))));
-                }
-                Phase::Streaming => {}
-            }
-            // The stop comes first: from it on, nothing is forwarded or read (§3 rule 2).
-            if let Some(reason) = this.poll_stop(cx) {
-                this.cut(CutReason::Stopped(reason));
-                continue;
-            }
-            if let Some(bytes) = this.ready.pop_front() {
-                return this.forward(bytes);
-            }
-            let Some(upstream) = this.upstream.as_mut() else {
-                this.complete();
-                continue;
+                Phase::Ending(end) => this.step_ending(end, cx),
+                Phase::Streaming => this.step_streaming(cx),
             };
-            match Pin::new(upstream).poll_frame(cx) {
-                Poll::Ready(Some(Ok(frame))) => {
-                    this.touch();
-                    // Trailers carry no body bytes and are not forwarded.
-                    if let Ok(data) = frame.into_data() {
-                        this.feed(data);
-                    }
-                }
-                Poll::Ready(Some(Err(_))) => this.cut(CutReason::UpstreamFailed),
-                Poll::Ready(None) => this.complete(),
-                Poll::Pending => {
-                    if this.idle_expired(cx) {
-                        this.cut(CutReason::Idle);
-                        continue;
-                    }
-                    return Poll::Pending;
-                }
+            if let Some(polled) = step {
+                return polled;
             }
         }
     }
