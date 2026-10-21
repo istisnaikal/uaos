@@ -74,7 +74,8 @@ waits for P5 sidecars.
    it, so a finding placed on the wrong node fails closed. Structure stays visible: kinds,
    counts and nesting, inside a masked container too; findings are strings, numbers and keys.
    A finding the host cannot place on a value or a key refuses the view, and so does one that
-   names a node off the tape, or a key finding on a node that has no key (`Mask::seal`). A seal
+   names a node off the tape, a key finding on a node that has no key, or a value finding on
+   `true`, `false` or `null`, which would mask nothing (`Mask::seal`; PR-4c round 5). A seal
    holds the tape it was sealed against and the mask, and builds the view itself
    (`Sealed::view`), so it is never used over another tape and the mask cannot change under it
    (PR-4c; its V1 review M2 found a fingerprint of the tape matched a refilled buffer). An
@@ -308,7 +309,8 @@ strike (`budget_exceeded`). **So one call costs at most `MAX_VISITS` visits, eac
 O(`MAX_SELECTOR_TEXT` + log ranges).** A codec's `roles()` is bounded the same way, for a host
 that hands it one `RoleMap` per call: the map carries one budget for all the selectors it
 assigns. `Visits` is not `Copy`, so a budget is not duplicated by copying. The bound holds
-for a host that follows §5's procedure. `Visits::new`, `Visits::per_call` and
+for a host that gives each module call one `Visits` budget and each codec call one `RoleMap`
+(§12's PR-8 obligations). `Visits::new`, `Visits::per_call` and
 `RoleMap::default` are public for hosts and tests, and `Selector::resolve` starts its own
 budget, so a codec that builds its own budgets is outside it (trusted code with minimized
 authority, §12). Two maps with the same roles are equal whatever they spent.
@@ -443,6 +445,8 @@ selector's keys and values, a frame, state bytes or `ModuleText` (I-11).
 | `selector-raw-bound-too-loose` | a string past the raw bound is decoded (PR-4c V1 review M3) | `a_string_past_the_raw_bound_is_never_decoded` |
 | `call-event-manifest-reread` | an event is checked against a manifest grown after admission (PR-4c scoped round L-b) | `a_module_is_checked_against_its_admitted_manifest` |
 | `call-event-keeps-outgrown-state` | the event procedure keeps an event that outgrew its state (PR-4c final review M1) | `an_event_that_outgrows_its_state_is_struck_whole` |
+| `selector-each-uncharged` | `Each` selects a child uncharged (PR-4c round 5 L1) | `each_child_and_array_element_spends_a_visit` |
+| `mask-seal-literal-value` | a value finding on `true`, `false` or `null` seals (PR-4c round 5 L2) | `a_value_finding_on_a_literal_refuses_the_seal` |
 | `view-masked-key-matched-by-name` | a masked key matches its name in the selectors' key check (PR-4c final review L3) | `masked_keys_and_numbers_read_as_masked` |
 | `mask-seal-keyless-key` | a key finding on a keyless node seals (PR-4c) | `a_key_finding_on_a_keyless_node_refuses_the_seal` |
 | `rolemap-fresh-budget-per-assign` | each assignment gets a fresh budget (PR-4c) | `a_codecs_roles_share_one_budget` |
@@ -517,9 +521,11 @@ selector's keys and values, a frame, state bytes or `ModuleText` (I-11).
   Indic scripts, so which others to refuse belongs to ADR-0020 (D-36). The kernel's final scan
   stays the backstop. Owner: ADR-0020's PR, before PR-8.
 - `[CONSCIOUS ASSUMPTION]` (PR-4c final review L6) One variation selector after each visible
-  base is allowed. So hidden text can still ride on visible text: about 4.3 bits per letter
-  (the 16 standard selectors), around 1.1 KB in 8 KiB of text, or about 7.9 bits per CJK
-  ideograph (240 ideographic selectors). The rule closes runs, not single selectors. The final
+  base is allowed. So hidden text can still ride on visible text: about 4.4 bits per letter
+  (20 selectors or none: the 16 standard and the 4 Mongolian), around 1.1 KB in 8 KiB of text,
+  or about 8.0 bits per CJK ideograph (260 selectors or none). A base that renders blank, such
+  as U+2800 BRAILLE PATTERN BLANK, carries the same and looks like space (round 5 L4). The
+  rule closes runs, not single selectors. The final
   scan stays the backstop. Owner: ADR-0020's PR, with the rest of L6.
 - `[CONSCIOUS ASSUMPTION]` (PR-4c final review L7) The RGI subdivision-flag emoji (England,
   Scotland, Wales) are written with tag characters, which rule 4 refuses, so `ModuleText`

@@ -737,6 +737,60 @@ fn a_lookup_spends_a_visit_per_member() {
 }
 
 #[test]
+fn each_child_and_array_element_spends_a_visit() {
+    // PR-4c round 5 L1: `Each` charges every child it selects, and a predicate every node it
+    // examines, the elements `StringOrArrayWith` tests included.
+    let array = format!("[{}]", vec!["0"; 5_000].join(","));
+    let wrapped = format!("{{\"k\":{array}}}");
+    let element = Predicate::MemberIn {
+        key: "x".to_owned(),
+        values: BTreeSet::from(["y".to_owned()]),
+    };
+    let cases = [
+        (array, Selector::new(vec![Step::Each]).unwrap()),
+        (
+            wrapped,
+            Selector::new(vec![Step::Where(Predicate::StringOrArrayWith {
+                key: "k".to_owned(),
+                element: Box::new(element),
+            })])
+            .unwrap(),
+        ),
+    ];
+    for (doc, selector) in &cases {
+        let tape = parse(doc.as_bytes(), &Limits::DEFAULT).unwrap();
+        let none = Mask::new();
+        let view = StructuralView::new(&tape, &none);
+        assert_eq!(
+            selector.resolve_within(&view, &mut Visits::new(1_000)),
+            Err(SelectorError::Budget),
+            "a child or an element was examined uncharged"
+        );
+    }
+}
+
+#[test]
+fn a_value_finding_on_a_literal_refuses_the_seal() {
+    // PR-4c round 5 L2: a value finding on `true`, `false` or `null` masks nothing, so it is
+    // misplaced and refuses the seal, as a key finding on a keyless node does.
+    let tape = parse(br#"{"k":"v","b":true,"f":false,"n":null,"s":"x"}"#, &Limits::DEFAULT).unwrap();
+    let none = Mask::new();
+    let root = StructuralView::new(&tape, &none).root();
+    for name in ["b", "f", "n"] {
+        let mut mask = Mask::new();
+        mask.value(root.member(name).unwrap().unwrap().id());
+        assert_eq!(
+            mask.seal(&tape).err(),
+            Some(MaskError),
+            "a value finding on a literal was sealed: {name}"
+        );
+    }
+    let mut mask = Mask::new();
+    mask.value(root.member("s").unwrap().unwrap().id());
+    assert!(mask.seal(&tape).is_ok());
+}
+
+#[test]
 fn a_string_that_decodes_short_enough_still_matches() {
     // PR-4c, M1: the raw-length shortcut refuses only what cannot decode to a value. 256
     // six-byte escapes are 1,536 raw bytes, exactly the bound, and decode to 256 bytes.
@@ -850,7 +904,9 @@ proptest! {
             if let Some(id) = ids.get(usize::from(*pick) % ids.len().max(1)) {
                 // A key finding goes only where a key is: elsewhere it refuses the seal (PR-4c).
                 let has_key = plain_view.node(*id).is_some_and(|n| n.key().unwrap().is_some());
-                if *key && has_key { mask.key(*id) } else { mask.value(*id) }
+                // A value finding goes only on a value: on a literal it refuses the seal (round 5).
+                let literal = plain_view.node(*id).is_some_and(|n| matches!(n.kind(), Kind::True | Kind::False | Kind::Null));
+                if *key && has_key { mask.key(*id) } else if !literal { mask.value(*id) }
             }
         }
         let sealed = mask.seal(&tape).unwrap();

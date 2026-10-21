@@ -18,12 +18,13 @@ use uaos_contracts::event::{EventType, ModuleName};
 use uaos_contracts::id::{OperationId, PocketId, TypedId};
 use uaos_contracts::operation::{OperationKind, RiskTier};
 use uaos_contracts::wire::Seq;
+use uaos_json::{Limits, parse};
 use uaos_module_api::{
     CandidateId, ChildBody, ChildKind, ChildOpRequest, Code, ConfigSchema, Decl, DeclError, Decls, DeclsMut,
     EventClass, EventDecl, EventView, GrantDecl, HookCx, HookDecl, HookMode, HookPoint, KernelFeature, KernelOffer,
-    MAX_DECLS, MAX_MODULE_TEXT, MAX_RANK, MAX_STATE_BYTES, Manifest, ManifestBuilder, ManifestError, Module,
+    MAX_DECLS, MAX_MODULE_TEXT, MAX_RANK, MAX_STATE_BYTES, Manifest, ManifestBuilder, ManifestError, Mask, Module,
     ModuleApiVersion, ModuleEvent, ModuleState, ModuleText, ModuleVersion, OnFailure, OpMeta, PocketCursor, Refusal,
-    StateMut, Strike, TextError, check_decls,
+    StateMut, Strike, StructuralView, TextError, check_decls,
 };
 
 const V1: ModuleVersion = ModuleVersion::new(1, 0, 0);
@@ -874,4 +875,23 @@ fn a_failure_cannot_deny_after_the_fact() {
         );
     }
     assert!(deny(HookPoint::Classify).is_ok());
+}
+
+/// PR-4c round 5 L3: a hook is shown the view of a seal.
+#[test]
+fn a_hook_sees_a_sealed_view() {
+    let tape = parse(br#"{"k":"v"}"#, &Limits::DEFAULT).unwrap();
+    let mask = Mask::new();
+    let sealed = mask.seal(&tape).unwrap();
+    let op = OpMeta::new(
+        OperationId::from_parts(1, [1; 10]),
+        OperationKind::ModelCall,
+        pocket(1),
+        RiskTier::new(1).unwrap(),
+    );
+    let cx = HookCx::new(HookPoint::Classify, op).with_view(&sealed);
+    assert!(
+        cx.view().is_some_and(StructuralView::is_sealed),
+        "a hook was shown an unsealed view"
+    );
 }
