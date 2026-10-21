@@ -491,10 +491,12 @@ selector's keys and values, a frame, state bytes or `ModuleText` (I-11).
     ranges);
   - one `Visits` budget per call, a strike (`budget_exceeded`) when spent;
   - `not_own_child` and `unknown_candidate` strike what they name.
-- `[CONSCIOUS ASSUMPTION]` (PR-4c V1 review L6) `ModuleText` refuses variation-selector runs
-  and invisible bases, but accepts other invisible characters: runs of U+200B–U+200D and
-  U+2060–U+2064, the Hangul fillers, and format, private-use or noncharacter code points as
-  bases. ZWJ and ZWNJ are needed in emoji sequences and in scripts such as Persian and the
+- `[CONSCIOUS ASSUMPTION]` (PR-4c V1 review L6) `ModuleText` refuses a variation selector
+  that follows no visible base, and nothing else invisible beyond the controls, explicit bidi
+  controls and tags of rule 4. Every other default-ignorable code point is accepted, alone or
+  in runs, assigned or not: for example U+00AD, U+034F, U+180E, U+200B–U+200D, U+2060–U+206F,
+  U+FEFF and the Hangul fillers. A format, private-use or noncharacter code point counts as a
+  visible base. ZWJ and ZWNJ are needed in emoji sequences and in scripts such as Persian and the
   Indic scripts, so which others to refuse belongs to ADR-0020 (D-36). The kernel's final scan
   stays the backstop. Owner: ADR-0020's PR, before PR-8.
 - **Debt (PR-4c V1 review L7):** the Unicode tables in `decl.rs` and in the test oracle name

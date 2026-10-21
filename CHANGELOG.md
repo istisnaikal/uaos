@@ -262,8 +262,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `MAX_VISITS` visits, each O(`MAX_SELECTOR_TEXT` + log ranges).
   - **`ModuleText`:** a variation selector's base is visible, and an ideographic one follows
     a CJK ideograph.
-  - **Seals:** `Mask::seal` returns a `Sealed` that holds its tape and builds the view, so a seal
-    is never used over another tape; a key finding on a node with no key refuses it.
+  - **Seals:** `Mask::seal` returns a `Sealed` (`#[must_use]`) that holds its tape and builds the
+    view, so a seal is never used over another tape; the runtime relay reads through it. A key
+    finding on a node with no key refuses the seal.
   - **Procedure:** `Visits` is not `Copy`; a `RoleMap` carries one budget; the call procedure
     is the crate's own (`Admitted::call_hook`, `Admitted::call_event`).
   - **Tests:** a member scan charged per member; the raw bound at exactly six times
@@ -271,7 +272,7 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     view over its own tape; keyless key findings refused; visible bases, ideographic bases and
     the Mongolian free variation selectors.
   - **Negatives:** eight seeded violations, plus PR-4's variation-run seed retargeted to the
-    new rule.
+    new rule (after the reviews: one retired, two added).
 - P3 Move 1, PR-4 (spec first): the module socket's contract,
   `docs/adr/appendix/0010-module-socket.md`, before any code.
   - **`uaos.module/1` (draft):** a manifest built through a builder, with `requires`, a closed set

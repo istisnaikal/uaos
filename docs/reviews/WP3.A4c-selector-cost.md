@@ -14,11 +14,13 @@ and §12, and implement the work split from PR-4 under D-31 at round 5.
 - **The raw bound:** `>` 1,536 bytes, quotes excluded, is the right boundary, and it is checked
   before any decoding. Masked and unmasked strings answer the same.
 - **`RoleMap`:** one budget, and a failed assignment assigns nothing.
-- **Changed APIs:** none is used outside `uaos-module-api`.
+- **Changed APIs:** none was used outside `uaos-module-api` at the reviewed base. After the
+  rebase onto `91288c9`, #41's relay was (scoped round M-a, below).
 - **Unicode tables:** the default-ignorable and unified-ideograph tables match Unicode 16.0.
 - **Seals:** a key finding on the root or an array element refuses the seal.
 - **The procedures:** `call_hook` and `call_event` match §5.
-- **Seeds:** all 37 anchors are unique, and the eight new seeds and the older ones bite.
+- **Seeds:** all 37 anchors are unique, and the eight new seeds bite. Of the older seeds,
+  `module-manifest-reread` no longer did (M1).
 
 **Resolution:**
 - **Fixed in this PR:** every Medium, and L1–L5, each with a test or a contract change.
@@ -59,3 +61,31 @@ leaves draft.
 |---|---|---|
 | L6: other invisible characters in `ModuleText` | ADR-0020's PR (D-36) | before PR-8 |
 | L7: an independent UCD check of the Unicode tables | WP3.9 | before RC-1 |
+
+## D-31 scoped round (over the fixes, `d672a44` and the relay change)
+
+**Reviewer:** a fresh-context agent, read-only. It covered the fix diff and every invariant and
+caller the diff touches.
+**Result:** 0 High · 1 Medium · 5 Low.
+
+**Verified clean:**
+- **M2:** only `Sealed::view` builds a view with ranges, and no public path can pair a seal
+  with another tape. The lifetimes are sound: a PR-8 host can hold a `Sealed` across a call.
+- **M3:** the decode counter sits after the mask check and before any decode, and the seed
+  bites.
+- **M1:** both seeds bite.
+- **`#[must_use]`:** it fires for `mask.seal(&tape)?;`. The workspace denies `unused_must_use`,
+  so the old pattern no longer compiles.
+- **Variation selectors:** the set matches Unicode 16.0, and the oracle agrees with the code,
+  U+180E included.
+- **Registration:** all 37 §11 rows, the gates, and every anchor in the module socket and the
+  relay.
+
+| | Finding | What was done |
+|---|---|---|
+| M-a | After the rebase onto `91288c9`, #41's relay still sealed a mask and built `StructuralView::new` over it. The `Sealed` was dropped, so the relay read unsealed, at O(depth) a visit against §7's O(log ranges). The leftover `mut` failed clippy, so the fix commit's "clippy clean" held for its own base only. | The relay reads through `sealed.view()`. `Sealed` is `#[must_use]`, and the workspace's `unused_must_use = deny` makes a dropped seal a compile error. `cargo xtask ci` passes on the combined tree (623 tests). |
+| L-a | The working tree deleted four tracked proptest regression files (`uaos-policy`, `uaos-state`), from a cleanup glob. | Restored from `d672a44` before the commit was replaced; no commit on the branch deletes them. |
+| L-b | Nothing proved that `call_event` checks the admitted snapshot: the test module had no `on_event`. | The test module declares in `on_event` too, and `a_module_is_checked_against_its_admitted_manifest` checks an event. Negative `call-event-manifest-reread`. |
+| L-c | `MemberNotIn` and `StringOrArrayWith` had no per-member charge test. | `a_lookup_spends_a_visit_per_member` covers all four lookups. |
+| L-d | The L6 assumption listed a sample of what `ModuleText` accepts. | It states the rule. |
+| L-e | Wording: the review claimed every older seed bit; two `decl.rs` tables did not name `PropList.txt`; `inside_masked`'s doc still spoke of a mask sealed against a tape. | Fixed. The suggested `compile_fail` doctest is not added: it passes on any compile error, so it would prove little beyond the borrow rule itself. |

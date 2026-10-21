@@ -58,7 +58,8 @@ pub const fn is_tag(c: char) -> bool {
     matches!(c, '\u{E0000}'..='\u{E007F}')
 }
 
-/// Whether `c` is a variation selector (Unicode 16.0, `Variation_Selector`): the Mongolian free
+/// Whether `c` is a variation selector (Unicode 16.0, `PropList.txt`, `Variation_Selector`): the
+/// Mongolian free
 /// variation selectors U+180B to U+180D and U+180F, U+FE00 to U+FE0F, or U+E0100 to U+E01EF
 /// (the Mongolian ones since PR-4c V1 review L6). One after a
 /// base character selects a glyph (an emoji's presentation, an ideographic variant); a run of
@@ -96,7 +97,8 @@ const fn is_default_ignorable(c: char) -> bool {
     )
 }
 
-/// Whether `c` is a CJK unified ideograph (Unicode 16.0, `Unified_Ideograph`), the only base an
+/// Whether `c` is a CJK unified ideograph (Unicode 16.0, `PropList.txt`, `Unified_Ideograph`), the
+/// only base an
 /// ideographic variation selector, U+E0100 to U+E01EF, takes (UTS #37).
 const fn is_unified_ideograph(c: char) -> bool {
     matches!(
