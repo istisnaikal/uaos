@@ -324,12 +324,19 @@ impl std::fmt::Debug for SseEvent<'_> {
 }
 
 /// What a stream frame is.
+///
+/// **A codec's duty (runtime contract §7.3).** A frame whose data holds the dialect's usage
+/// object, even beside other content, is `Usage`, or `End` or `Error` if it also ends the
+/// stream or reports an error. The host reads those strictly: a frame that does not parse cuts
+/// the stream. It reads `Content` and `Other` frames only best effort, never cutting on a
+/// parse failure, so a usage frame classified as content is metered only if it parses.
+/// Classify on a usage object, not on a key: `"usage":null` is no usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum FrameKind {
-    /// Content.
+    /// Content: the model's output, with no usage object.
     Content,
-    /// Usage figures.
+    /// Usage figures, alone or beside content (Anthropic's `message_start`, say).
     Usage,
     /// A keep-alive ping, never held.
     Ping,
@@ -337,7 +344,7 @@ pub enum FrameKind {
     Error,
     /// The end of the stream.
     End,
-    /// Anything else, forwarded untouched.
+    /// Anything else, forwarded untouched, with no usage object.
     Other,
 }
 
@@ -419,7 +426,8 @@ pub trait DialectCodec: Send + Sync + 'static {
     /// [`CodecError`]: the kernel then refuses the request; with no roles there is no safe splice.
     fn roles(&self, view: &StructuralView<'_, '_>, out: &mut RoleMap) -> Result<(), CodecError>;
 
-    /// Classifies one stream frame.
+    /// Classifies one stream frame. A frame holding a usage object is `Usage`, `End` or
+    /// `Error` ([`FrameKind`] says why).
     fn frame(&self, event: &SseEvent<'_>) -> FrameKind;
 
     /// The usage a response reports, if it reports any.

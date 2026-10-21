@@ -5,8 +5,8 @@
 //!
 //! [`RelayBody`] is a hyper body that the client's connection pulls. No task runs it and no
 //! channel feeds it, so the client's socket is the backpressure. It holds at most one incomplete
-//! event and forwards each event's exact bytes. Every usage report is priced, and the first one
-//! past the reservation cuts the stream. A cut forwards nothing more of the upstream, drops it,
+//! event and forwards each event's exact bytes. Every usage report the codec finds is priced,
+//! and the first one past the reservation cuts the stream. A cut forwards nothing more of the upstream, drops it,
 //! and ends in the caller's terminal frame or in an error: never in a clean end that a client
 //! could take for a complete answer.
 //!
@@ -362,15 +362,22 @@ impl Meter {
             Some(name) => Some(std::str::from_utf8(name).map_err(|_| CutReason::Malformed)?),
         };
         let kind = self.codec.frame(&SseEvent::new(event, &data));
-        // A content, other or ping frame is forwarded unread. Its data is the model's output,
-        // which can hold a lone surrogate escape (an emoji split across two text deltas) or a
-        // whole fetched document, and neither may cut a stream (final review M2). A usage, end
-        // or error frame, and any kind the codec contract adds later, is read: a dialect may
-        // report usage on its last frame (review M2). A usage frame must yield a report.
-        if matches!(kind, FrameKind::Ping | FrameKind::Content | FrameKind::Other) {
+        if kind == FrameKind::Ping {
             return Ok(());
         }
-        match self.read(&data)? {
+        // A content or other frame is read best effort. Its data is the model's output, which
+        // can hold a lone surrogate escape (an emoji split across two text deltas) or a whole
+        // fetched document, so a parse failure never cuts it (final review M2). A report the
+        // codec still finds on it is metered, so a usage frame the codec mislabels does not
+        // fail open (round 4 M-1). A usage, end or error frame, and any kind the codec
+        // contract adds later, is read strictly: a dialect may report usage on its last frame
+        // (review M2), and a usage frame must yield a report.
+        let report = if matches!(kind, FrameKind::Content | FrameKind::Other) {
+            self.read(&data).unwrap_or(None)
+        } else {
+            self.read(&data)?
+        };
+        match report {
             Some(report) => {
                 self.meter(&report)?;
                 self.ended = kind == FrameKind::End;

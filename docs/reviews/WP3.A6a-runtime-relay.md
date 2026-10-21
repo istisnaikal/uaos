@@ -97,3 +97,28 @@ The agent formed its view before reading this record.
 | L5 | Red line 9's error end holds only for chunked or length-delimited responses. | §7.4 states the precondition; a close-delimited client is **owed by PR-7**. |
 | L6 | A request that can never fit was told to retry in 1 s, forever. | `INGRESS_TOO_LARGE`, not retryable, `retry-after` zero, for an admission or a charge. Negative `admission-tells-a-misfit-to-retry`. |
 | L7 | The first frame was copied whole, not just its first three bytes. | A first frame of three bytes or more is told for a byte-order mark in place. |
+
+## Round 4, scoped (D-31)
+
+**Reviewed:** `33193f0..f2abb1b`, plus the invariants and callers it touches, by a
+fresh-context agent reading only, 2026-10-21.
+**Result:** 0 High · 2 Medium · 6 Low, and one nit.
+**Verified:**
+- **Splitter:** byte exactness for every chunking traced: a CR at a chunk's end, the pending
+  event, a first chunk short and long, with and without a byte-order mark, the tail at EOF.
+  `run` covers only checked events, and `copied` comes only first.
+- **Relay:** nothing forwarded after a cut or a stop, and at most two pieces per frame.
+- **Fixes:** the M2 skip list, the L1 cap, the L6 ordering.
+- **Seeds:** all 21 runtime anchors.
+
+| | Finding | Fix |
+|---|---|---|
+| M-1 | The codec's duty that M2 created was written only in the runtime contract, and a mislabel failed open: an Anthropic codec calling `message_start` other left its input tokens unmetered, and `message_stop` still made the usage final, so the stream settled below the bill. | Content and other frames are read best effort: a report found on one is metered, and a parse failure never cuts it. The duty is stated in `FrameKind`'s and `frame`'s docs and the socket contract §7; codec conformance is owed by M2. Test `usage_on_a_mislabelled_frame_is_still_metered`; negatives `relay-content-json-cuts` and `relay-skips-content-frames`. |
+| M-2 | Docs still said every usage report is priced and that usage on a content frame is metered. | Qualified everywhere: every report the codec finds; strict and best-effort reading; the proof list corrected. |
+| L-1 | The L1 test used `Duration::MAX`, which the old code already refused, so it passed without the fix. | The test takes the largest timeout the clock can still add and runs the body in its own task, so a panic is observed. Negative `relay-idle-timeout-uncapped`. |
+| L-2 | The memory bound left out the joined data lines, the parser's keys and scratch, and buffer growth slack. | §7.1 counts them: about three times `max_event_bytes`, one frame, and one tape with keys, roughly 130 MiB per stream at worst, for PR-7 to charge. |
+| L-3 | Nothing tested the raised read bounds from below. | `a_large_end_frame_within_the_bounds_is_metered` (200,000 values, every GA locale); negative `relay-node-bound-too-tight`. Best-effort reading brings the property's JSON events back to the parser. |
+| L-4 | The test codec classified chat chunks on the key `"usage"`, which real chunks carry as `null`. | It classifies on a usage object, and the chat fixture carries `"usage":null`; the duty says so. |
+| L-5 | A first frame of one or two bytes still copies the next frame. | Stated as the one other copy in §7.1. |
+| L-6 | The CHANGELOG did not record the `INGRESS_TOO_LARGE` refusal or the idle cap. | Recorded. |
+| nit | A one-element loop. | Removed. |
