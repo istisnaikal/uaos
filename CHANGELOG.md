@@ -161,6 +161,21 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
+- P3 Move 1, PR-6a (spec first): the runtime's relay, stop and admission
+  (`docs/adr/appendix/0013-runtime-relay-and-stop.md`, WP3.A6a). It is the first half of the
+  runtime spine, with the relay core brought forward from PR-7.
+  - **The stop:** an atomic flag, checked first by admission and watched by every admitted
+    Operation. It acts before its record, and a journaled stop is honoured at boot. Resume
+    needs presence (M3). The ADR-0010 amendment is open as D-37.
+  - **Admission** counts bytes in flight, not only requests.
+  - **The relay:** a pulled hyper body over the provider's event stream. It holds one event,
+    forwards exact bytes, and prices every usage report against the Operation's reservation.
+    The first report over it cuts the stream, drops the upstream and engages the kernel stop.
+    A cut is never silent to the client, and never called a rollback.
+  - **The configuration snapshot** pins the locale per Operation as an opaque tag: no locale
+    list in Ring 0.
+  - **Planned contract additions:** event types `kernel.stopped` and `kernel.resumed`; error
+    codes `RUNTIME_STOPPED` and `BUDGET_STREAM_OVERRUN`.
 - P3 Move 1, PR-4 (spec first): the module socket's contract,
   `docs/adr/appendix/0010-module-socket.md`, before any code.
   - **`uaos.module/1` (draft):** a manifest built through a builder, with `requires`, a closed set
