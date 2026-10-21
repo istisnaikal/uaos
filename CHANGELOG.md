@@ -930,21 +930,18 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 ### Fixed
 
 - Redaction (ADR-0009 Amendment 2): a URL password that starts with `//`
-  (`https://u://pw@host`) or holds `://` was missed by detection and by the final scan. CI found
-  it on PR #41's Windows run (seed 4814893562051029426).
-  - **Fix:** each anchor still reads its own URL, and a userinfo may also run on past a `://`
-    unless another URL starts there. A chain only adds to what each anchor finds; the scan
-    stays linear.
-  - **Remaining stated limits:** the shapes the URL rule still misses are stated in ADR-0009.
-    The corpus generator mirrors the detector to leave those out. It can still draw the older
-    port-then-lowercase-path miss stated since Amendment 1.
+  (`https://u://pw@host`) was missed by detection and by the final scan. CI found it on PR
+  #41's Windows run (seed 4814893562051029426).
+  - **Fix:** after a plain user, the anchor at that `://` continues the password. Each anchor
+    still reads its own URL, so a chain only adds. The scan stays linear.
+  - **Narrowed:** a broader first version, any `://` in a password, was narrowed after four
+    review rounds to the shape CI found. Every other `://` in a password stays a stated
+    limit, and the corpus generator leaves those out.
   - **Corpus:** a new negative family, `url-glued`.
-  - **Tests:** the CI seed is a fixed case, with unit tests for each shape, for `host:port`
+  - **Tests:** the CI seed is a fixed case, with unit tests for the shape, for `host:port`
     URLs before another URL, and for URL lists and glued URLs.
-  - **Negatives:** six seeded violations, `redact-url-separator-ends-userinfo`,
-    `redact-url-chain-past-list-byte`, `redact-url-chain-from-host-port`,
-    `redact-url-chain-any-user`, `redact-url-scheme-colon-split` and
-    `redact-url-chain-blocks-next-url`.
+  - **Negatives:** three seeded violations, `redact-url-separator-ends-userinfo`,
+    `redact-url-chain-any-user` and `redact-url-chain-blocks-next-url`.
 
 - **`WallTime::from_unix_nanos` no longer panics on far out-of-range values.**
   - For nanoseconds far outside jiff's range (for example `u64::MAX` milliseconds as nanoseconds),
