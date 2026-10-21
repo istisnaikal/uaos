@@ -3165,7 +3165,7 @@ The journal is tamper-proof.
             id: "relay-meters-usage-frames-only",
             gate: "test",
             tool: None,
-            // Review M2: usage is read from every event, whatever its kind.
+            // Review M2: an end frame is read strictly, not only a usage frame.
             seed: replace("crates/uaos-runtime/src/relay.rs", "            self.read(&data)?\n", "            if kind == FrameKind::Usage { self.read(&data)? } else { None }\n"),
             runner: Runner::Program {
                 program: "cargo",
@@ -3280,6 +3280,18 @@ The journal is tamper-proof.
                 args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_huge_idle_timeout_disables_the_cut_without_a_panic"],
             },
             expect: "a huge idle timeout panicked",
+        },
+        Case {
+            id: "relay-skips-content-usage",
+            gate: "test",
+            tool: None,
+            // Round 5 L-1: a report on a frame the codec calls content is metered.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "        if kind == FrameKind::Ping {\n", "        if matches!(kind, FrameKind::Ping | FrameKind::Content) {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "usage_on_a_frame_the_codec_calls_content_is_metered"],
+            },
+            expect: "usage on a frame the codec calls content went unmetered",
         },
     ]
 }

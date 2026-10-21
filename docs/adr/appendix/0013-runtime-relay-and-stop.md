@@ -150,7 +150,8 @@ its report; `.bytes(upstream)` does the same for a body that is not an event str
     bytes a node), freed before the next event.
 
   Reading an event's fields also joins its `data` lines when there are several, into one
-  copy of up to `max_event_bytes`. The parser keeps a key list and scratch next to its tape,
+  copy sized once to the event, at most `max_event_bytes`. The parser keeps a key list and
+  scratch next to its tape,
   and a held event's buffer can carry up to as much again in growth slack (round 4 L-2). Per
   stream, at the defaults, that is about three times `max_event_bytes`, one upstream frame,
   and one tape with its keys (about 32 MiB at 2^20 nodes), roughly 130 MiB at worst.
@@ -206,9 +207,10 @@ forwarded, because a lenient client may act on it.
     - Otherwise the stream is cut: a broken object never slips past metering while a
       client reads it.
   - **Best effort:** a `Content` or `Other` frame.
-    - A report the codec finds on it is metered, so a usage frame the codec mislabels does
-      not fail open. Anthropic splits usage across `message_start` and `message_delta`, so
-      a mislabelled `message_start` would otherwise settle below the bill (round 4 M-1).
+    - A report the codec finds on it is metered, so a usage frame the codec mislabels as
+      content or other is metered when it parses. Anthropic splits usage across
+      `message_start` and `message_delta`, so a mislabelled `message_start` would otherwise
+      settle below the bill (round 4 M-1). A usage frame labelled a ping is never read.
     - A parse failure never cuts it (final review M2). Its data is the model's output, and
       two things in it must never cut a stream:
       - a lone surrogate escape, from an emoji split across two text deltas, which
@@ -346,8 +348,9 @@ H1). `RelayReport::settlement` is the rule PR-7 applies through PR-6b's actor:
   - admission by bytes;
   - bounded events and bodies, a node bound on reading a frame for usage, and at most two
     queued pieces per upstream frame;
-  - per stream about twice `max_event_bytes`, one frame and one tape; charging that to the
-    Operation's permit is PR-7's (§7.1);
+  - per stream about three times `max_event_bytes`, one frame and one tape with its keys,
+    roughly 130 MiB at the defaults; charging that to the Operation's permit is PR-7's
+    (§7.1);
   - an idle timeout;
   - bounded tasks;
   - no channels on the relay path.
@@ -412,7 +415,10 @@ PR-6b exports these through the bus as metrics, with the ids of CLAUDE.md §4.
   - a content frame's JSON never cuts the stream, a lone surrogate escape and a 2 MiB tool
     result included;
   - usage on a frame the codec mislabels as other is still metered and settles as final;
-  - an end frame with 200,000 values and text in every GA locale is metered, not cut;
+  - usage on a frame the codec calls content, as a nameless chat usage chunk could be, is
+    still metered;
+  - an end frame of about 2 MiB, with 2^20 − 64 values and text in every GA locale, is
+    metered, not cut, pinning both read bounds from below;
   - one upstream frame of 10,000 blank lines and two events is forwarded in at most two
     pieces;
   - a huge idle timeout disables the cut without a panic;
@@ -447,7 +453,7 @@ PR-6b exports these through the bus as metrics, with the ids of CLAUDE.md §4.
   - a finished task frees its slot;
   - it runs hyper's executor tasks.
 
-**Seeded violations** (`cargo xtask negative`, 25):
+**Seeded violations** (`cargo xtask negative`, 26):
 
 | id | Seed | Caught by |
 |---|---|---|
@@ -459,7 +465,8 @@ PR-6b exports these through the bus as metrics, with the ids of CLAUDE.md §4.
 | `admission-counts-requests` | admission ignores bytes | `admission_counts_bytes_in_flight` |
 | `relay-forwards-over-ceiling` | the ceiling comparison lets one nano-USD through | `one_nano_usd_over_the_ceiling_is_never_forwarded` |
 | `relay-overrun-keeps-kernel-running` | an overrun cuts the stream but leaves the kernel running | `an_overrun_stops_the_kernel` |
-| `relay-meters-usage-frames-only` | only frames classified `Usage` are read | `usage_on_an_end_frame_is_metered` |
+| `relay-meters-usage-frames-only` | end and error frames are not read strictly | `usage_on_an_end_frame_is_metered` |
+| `relay-skips-content-usage` | content frames are never read for usage | `usage_on_a_frame_the_codec_calls_content_is_metered` |
 | `relay-settles-running-total` | every cost counts as final | `a_stream_that_does_not_finish_settles_the_full_reservation` |
 | `relay-ignores-stop` | the relay never looks at the stop | `a_stop_cuts_a_waiting_stream` |
 | `relay-keeps-upstream-after-cut` | a cut keeps the upstream body | `a_cut_drops_the_upstream_at_once` |

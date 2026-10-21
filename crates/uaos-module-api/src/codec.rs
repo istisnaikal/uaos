@@ -327,10 +327,12 @@ impl std::fmt::Debug for SseEvent<'_> {
 ///
 /// **A codec's duty (runtime contract §7.3).** A frame whose data holds the dialect's usage
 /// object, even beside other content, is `Usage`, or `End` or `Error` if it also ends the
-/// stream or reports an error. The host reads those strictly: a frame that does not parse cuts
-/// the stream. It reads `Content` and `Other` frames only best effort, never cutting on a
-/// parse failure, so a usage frame classified as content is metered only if it parses.
-/// Classify on a usage object, not on a key: `"usage":null` is no usage.
+/// stream or reports an error. The host reads those strictly: object-shaped data that does not
+/// parse cuts the stream, and other data (`[DONE]`, plain text) reports no usage. It reads
+/// `Content` and `Other` frames only best effort, never cutting on a parse failure, so a usage
+/// frame classified as content is metered only when it parses. It never reads a `Ping`, so a
+/// usage frame classified as a ping is never metered. Classify on a usage object, not on a
+/// key: `"usage":null` is no usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum FrameKind {
@@ -430,6 +432,8 @@ pub trait DialectCodec: Send + Sync + 'static {
     /// `Error` ([`FrameKind`] says why).
     fn frame(&self, event: &SseEvent<'_>) -> FrameKind;
 
-    /// The usage a response reports, if it reports any.
+    /// The usage a response reports, if it reports any. The host shows it every frame but a
+    /// ping, content included, so read only the dialect's own usage path and return `None`
+    /// for anything else (runtime contract §7.3).
     fn usage(&self, view: &StructuralView<'_, '_>) -> Option<UsageReport>;
 }

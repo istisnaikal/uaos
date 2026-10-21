@@ -51,7 +51,7 @@ struct Dialect {
     seen: Mutex<Vec<(Option<String>, Vec<u8>)>>,
     /// Report a dimension it does not declare.
     rogue: bool,
-    /// Classify every event as content (no metering).
+    /// Classify every event as content: read best effort, metered only where a report is found.
     content_only: bool,
     /// Return a report even when it names no dimension, as a codec that adds only the fields it
     /// finds would (scoped round M-a).
@@ -417,10 +417,34 @@ async fn usage_on_a_mislabelled_frame_is_still_metered() {
 }
 
 #[tokio::test]
+async fn usage_on_a_frame_the_codec_calls_content_is_metered() {
+    // Round 5 L-1: a codec that calls every frame content, as one might default a nameless
+    // chat usage chunk, still has its reports metered.
+    let codec = Arc::new(Dialect {
+        content_only: true,
+        ..Dialect::new()
+    });
+    let (up, _, _) = upstream(&[START, DELTA, DELTA_100, STOP], false);
+    let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    assert_eq!(drain(&mut body).await.1, None);
+    let report = report(rx).await;
+    assert_eq!(
+        report.cost,
+        Some(NanoUsd::new(CEILING)),
+        "usage on a frame the codec calls content went unmetered"
+    );
+    // No end frame was seen, so the cost is not final and the reservation settles in full.
+    assert_eq!(report.settlement(), Usage::Unknown);
+}
+
+#[tokio::test]
 async fn a_large_end_frame_within_the_bounds_is_metered() {
-    // Round 4 L-3: an end frame that echoes a long output (200,000 values, every GA locale)
-    // stays inside the read bounds, so it is metered and not cut.
-    let values = vec!["0"; 200_000].join(",");
+    // Round 4 L-3, round 5 L-3: an end frame that echoes a long output, 2^20 - 64 values and
+    // about 2 MiB with text in every GA locale, stays inside both read bounds, so it is
+    // metered and not cut.
+    let values = vec!["0"; (1 << 20) - 64].join(",");
     let text = "\u{130}stanbul \u{df} \u{e9}t\u{e9} \u{f1} \u{e8} \u{645}\u{64e}\u{631}\u{652}\u{62d}\u{64e}\u{628}\u{64b}\u{627}";
     let completed = format!(
         "event: response.completed\ndata: {{\"type\":\"response.completed\",\"response\":{{\"usage\":{{\"input_tokens\":50,\"output_tokens\":100}},\"text\":\"{text}\",\"logprobs\":[{values}]}}}}\n\n"
@@ -1119,8 +1143,8 @@ const CORPUS: [&str; 9] = [
     "\u{bf}A\u{f1}adir? \u{a1}S\u{ed}!",
     "Perch\u{e9} \u{e8} cos\u{ec}",
     "\u{645}\u{64e}\u{631}\u{652}\u{62d}\u{64e}\u{628}\u{64b}\u{627} \u{200f}\u{61c}",
-    // Not shaped like a JSON object: the relay reads every object-shaped event as one JSON
-    // document and cuts one that is not, which dedicated tests cover.
+    // Not shaped like a JSON object, so it reports no usage. JSON events are generated on their
+    // own line (`JSON_EVENT`), which keeps each one a single document.
     "emoji \u{1f600} and {\"braces\":1}",
 ];
 
@@ -1167,8 +1191,8 @@ fn serialize(events: &[GenEvent], endings: &[usize], bom: bool, open_tail: bool)
     let mut line = |out: &mut Vec<u8>, text: &str| {
         let mut ending = ENDINGS[endings[n % endings.len()]];
         // A blank line ended by LF right after a CR would read as one CRLF, so the event would not
-        // end and would run into the next one. A merged JSON event is then not one document, and
-        // the relay rightly cuts it, so the blank line takes CRLF here.
+        // end and would run into the next one, and the events seen would merge. The blank line
+        // takes CRLF here, so every generated event stays itself.
         if text.is_empty() && ending == "\n" && out.last() == Some(&b'\r') {
             ending = "\r\n";
         }
