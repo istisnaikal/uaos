@@ -52,9 +52,10 @@ pub struct BootReport {
     /// ledger refuses new work (`BUDGET_RECOVERY_REQUIRED`). Not journaled: the record counts
     /// them.
     pub stuck: Vec<String>,
-    /// The kernel boots running after a crash, which work left open shows: a stop engaged just
-    /// before the crash may not have been journaled (runtime contract §3 rule 3). A crash with
-    /// nothing open looks like a clean exit until PR-6c journals one.
+    /// The kernel boots running after a crash, which work left open or an interrupted boot's
+    /// `op.indeterminate` shows: a stop engaged just before the crash may not have been journaled
+    /// (runtime contract §3 rule 3). A crash with nothing open looks like a clean exit until PR-6c
+    /// journals one (contract §2 step 5).
     pub stop_may_be_lost: bool,
     /// The configuration version the kernel boots with.
     pub config_version: ConfigVersion,
@@ -292,8 +293,9 @@ fn indeterminate_draft(intent: &EventEnvelope, config_version: ConfigVersion) ->
         cost_estimate: None,
         compensable: false,
         side_effect_class: intent.side_effect_class,
-        // Recovery surfaces: an interrupted Operation is never routine bookkeeping.
-        risk_tier: RiskTier::MAX,
+        // The Operation's own tier, as the envelope defines it; the record surfaces by its type and
+        // by the boot record's tier (round 4 L5).
+        risk_tier: intent.risk_tier,
         durability: Durability::Critical,
         config_version,
         metadata: Metadata::default(),
@@ -338,4 +340,40 @@ fn booted_draft(report: &BootReport, correlation: CorrelationId) -> Result<Event
         config_version: report.config_version,
         metadata: Metadata::default(),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test: a failed fixture fails the test")]
+mod tests {
+    use uaos_contracts::id::TypedId;
+
+    use super::*;
+
+    #[test]
+    fn a_boot_that_leaves_an_item_stuck_counts_it_and_surfaces() {
+        // Round 4 L2: a stuck item is counted in the boot record and makes it surface, though it
+        // is no evidence of a crash by itself.
+        let report = BootReport {
+            records: 1,
+            stop: BootState::Running,
+            indeterminate: Vec::new(),
+            settled_estimated: 0,
+            completed: 0,
+            transfers_completed: 0,
+            stuck: vec!["transfer t: a key conflict".to_owned()],
+            stop_may_be_lost: false,
+            config_version: ConfigVersion(1),
+        };
+        let draft = booted_draft(&report, CorrelationId::from_parts(1, [1; 10])).unwrap();
+        assert_eq!(
+            draft.payload_inline.as_ref().unwrap().as_value()["stuck"],
+            serde_json::json!("1"),
+            "the boot record hid a stuck item"
+        );
+        assert_eq!(
+            draft.risk_tier,
+            RiskTier::MAX,
+            "a boot that left an item stuck was journaled as routine"
+        );
+    }
 }

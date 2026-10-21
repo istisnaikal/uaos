@@ -116,3 +116,28 @@ full review follows these fixes, within D-31's five rounds.
 | L5 | Error texts lagged the checks. | The stale-records message and Display describe the whole-journal check. `CONFIG_DRIFT`'s approval path is named as M3's in §2 step 1. |
 | L6 | §7 said the procedure changed "only in checks". | §7 says what changed, and that the appends are the same. |
 | L7 | Doc drift: ADR-0018's appendix owner, "every boot", step 4's first bullet, the CHANGELOG's review line. | Fixed. |
+
+## D-31 round 4: a second final fresh full review (`030d22f`)
+
+**Reviewer:** a fresh-context agent, read-only, over the whole six-commit diff.
+**Result:** 0 High · 0 Medium · 5 Low. Nothing forces a split.
+
+**Verified clean:**
+- **Copying the intent's ids, correlation and parent:** no journal rule forbids it. The stop,
+  the evidence scan and the projection read none of them. There is precedent in `chunk.lost`.
+- **`RiskTier::MIN`:** valid at every layer.
+- **Step 0:** refuses no legitimate journal. Its contiguity check is O(n).
+- **`take_refusal`:** never stale.
+- **The residual guard:** it hides no other failure.
+- **All 17 seeds:** each bites first.
+
+| | Finding | What was done |
+|---|---|---|
+| L1 | The copied ids were untested: every fixture intent had none. | `the_indeterminate_record_carries_the_intents_ids`, with all four ids and a risk tier. Negative `boot-intent-ids-dropped`. |
+| L2 | No boot fixture left an item stuck. The stuck count and its tier were untested, and §2 did not say a stuck-only boot surfaces. | A unit test of the boot record, `a_boot_that_leaves_an_item_stuck_counts_it_and_surfaces`. Negative `boot-stuck-not-surfaced`. §2 step 5 says it. |
+| L3 | §5 overstated the property. Its residual guard skipped more cuts than needed, and an already-indeterminate fixture modelled an interrupted boot. | The guard skips only cuts after the last ledger append. The fixture journals its earlier boot's record. §5 says both. |
+| L4 | §4, the CHANGELOG and two docs lagged the new surface. | §4 and the CHANGELOG list the code, `RiskTier::MIN` and `take_refusal`. The report's doc and §7 are corrected. |
+| L5 | `op.indeterminate` claimed to be the Operation's record but was written at `MAX`, not the Operation's tier. | It carries the intent's tier, as the envelope defines the field. It surfaces by its type and the boot record's tier (§2 step 4). |
+
+**Outside the PR:** the projection takes an Operation's side effect from its first record. That
+is now a PR-6c duty in §1.
