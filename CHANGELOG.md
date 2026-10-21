@@ -181,7 +181,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     and the event-naming rule. `uaos.grant/1`, the Cedar `Pocket` entity and the `memory.read`
     action are specified here and built in PR-4b (`p3/a4b-grant-path`).
     `uaos.approval/1` moves to M3 with the presence ceremony (ADR-0012).
-  - Open decision D-35: how closed enums grow in draft contracts.
+  - D-35, how closed enums grow in draft contracts: option (b), decided by the maintainer on
+    2026-10-20. An added value is a minor bump until RC-1, and readers refuse unknown values;
+    `schema-compat` learns draft contracts before PR-8.
   - **Built: the contract additions.** `AgentId` (`agt_…`) and an optional `agent_id` on the
     envelope and the journal's draft (absent, it is not written, so existing records keep their
     exact bytes; a lost-payload record inherits the agent of the record it reports).

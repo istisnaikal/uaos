@@ -370,6 +370,8 @@ the `language-neutrality` gate once ADR-0020's PR registers it):
   need `OperationKind` values for cross-pocket reads and network calls. Options: (a) keep the gate
   and issue `uaos.operation/2` when PR-8 adds them; (b) let draft contracts take added enum values
   as a minor bump, with readers that refuse unknown values. PR-4 adds no enum value either way.
+  **Decided 2026-10-20 (D-35): option (b).** `schema-compat` learns which contracts are draft
+  before PR-8.
 - `[CONSCIOUS ASSUMPTION]` `MAX_STATE_BYTES` = 64 KiB per module per pocket. **Open:** no
   declaration or child kind writes a pocket chunk yet, so a module that needs more than 64 KiB
   (note bodies) has nowhere to put it. The paper modules (PR-10) decide whether one is added.
