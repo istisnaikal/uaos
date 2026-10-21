@@ -2763,6 +2763,102 @@ The journal is tamper-proof.
             },
             expect: "a lost-payload record dropped the agent",
         },
+        Case {
+            id: "module-manifest-reread",
+            gate: "test",
+            tool: None,
+            // Fresh full review M1: every call is checked against the manifest admitted, not a later one.
+            seed: replace("crates/uaos-module-api/src/module.rs", "    pub const fn manifest(&self) -> &Manifest {\n        &self.manifest\n    }", "    pub fn manifest(&self) -> &Manifest {\n        self.module.manifest()\n    }"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "a_module_is_checked_against_its_admitted_manifest"],
+            },
+            expect: "a module grew its manifest after admission",
+        },
+        Case {
+            id: "view-sealed-mask-drifts",
+            gate: "test",
+            tool: None,
+            // Fresh full review M2: a sealed mask answers exactly as an unsealed one.
+            seed: replace("crates/uaos-module-api/src/view.rs", "covered.push((*id, node.subtree_end()));", "covered.push((*id, *id));"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "sealed_and_unsealed_views_agree"],
+            },
+            expect: "a sealed view disagreed with an unsealed one",
+        },
+        Case {
+            id: "strip-removes-anchor",
+            gate: "test",
+            tool: None,
+            // Fresh full review L1: a strip removes what is inside its anchor, never the anchor.
+            seed: replace("crates/uaos-module-api/src/codec.rs", "            .and_then(|n| n.parent())\n", ""),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_strip_keeps_its_anchor_and_masked_content"],
+            },
+            expect: "a strip removed its own anchor",
+        },
+        Case {
+            id: "strip-touches-masked",
+            gate: "test",
+            tool: None,
+            // Fresh full review L3: roles come from the masked view, so a strip never touches masked content.
+            seed: replace("crates/uaos-module-api/src/codec.rs", "            && !view.touches_masked(id)\n", ""),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_strip_keeps_its_anchor_and_masked_content"],
+            },
+            expect: "a strip touched masked content",
+        },
+        Case {
+            id: "selector-unbudgeted",
+            gate: "test",
+            tool: None,
+            // Fresh full review M2: resolution spends a visit budget and stops when it is spent.
+            seed: replace("crates/uaos-module-api/src/selector.rs", "self.0 = self.0.checked_sub(n).ok_or(SelectorError::Budget)?;", "self.0 = self.0.saturating_sub(n);"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_selector_stops_at_its_budget"],
+            },
+            expect: "a selector ran past its budget",
+        },
+        Case {
+            id: "usage-undeclared-dimension",
+            gate: "test",
+            tool: None,
+            // Fresh full review M3: usage names only the dimensions its codec declares.
+            seed: replace("crates/uaos-module-api/src/codec.rs", "if self.dims.iter().all(|(name, _)| declared.contains(name)) {", "if true || self.dims.iter().all(|(name, _)| declared.contains(name)) {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "usage_reports_name_declared_dimensions_once"],
+            },
+            expect: "an undeclared billing dimension was accepted",
+        },
+        Case {
+            id: "module-text-accepts-variation-run",
+            gate: "language-neutrality",
+            tool: None,
+            // Fresh full review L4: runs of variation selectors carry invisible bytes; module text refuses them.
+            seed: replace("crates/uaos-module-api/src/decl.rs", "            if selector && !after_base {\n", "            if false && selector && !after_base {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "language_neutrality", "module_text_refuses_variation_runs"],
+            },
+            expect: "a variation-selector run was accepted",
+        },
+        Case {
+            id: "failure-deny-after-the-fact",
+            gate: "test",
+            tool: None,
+            // Fresh full review L5: a failure after forwarding cannot deny, so `Deny` there is refused at load.
+            seed: replace("crates/uaos-module-api/src/manifest.rs", "if hook.on_failure == OnFailure::Deny && !hook.point.denies() {", "if false && hook.on_failure == OnFailure::Deny && !hook.point.denies() {"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "socket", "a_failure_cannot_deny_after_the_fact"],
+            },
+            expect: "a failure policy that cannot deny was loaded",
+        },
     ]
 }
 

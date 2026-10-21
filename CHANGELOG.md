@@ -215,11 +215,18 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - The inputs a module receives (`OpMeta`, `Candidate`, `EventView`) are `#[non_exhaustive]`
       with constructors, so they grow without a break.
     - V1 review (`docs/reviews/WP3.A4-module-socket.md`): 2 High, 8 Medium and 8 Low,
-      resolved or assigned to the host (PR-8). A scoped second round (0 High, 2 Medium,
-      6 Low) is resolved too. The final review (2 High, 6 Medium, 12 Low) is resolved but for
-      two Mediums on the grant path (M4, M5), which stay open. 26 seeded violations.
-    - A replay rebuilds a module's state and declares nothing (`EventView::replay`). Hooks see
-      frames and errors from before rehydration. One call of a module per pocket runs at a time.
+      resolved or assigned to the host (PR-8). A scoped second round (0 High, 2 Medium, 6 Low)
+      and the final review (2 High, 6 Medium, 12 Low) are resolved; that review's M4 and M5 moved
+      with the grant path to PR-4b. A fresh full review (1 High, 5 Medium, 7 Low) is resolved
+      too. 31 seeded violations.
+    - A replayed event is marked (`EventView::replay`), so the host can rebuild state and
+      discard the declarations. Two further rules are contract text and PR-8 proof obligations,
+      not code here: hooks see frames and errors from before rehydration, and one call of a
+      module per pocket runs at a time.
+    - A module is checked against the manifest it was admitted under (`Admitted`). Masks seal
+      against their tape, and every selector resolution spends a visit budget, so the kernel's
+      cost per call is bounded. Codecs declare their billing dimensions, and a strip keeps its
+      anchor and never touches masked content.
     - A strip may not enclose a forbidden role (`RoleMap::touching`, `RoleMap::may_strip`), and
       a masked container masks everything inside it.
     - `ModuleText` refuses Unicode tag characters and accepts CRLF.

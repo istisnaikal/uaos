@@ -17,9 +17,9 @@ use std::collections::BTreeSet;
 use proptest::prelude::*;
 use uaos_json::{Kind, Limits, NodeId, parse};
 use uaos_module_api::{
-    ConfigSchema, EndpointClass, EndpointDecl, MAX_PREDICATE_VALUES, MAX_SELECTOR_TEXT, Mask, Method, ModuleState,
-    ModuleText, PathPattern, Predicate, Role, RoleMap, Selector, SelectorError, SseEvent, Step, StructuralView,
-    ViewText, classify,
+    Code, ConfigSchema, EndpointClass, EndpointDecl, MAX_PREDICATE_VALUES, MAX_SELECTOR_TEXT, Mask, Method,
+    ModuleState, ModuleText, PathPattern, Predicate, Role, RoleMap, Selector, SelectorError, SseEvent, Step,
+    StructuralView, UsageReport, ViewText, Visits, classify,
 };
 
 const DOC: &str = r#"{"system":[{"type":"text","text":"s0"}],"messages":[
@@ -563,5 +563,146 @@ proptest! {
         let view = StructuralView::new(&tape, &mask);
         let fast = sel(vec![Step::AnyDepthKey(first.into()), Step::AnyDepthKey(second.into())]).resolve(&view).unwrap();
         prop_assert_eq!(fast, naive_any_depth(&view, first, second));
+    }
+}
+
+/// `{"messages":[{"role":"user","content":[{"type":"text","text":"t"}]}]}` with the message as the
+/// newest human turn: (tape, message id, text block id, text value id).
+fn one_turn() -> (uaos_json::Tape<'static>, NodeId, NodeId, NodeId) {
+    let body: &'static [u8] = br#"{"messages":[{"role":"user","content":[{"type":"text","text":"t"}]}]}"#;
+    let tape = parse(body, &Limits::DEFAULT).unwrap();
+    let mask = Mask::new();
+    let view = StructuralView::new(&tape, &mask);
+    let message = sel(messages()).resolve(&view).unwrap()[0];
+    let mut blocks = messages();
+    blocks.extend([Step::Key("content".into()), Step::Each]);
+    let block = sel(blocks.clone()).resolve(&view).unwrap()[0];
+    blocks.push(Step::Key("text".into()));
+    let text = sel(blocks).resolve(&view).unwrap()[0];
+    (tape, message, block, text)
+}
+
+/// Fresh full review L1 and L3: a strip never removes its own anchor, and never touches masked
+/// content (whose role a codec could not see).
+#[test]
+fn a_strip_keeps_its_anchor_and_masked_content() {
+    use uaos_module_api::HookPoint;
+    let (tape, message, block, text) = one_turn();
+    let plain = Mask::new();
+    let view = StructuralView::new(&tape, &plain);
+    let mut roles = RoleMap::new();
+    roles.assign(&view, &sel(messages()), Role::NewestHumanTurn).unwrap();
+    assert!(roles.may_strip(&view, block, HookPoint::IngressParsed));
+    assert!(
+        !roles.may_strip(&view, message, HookPoint::IngressParsed),
+        "a strip removed its own anchor"
+    );
+    let mut mask = Mask::new();
+    mask.value(text);
+    mask.seal(&tape).unwrap();
+    let masked = StructuralView::new(&tape, &mask);
+    assert!(
+        !roles.may_strip(&masked, block, HookPoint::IngressParsed),
+        "a strip touched masked content"
+    );
+}
+
+#[test]
+fn a_mask_naming_a_node_off_the_tape_refuses_to_seal() {
+    let big = parse(DOC.as_bytes(), &Limits::DEFAULT).unwrap();
+    let mask = Mask::new();
+    let last = StructuralView::new(&big, &mask)
+        .root()
+        .descendants()
+        .last()
+        .unwrap()
+        .id();
+    let small = parse(b"[1]", &Limits::DEFAULT).unwrap();
+    let mut off = Mask::new();
+    off.value(last);
+    assert_eq!(off.seal(&small), Err(uaos_module_api::MaskError));
+}
+
+/// Fresh full review M2: every resolution spends a visit budget, and stops when it is spent.
+#[test]
+fn a_selector_stops_at_its_budget() {
+    let tape = parse(DOC.as_bytes(), &Limits::DEFAULT).unwrap();
+    let mask = Mask::new();
+    let view = StructuralView::new(&tape, &mask);
+    let selector = sel(vec![Step::AnyDepthKey("text".into())]);
+    let mut tight = Visits::new(3);
+    assert_eq!(
+        selector.resolve_within(&view, &mut tight),
+        Err(SelectorError::Budget),
+        "a selector ran past its budget"
+    );
+    let mut ample = Visits::per_call();
+    assert!(selector.resolve_within(&view, &mut ample).is_ok());
+    let nodes = view.root().descendants().count();
+    assert!(
+        Visits::per_call().left() - ample.left() <= nodes,
+        "one AnyDepthKey step visited a node twice"
+    );
+}
+
+/// Fresh full review M3: a usage report names only the dimensions its codec declares, each once.
+#[test]
+fn usage_reports_name_declared_dimensions_once() {
+    let code = |s: &str| Code::new(s).unwrap();
+    let report = UsageReport::new().dim(code("input_tokens"), 10).unwrap();
+    assert!(
+        report.clone().dim(code("input_tokens"), 3).is_err(),
+        "a dimension twice"
+    );
+    assert_eq!(report.check(&[code("input_tokens")]), Ok(()));
+    let words = report.dim(code("secret_word"), 1).unwrap();
+    assert_eq!(
+        words.check(&[code("input_tokens")]),
+        Err(uaos_module_api::CodecError::UndeclaredDimension),
+        "an undeclared billing dimension was accepted"
+    );
+}
+
+#[test]
+fn an_unlisted_method_is_denied() {
+    let endpoints = [EndpointDecl::new(
+        Method::Post,
+        PathPattern::new("/v1/messages").unwrap(),
+        EndpointClass::Governed,
+    )];
+    for method in [Method::Get, Method::Put, Method::Patch, Method::Options, Method::Delete] {
+        assert_eq!(
+            classify(&endpoints, method, "/v1/messages"),
+            EndpointClass::Denied,
+            "{method:?}"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Fresh full review M2: a sealed mask answers exactly as the unsealed one, on every node.
+    #[test]
+    fn sealed_and_unsealed_views_agree(doc in json(), masked in prop::collection::vec((any::<u16>(), any::<bool>()), 0..6)) {
+        let tape = parse(doc.as_bytes(), &Limits::DEFAULT).unwrap();
+        let plain = Mask::new();
+        let ids: Vec<NodeId> = StructuralView::new(&tape, &plain).root().descendants().map(|n| n.id()).collect();
+        let mut mask = Mask::new();
+        for (pick, key) in &masked {
+            if let Some(id) = ids.get(usize::from(*pick) % ids.len().max(1)) {
+                if *key { mask.key(*id) } else { mask.value(*id) }
+            }
+        }
+        let mut sealed = mask.clone();
+        sealed.seal(&tape).unwrap();
+        let (slow, fast) = (StructuralView::new(&tape, &mask), StructuralView::new(&tape, &sealed));
+        for id in &ids {
+            let (a, b) = (slow.node(*id).unwrap(), fast.node(*id).unwrap());
+            prop_assert_eq!(a.key().unwrap(), b.key().unwrap(), "a sealed view disagreed with an unsealed one");
+            prop_assert_eq!(a.text().unwrap(), b.text().unwrap(), "a sealed view disagreed with an unsealed one");
+            prop_assert_eq!(a.number_text(), b.number_text(), "a sealed view disagreed with an unsealed one");
+            prop_assert_eq!(slow.touches_masked(*id), fast.touches_masked(*id));
+        }
     }
 }

@@ -26,9 +26,13 @@ pub enum TextError {
     /// Longer than [`MAX_MODULE_TEXT`].
     #[error("module text is at most {MAX_MODULE_TEXT} bytes")]
     TooLong,
-    /// A control character other than a newline or a tab.
-    #[error("module text holds a control character other than a newline or a tab")]
+    /// A control character other than a newline, a carriage return or a tab.
+    #[error("module text holds a control character other than a newline, a carriage return or a tab")]
     Control,
+    /// A variation selector that follows no base character, or another variation selector: runs
+    /// of them can carry bytes a model decodes and a person cannot see.
+    #[error("module text holds a variation selector that follows no base character")]
+    VariationRun,
     /// A Unicode tag character (U+E0000 to U+E007F): text a model reads and a person cannot see.
     #[error("module text holds a Unicode tag character (U+E0000-U+E007F)")]
     Tag,
@@ -52,9 +56,17 @@ pub const fn is_tag(c: char) -> bool {
     matches!(c, '\u{E0000}'..='\u{E007F}')
 }
 
+/// Whether `c` is a variation selector: U+FE00 to U+FE0F, or U+E0100 to U+E01EF. One after a
+/// base character selects a glyph (an emoji's presentation, an ideographic variant); a run of
+/// them selects nothing a person sees.
+#[must_use]
+pub const fn is_variation_selector(c: char) -> bool {
+    matches!(c, '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
+}
+
 /// Text a module adds to a request: bounded, in any language and kept byte for byte (ADR-0020
-/// rule 2), without control characters but newlines and tabs and without explicit bidirectional
-/// controls. Like every outbound byte, it is detected and final-scanned by the kernel (contract
+/// rule 2), without control characters but newlines, carriage returns and tabs, without
+/// explicit bidirectional controls, tag characters or runs of variation selectors. Like every outbound byte, it is detected and final-scanned by the kernel (contract
 /// §2 rule 4).
 #[derive(Clone, PartialEq, Eq)]
 pub struct ModuleText(String);
@@ -78,6 +90,14 @@ impl ModuleText {
         }
         if text.chars().any(is_tag) {
             return Err(TextError::Tag);
+        }
+        let mut after_base = false;
+        for c in text.chars() {
+            let selector = is_variation_selector(c);
+            if selector && !after_base {
+                return Err(TextError::VariationRun);
+            }
+            after_base = !selector;
         }
         Ok(Self(text))
     }
@@ -457,6 +477,40 @@ pub fn check_decls(manifest: &Manifest, point: Option<HookPoint>, decls: &[Decl]
 pub struct Decls {
     items: Vec<Decl>,
     max: u16,
+}
+
+/// A hook's handle on its call's declarations, handed over by value: the bound is the host's,
+/// and a module can neither swap the collector for a larger one nor keep it past the call.
+pub struct DeclsMut<'d> {
+    decls: &'d mut Decls,
+}
+
+impl<'d> DeclsMut<'d> {
+    /// A handle on `decls` for one call. The host builds it.
+    #[must_use]
+    pub const fn new(decls: &'d mut Decls) -> Self {
+        Self { decls }
+    }
+
+    /// As [`Decls::push`].
+    ///
+    /// # Errors
+    /// [`DeclError`] once the bound is reached.
+    pub fn push(&mut self, decl: Decl) -> Result<(), DeclError> {
+        self.decls.push(decl)
+    }
+
+    /// The declarations so far.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Decl] {
+        self.decls.as_slice()
+    }
+}
+
+impl fmt::Debug for DeclsMut<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&*self.decls, f)
+    }
 }
 
 /// A declaration past the call's bound.

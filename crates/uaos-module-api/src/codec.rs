@@ -49,8 +49,8 @@ impl Role {
     }
 }
 
-/// The roles a codec assigned, by node. A node's roles govern its whole subtree, so a role check
-/// walks the node's ancestors: O(depth).
+/// The roles a codec assigned, by node. A node's roles govern its whole subtree. An edit's check
+/// ([`RoleMap::touching`]) covers the node's ancestors and its whole subtree, a range of ids.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoleMap {
     roles: BTreeMap<NodeId, BTreeSet<Role>>,
@@ -126,8 +126,17 @@ impl RoleMap {
             HookPoint::ToolResult => Role::NewestToolResult,
             _ => return false,
         };
-        let inside_anchor = self.governing(view, id).is_some_and(|roles| roles.contains(&anchor));
+        // Inside the anchor, never the anchor itself: stripping the whole newest turn or tool
+        // result would change what the request is (fresh full review, L1).
+        let inside_anchor = view
+            .node(id)
+            .and_then(|n| n.parent())
+            .and_then(|p| self.governing(view, p.id()))
+            .is_some_and(|roles| roles.contains(&anchor));
+        // Roles come from selectors over the masked view, so masked content may hide what
+        // would have given it a forbidding role: a strip that touches it is refused (L3).
         inside_anchor
+            && !view.touches_masked(id)
             && self
                 .touching(view, id)
                 .is_some_and(|roles| !roles.iter().any(|role| role.forbids_edit()))
@@ -151,6 +160,12 @@ pub enum Method {
     Post,
     /// `DELETE`.
     Delete,
+    /// `PUT`.
+    Put,
+    /// `PATCH`.
+    Patch,
+    /// `OPTIONS`.
+    Options,
 }
 
 /// A path that does not fit [`PathPattern`].
@@ -342,13 +357,26 @@ impl UsageReport {
     /// Adds a dimension.
     ///
     /// # Errors
-    /// The report, unchanged, once it holds 8 dimensions.
+    /// The report, unchanged, once it holds 8 dimensions or already holds `name`.
     pub fn dim(mut self, name: Code, count: u64) -> Result<Self, Self> {
-        if self.dims.len() >= 8 {
+        if self.dims.len() >= 8 || self.dims.iter().any(|(n, _)| *n == name) {
             return Err(self);
         }
         self.dims.push((name, count));
         Ok(self)
+    }
+
+    /// Checks every dimension against the ones the codec declares ([`DialectCodec::dimensions`]):
+    /// a dimension named after anything a response carried never reaches metering or the ledger.
+    ///
+    /// # Errors
+    /// [`CodecError::UndeclaredDimension`] for the first one not declared.
+    pub fn check(&self, declared: &[Code]) -> Result<(), CodecError> {
+        if self.dims.iter().all(|(name, _)| declared.contains(name)) {
+            Ok(())
+        } else {
+            Err(CodecError::UndeclaredDimension)
+        }
     }
 
     /// Its dimensions.
@@ -369,12 +397,20 @@ pub enum CodecError {
     /// A selector failed.
     #[error(transparent)]
     Selector(#[from] SelectorError),
+    /// A usage report names a dimension the codec does not declare.
+    #[error("a usage report names a dimension the codec does not declare")]
+    UndeclaredDimension,
 }
 
 /// A dialect codec (`uaos.adapter/1`): describes, never edits.
 pub trait DialectCodec: Send + Sync + 'static {
-    /// The endpoints it serves, each with its class.
+    /// The endpoints it serves, each with its class. A method or path it does not list is denied
+    /// ([`classify`]).
     fn endpoints(&self) -> &[EndpointDecl];
+
+    /// The billing dimensions its usage reports may name: a fixed set, declared by the codec, never
+    /// read from a response (ADR-0016).
+    fn dimensions(&self) -> &[Code];
 
     /// Assigns roles to a request's parts, through selectors only.
     ///

@@ -6,8 +6,9 @@
 //! A selector resolves to node ids taken from the tape itself, in document order and without
 //! repeats, so it can never name anything outside the view. Its size is bounded (steps, nesting,
 //! keys, the values a predicate lists), and each step visits a node at most once, even when the
-//! nodes selected so far are nested inside one another. Resolving therefore costs
-//! O(steps × nodes), times a predicate's bounded cost, whatever the document's shape.
+//! nodes selected so far are nested inside one another. Each visit costs O(log ranges) against a
+//! sealed mask. Every resolution spends a [`Visits`] budget, and the host gives one budget to
+//! all of a module call's selectors, so the kernel's cost per call is bounded whatever is asked.
 //!
 //! **Masked content is unknown, never probed.** A masked string equals no value and a masked key
 //! is no name, so a predicate's answer is the same whatever the masked text is.
@@ -27,6 +28,39 @@ pub const MAX_PREDICATE_DEPTH: usize = 4;
 pub const MAX_PREDICATE_VALUES: usize = 32;
 /// The longest key or value a selector names, in bytes.
 pub const MAX_SELECTOR_TEXT: usize = 256;
+/// The node visits one resolution may make, and the budget the host gives all of one call's
+/// selectors together (contract §7).
+pub const MAX_VISITS: usize = 1 << 20;
+
+/// A budget of node visits. Resolving a selector spends one visit per node it examines, and stops
+/// with [`SelectorError::Budget`] when the budget is spent; for a module's call that is a strike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Visits(usize);
+
+impl Visits {
+    /// A budget of `n` visits.
+    #[must_use]
+    pub const fn new(n: usize) -> Self {
+        Self(n)
+    }
+
+    /// The budget for one call's selectors, or one resolution: [`MAX_VISITS`].
+    #[must_use]
+    pub const fn per_call() -> Self {
+        Self(MAX_VISITS)
+    }
+
+    /// The visits left.
+    #[must_use]
+    pub const fn left(self) -> usize {
+        self.0
+    }
+
+    fn spend(&mut self, n: usize) -> Result<(), SelectorError> {
+        self.0 = self.0.checked_sub(n).ok_or(SelectorError::Budget)?;
+        Ok(())
+    }
+}
 
 /// A selector that is too long, nests too deep, or names an empty or overlong key or value.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -44,6 +78,9 @@ pub enum SelectorError {
     /// More than [`MAX_PREDICATE_VALUES`] values in one predicate.
     #[error("a predicate lists at most {MAX_PREDICATE_VALUES} values")]
     TooManyValues,
+    /// The visit budget ran out ([`Visits`]).
+    #[error("the selector ran past its visit budget")]
+    Budget,
     /// A key or string in the view that does not decode, which a tape never holds.
     #[error("the view holds content that does not decode")]
     Undecodable,
@@ -107,7 +144,8 @@ impl Predicate {
         }
     }
 
-    fn matches(&self, node: &ViewNode<'_, '_>) -> Result<bool, SelectorError> {
+    fn matches(&self, node: &ViewNode<'_, '_>, visits: &mut Visits) -> Result<bool, SelectorError> {
+        visits.spend(1)?;
         if node.kind() != Kind::Object {
             return Ok(false);
         }
@@ -129,7 +167,7 @@ impl Predicate {
                 Some(m) if m.kind() == Kind::String => Ok(true),
                 Some(m) if m.kind() == Kind::Array => {
                     for item in m.children() {
-                        if element.matches(&item)? {
+                        if element.matches(&item, visits)? {
                             return Ok(true);
                         }
                     }
@@ -235,32 +273,54 @@ impl Selector {
         &self.steps
     }
 
-    /// The nodes it selects in `view`: ids from the tape itself, in document order, no repeats.
+    /// The nodes it selects in `view`: ids from the tape itself, in document order, no repeats,
+    /// within one [`Visits::per_call`] budget.
     ///
     /// # Errors
-    /// [`SelectorError::Undecodable`] for content that does not decode, which a tape never holds.
+    /// [`SelectorError::Budget`] past the budget; [`SelectorError::Undecodable`] for content that
+    /// does not decode, which a tape never holds.
     pub fn resolve(&self, view: &StructuralView<'_, '_>) -> Result<Vec<NodeId>, SelectorError> {
+        self.resolve_within(view, &mut Visits::per_call())
+    }
+
+    /// As [`Selector::resolve`], spending `visits`: the host passes one budget for all of a
+    /// module call's selectors, so the kernel's cost per call is bounded whatever the module asks.
+    ///
+    /// # Errors
+    /// As [`Selector::resolve`].
+    pub fn resolve_within(
+        &self,
+        view: &StructuralView<'_, '_>,
+        visits: &mut Visits,
+    ) -> Result<Vec<NodeId>, SelectorError> {
         let mut current: BTreeSet<NodeId> = BTreeSet::from([view.root().id()]);
         for step in &self.steps {
-            let nodes = current.iter().filter_map(|id| view.node(*id));
+            let nodes: Vec<ViewNode<'_, '_>> = current.iter().filter_map(|id| view.node(*id)).collect();
             current = match step {
                 Step::Key(key) => {
                     let mut next = BTreeSet::new();
-                    for node in nodes.filter(|n| n.kind() == Kind::Object) {
+                    for node in nodes.iter().filter(|n| n.kind() == Kind::Object) {
+                        visits.spend(1)?;
                         if let Some(m) = node.member(key).map_err(|_| SelectorError::Undecodable)? {
                             next.insert(m.id());
                         }
                     }
                     next
                 }
-                Step::Each => nodes
-                    .filter(|n| n.kind().is_container())
-                    .flat_map(|n| n.children().map(|c| c.id()).collect::<Vec<_>>())
-                    .collect(),
+                Step::Each => {
+                    let mut next = BTreeSet::new();
+                    for node in nodes.iter().filter(|n| n.kind().is_container()) {
+                        for child in node.children() {
+                            visits.spend(1)?;
+                            next.insert(child.id());
+                        }
+                    }
+                    next
+                }
                 Step::Where(predicate) => {
                     let mut kept = BTreeSet::new();
-                    for node in nodes {
-                        if predicate.matches(&node)? {
+                    for node in &nodes {
+                        if predicate.matches(node, visits)? {
                             kept.insert(node.id());
                         }
                     }
@@ -271,12 +331,13 @@ impl Selector {
                     // Nodes come in document order: one inside a subtree already walked adds
                     // nothing, so it is skipped and no node is visited twice.
                     let mut walked_to: Option<NodeId> = None;
-                    for node in nodes {
+                    for node in &nodes {
                         if walked_to.is_some_and(|end| node.id() < end) {
                             continue;
                         }
                         walked_to = Some(node.subtree_end());
                         for below in node.descendants() {
+                            visits.spend(1)?;
                             if below.key_is(key).map_err(|_| SelectorError::Undecodable)? {
                                 found.insert(below.id());
                             }

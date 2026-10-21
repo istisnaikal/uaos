@@ -59,16 +59,24 @@ waits for P5 sidecars.
    (`ModuleText`) is bounded, detected and final-scanned like any outbound byte. It refuses
    control characters other than newline, carriage return and tab; the explicit
    bidirectional controls U+202A–U+202E and U+2066–U+2069 (ADR-0020 rule 5); and the Unicode
-   tag characters U+E0000–U+E007F, which a model reads and a person cannot see.
+   tag characters U+E0000–U+E007F, which a model reads and a person cannot see; and a
+   variation selector that follows no base character (a run of them encodes bytes nobody
+   sees). Declarations reach the host through a `DeclsMut` handle, by value, so a module
+   cannot swap the collector for a larger one.
 5. **Redacted by default.** A module sees the redacted structural view. Detection scans keys
    as well as values, so the mask covers strings, numbers and object keys. A masked value or
    key reads as masked, equals no value, matches no name and is never found by name, so no
    predicate's answer depends on masked text. Masking a container masks everything inside
-   it, so a finding placed on the wrong node fails closed. A finding the host cannot place on
-   a value or a key refuses the view. A module's `Strip` selector is resolved over the masked
+   it, so a finding placed on the wrong node fails closed. Structure stays visible: kinds,
+   counts and nesting, inside a masked container too; findings are strings, numbers and keys.
+   A finding the host cannot place on a value or a key refuses the view, and so does one that
+   names a node off the tape (`Mask::seal`). A module's `Strip` selector is resolved over the masked
    view, never over the raw tape. **Frames and errors** reach a hook as the provider sent
    them: before rehydration (ADR-0017), never rehydrated. A secret masked on the way out
    therefore never comes back to a module on the way in. No raw view exists at RC-1.
+   **Admission is a snapshot.** The host admits a module whole (`KernelOffer::admit_module`)
+   and checks every call against the manifest it admitted (`Admitted::manifest`), never a
+   later `Module::manifest`, so a module cannot grow its manifest after admission.
 6. **Pocket isolation, for what the socket holds.** A module's state, events and grants are
    per pocket (§5), and nothing the socket holds crosses pockets except through a
    cross-pocket grant (§6.2). A module's own fields are outside this guarantee. A module
@@ -146,7 +154,9 @@ ADR-0010 Decision 7 uses the same path.
 | `response.post` | observe after settle | metadata | 5 ms, off the hot path | ignore and count |
 | `error.translate` | additive annotation; upstream bytes stay identical. **Observe only in this draft:** the annotation's declaration is added with the host (PR-8) | error + metadata | 200 µs | kernel default |
 
-The pre-egress ceilings sum to 1.3 ms, inside the 2 ms hook budget. **Kernel rule:** at risk tier
+The "On failure" column is the kernel's floor: a manifest's `OnFailure::Deny` can make a
+pre-egress point stricter, and is refused at load where nothing is left to deny
+(`stream.observe`, `response.post`, `error.translate`; `point_unavailable`). The pre-egress ceilings sum to 1.3 ms, inside the 2 ms hook budget. **Kernel rule:** at risk tier
 2 or more, any veto that fails or times out denies, whatever the manifest says.
 
 **Declarations** (`Decl`, closed, `#[non_exhaustive]`, at most `max_decls` per call):
@@ -179,7 +189,12 @@ never shared between pockets (C-18).
   for another (which would clear the mark below and raise its bound) nor keep the handle. Each
   change is atomic, and a refused one marks the state `exceeded`. The host runs every call on a copy and keeps the copy only if
   it is not exceeded and its declarations pass. Otherwise the call is a strike
-  (`state_exceeded`), and the state is left as it was before the call. The host runs at most
+  (`state_exceeded`), and the state is left as it was before the call. Only these two, a
+  static strike from `check_decls` and `state_exceeded`, discard a call's state changes. A
+  refusal only the host can make (`not_own_child`, `unknown_candidate`, a quota, a rate
+  limit) drops that declaration and counts a strike but keeps the state, so `on_event` stays
+  a function of the state, the event and the manifest, and a replay rebuilds what the live run
+  kept. The host runs at most
   one call of a module for one pocket at a time, so no two calls work on copies of the same
   state and none of their changes is lost. A cursor advances only on its own pocket's
   events.
@@ -248,7 +263,8 @@ splices.
 | `endpoints()` | `&[EndpointDecl]` | method, path pattern (path only, never the query; a final `*` matches whole segments), class `governed`, `metadata` or `denied` (D-28). A path that is not canonical (percent-encoding, a backslash, an empty or dot segment) matches no pattern. `classify` gives a request its class: `denied` when the path is not canonical or no endpoint matches, and the most restrictive class (`denied`, then `governed`, then `metadata`) when several match |
 | `roles(&StructuralView, &mut RoleMap)` | `Result<(), CodecError>` | assigns the roles of ADR-0014 through selectors only; a codec never computes a byte offset |
 | `frame(&SseEvent)` | `FrameKind` | classifies a stream frame: content, usage, ping, error, end |
-| `usage(&StructuralView)` | `Option<UsageReport>` | the billing dimensions the response reports (ADR-0016, M2) |
+| `dimensions()` | `&[Code]` | the billing dimensions its usage reports may name: a fixed set, never read from a response |
+| `usage(&StructuralView)` | `Option<UsageReport>` | the billing dimensions the response reports (ADR-0016, M2), each declared and named once; the host refuses a report naming another (`UsageReport::check`) |
 
 **`StructuralView`** is a read-only view over the `uaos-json` tape of the request, with the
 detection overlay (`Mask`): values and keys holding a finding read as `Masked` (§2 rule 5).
@@ -257,8 +273,15 @@ predicates "member is one of", "member is not one of" and "string, or an array w
 matching"; a `last` modifier. Growing it needs ADR-0014 amended. A selector resolves to node ids
 on the tape. Roles are kept by node id. An edit's role check covers the node's ancestors and
 its whole subtree, a contiguous range of ids (`RoleMap::touching`), so an edit that encloses a
-forbidden role is refused. Each step of a selector visits a node at most once, so resolving
-costs O(steps × nodes), whatever the document's shape.
+forbidden role is refused. A strip may remove what lies inside its anchor, never the anchor
+itself, and never anything that touches masked content: a codec assigns roles through the
+masked view, so masked content may hide a forbidding role (`RoleMap::may_strip`).
+
+**Cost.** Each step visits a node at most once, and each visit is O(log ranges) against a
+sealed mask, the host seals before it builds a view. Every resolution spends a `Visits`
+budget; the host gives one budget (`MAX_VISITS`) to all of a module call's selectors, and
+running out is a strike (`bound_exceeded`), so the kernel's cost per call is bounded whatever
+the module asks.
 
 ## 8. Kernel contract additions (all additive)
 
@@ -283,7 +306,9 @@ freeze, so the contract still freezes with the rest.
   constructors: `OpMeta`, `Candidate`, `EventView`, `SseEvent`.
 - Types a module builds are built through builders or constructors and are
   `#[non_exhaustive]` where they carry fields: `Manifest`, `ChildOpRequest`, `ModuleText`,
-  `EventDecl`, `GrantDecl`, `EndpointDecl`, `ModuleVersion`.
+  `EventDecl`, `GrantDecl`, `EndpointDecl`, `ModuleVersion`. Handles a hook receives
+  (`StateMut`, `DeclsMut`) come by value and end with the call. `OnFailure` is
+  `#[non_exhaustive]`.
 - Output enums (`Decl`, `KernelFeature`, `FrameKind`) are `#[non_exhaustive]` and grow additively.
 - Paper modules (PR-10, test-only) prove that C-14, C-16, C-24, C-35, C-44, C-45, C-49, C-50, C-51,
   C-52 and C-61 fit `module/1` without a breaking change.
@@ -360,6 +385,14 @@ make the `language-neutrality` gate active (ADR-0020):
 | `path-parameter-canonical` | `;` counts as canonical | `path_patterns_match_canonical_paths_by_segment` |
 | `module-cancel-without-feature` | `CancelOp` without `child_operations` passes | `cancelling_a_child_needs_child_operations` |
 | `chunk-lost-drops-agent` | a `chunk.lost` record drops the agent | `a_lost_payload_record_names_the_agent_of_the_record_it_reports` |
+| `module-manifest-reread` | the host re-reads `manifest()` | `a_module_is_checked_against_its_admitted_manifest` |
+| `view-sealed-mask-drifts` | sealing drops masked containers | `sealed_and_unsealed_views_agree` |
+| `strip-removes-anchor` | a strip may remove its anchor | `a_strip_keeps_its_anchor_and_masked_content` |
+| `strip-touches-masked` | a strip may touch masked content | `a_strip_keeps_its_anchor_and_masked_content` |
+| `selector-unbudgeted` | the visit budget never runs out | `a_selector_stops_at_its_budget` |
+| `usage-undeclared-dimension` | undeclared dimensions pass | `usage_reports_name_declared_dimensions_once` |
+| `module-text-accepts-variation-run` | variation-selector runs pass | `module_text_refuses_variation_runs` |
+| `failure-deny-after-the-fact` | `Deny` loads at an observe-after point | `a_failure_cannot_deny_after_the_fact` |
 
 `schema-breaking-change` is re-proven over the new schemas.
 
@@ -393,6 +426,9 @@ make the `language-neutrality` gate active (ADR-0020):
   - a replay discards every declaration, as `a_replay_rebuilds_state_and_declares_nothing`
     shows for the procedure;
   - calls of one module for one pocket never overlap;
+  - a host-side refusal keeps the call's state (§5), so replay rebuilds the live state;
+  - every call is checked against the admitted manifest snapshot;
+  - one `Visits` budget per call, a strike when spent;
   - `not_own_child` and `unknown_candidate` strike what they name.
 - `[CONSCIOUS ASSUMPTION]` Event values are `i64`. A module that is wrong could still encode
   data in numbers. The trust model is trusted code with minimized authority, not hostile
