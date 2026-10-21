@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use proptest::prelude::*;
-use uaos_contracts::budget::IdempotencyKey;
+use uaos_contracts::budget::{BudgetTxKind, IdempotencyKey};
 use uaos_contracts::event::{Actor, Durability, EventEnvelope, EventType, Metadata, types};
 use uaos_contracts::id::{CorrelationId, OperationId, PoolId, ReservationId, TypedId};
 use uaos_contracts::money::NanoUsd;
@@ -125,6 +125,8 @@ enum Fate {
     Failed,
     /// A previous boot already made it indeterminate.
     AlreadyIndeterminate,
+    /// Refused before it ran: the reservation released, the Operation denied.
+    Denied,
 }
 
 /// Writes a journal in which each Operation reserved `RESERVED` and then met its fate. An open
@@ -163,6 +165,11 @@ fn build(world: &World, fates: &[Fate], version: u64) {
             .unwrap();
         match fate {
             Fate::Open => drop(held.begin()),
+            Fate::Denied => {
+                let mut sink = JournalSink::new(&mut journal, correlation(), Some(operation), ConfigVersion(version));
+                ledger.release(&mut sink, held, &Actor::System).unwrap();
+                journal.append(op_event(operation, types::OP_DENIED, version)).unwrap();
+            }
             Fate::Committed | Fate::Failed | Fate::AlreadyIndeterminate => {
                 let mut sink = JournalSink::new(&mut journal, correlation(), Some(operation), ConfigVersion(version));
                 ledger
@@ -238,6 +245,7 @@ fn open_intents_become_indeterminate_once() {
             Fate::Failed,
             Fate::AlreadyIndeterminate,
             Fate::Open,
+            Fate::Denied,
         ],
         1,
     );
@@ -248,7 +256,7 @@ fn open_intents_become_indeterminate_once() {
         "an open intent was not made indeterminate, or a closed one was"
     );
     let envelopes = world.envelopes();
-    for (n, expected) in [(0, 1), (1, 0), (2, 0), (3, 1), (4, 1)] {
+    for (n, expected) in [(0, 1), (1, 0), (2, 0), (3, 1), (4, 1), (5, 0)] {
         assert_eq!(
             count(&envelopes, &types::OP_INDETERMINATE, op(n)),
             expected,
@@ -259,11 +267,20 @@ fn open_intents_become_indeterminate_once() {
         .iter()
         .find(|e| e.event_type == types::OP_INDETERMINATE && e.operation_id == Some(op(0)))
         .unwrap();
-    let reason = made
-        .payload_inline
-        .as_ref()
-        .and_then(|p| p.as_value().get("reason").cloned());
-    assert_eq!(reason, Some(serde_json::json!(CRASH_RECOVERY)));
+    // V1 review M7: the record carries the effect the intent declared, and says it may have
+    // happened.
+    assert_eq!(
+        made.side_effect_class,
+        SideEffectClass::External,
+        "the indeterminate record hid the intent's effect"
+    );
+    let payload = made.payload_inline.as_ref().unwrap().as_value();
+    assert_eq!(payload["reason"], serde_json::json!(CRASH_RECOVERY));
+    assert_eq!(
+        payload["may_have_taken_effect"],
+        serde_json::json!(true),
+        "the indeterminate record does not say the effect may have happened"
+    );
     // A second boot finds nothing open.
     drop(booted);
     world.fs.crash();
@@ -283,7 +300,14 @@ fn an_open_reservation_settles_in_full_and_is_never_released() {
     build(&world, &[Fate::Open, Fate::Committed], 1);
     let booted = world.boot(&config(1)).unwrap();
     assert_eq!(booted.report.settled_estimated, 1, "boot left an open reservation open");
-    assert_eq!(booted.report.stuck, 0, "recovery left an item stuck");
+    assert!(booted.report.stuck.is_empty(), "recovery left an item stuck");
+    // V1 review L3: settled as estimated, not as a reported cost.
+    let estimated = entries_from_journal(&world.records())
+        .unwrap()
+        .iter()
+        .filter(|tx| tx.kind == BudgetTxKind::Settle && tx.estimated)
+        .count();
+    assert_eq!(estimated, 1, "the open reservation was not settled as estimated");
     let state = booted.ledger.state().pool(pool()).unwrap();
     assert_eq!(
         (state.available, state.held, state.spent),
@@ -330,6 +354,27 @@ fn a_journaled_stop_boots_stopped_and_recovery_still_runs() {
         booted.report.settled_estimated, 1,
         "a stopped kernel left its ledger open"
     );
+    assert!(!booted.report.stop_may_be_lost, "a journaled stop was called lost");
+}
+
+#[test]
+fn a_boot_after_a_crash_says_a_stop_may_be_lost() {
+    // V1 review M6 (runtime contract §3 rule 3): booting running with work left open, a stop
+    // engaged just before the crash may not have been journaled.
+    let world = World::new();
+    build(&world, &[Fate::Open], 1);
+    let booted = world.boot(&config(1)).unwrap();
+    assert!(
+        booted.report.stop_may_be_lost,
+        "a crash that may have lost a stop was not said so"
+    );
+    drop(booted);
+    world.fs.crash();
+    let clean = world.boot(&config(1)).unwrap();
+    assert!(
+        !clean.report.stop_may_be_lost,
+        "a boot with nothing open claimed a lost stop"
+    );
 }
 
 // ── The boot record (§2 step 5) ─────────────────────────────────────────────────────────────
@@ -338,6 +383,7 @@ fn a_journaled_stop_boots_stopped_and_recovery_still_runs() {
 fn every_boot_is_explained_once() {
     let world = World::new();
     build(&world, &[Fate::Open, Fate::Committed], 3);
+    let read = world.records().len();
     let booted = world.boot(&config(3)).unwrap();
     let envelopes = world.envelopes();
     let booted_records: Vec<&EventEnvelope> = envelopes
@@ -346,24 +392,65 @@ fn every_boot_is_explained_once() {
         .collect();
     assert_eq!(booted_records.len(), 1, "a boot went unexplained");
     let payload = booted_records[0].payload_inline.as_ref().unwrap().as_value();
+    // V1 review L3, L4: against what the fixture holds, not the report itself; 64-bit counters as
+    // canonical decimal strings.
     for (field, value) in [
-        ("indeterminate", serde_json::json!(1)),
-        ("settled_estimated", serde_json::json!(booted.report.settled_estimated)),
-        ("completed", serde_json::json!(booted.report.completed)),
-        (
-            "transfers_completed",
-            serde_json::json!(booted.report.transfers_completed),
-        ),
-        ("stuck", serde_json::json!(0)),
+        ("records", serde_json::json!(read.to_string())),
+        ("indeterminate", serde_json::json!("1")),
+        ("settled_estimated", serde_json::json!("1")),
+        ("completed", serde_json::json!("0")),
+        ("transfers_completed", serde_json::json!("0")),
+        ("stuck", serde_json::json!("0")),
         ("stopped", serde_json::json!(false)),
-        ("config_version", serde_json::json!(3)),
+        ("stop_may_be_lost", serde_json::json!(true)),
+        ("config_version", serde_json::json!("3")),
     ] {
         assert_eq!(payload[field], value, "the boot record miscounts {field}");
     }
+    assert_eq!(booted.report.records, u64::try_from(read).unwrap());
+}
+
+// ── Refusals and failures (§2 step 0, the error codes) ──────────────────────────────────────
+
+#[test]
+fn records_that_are_not_the_journals_are_refused_before_anything_is_written() {
+    // V1 review L2: a retry with the records of an earlier attempt would repeat its writes.
+    let world = World::new();
+    build(&world, &[Fate::Open], 1);
+    let mut journal = world.open();
+    let records = world.records();
+    assert!(boot(&mut journal, &records, &config(1), correlation()).is_ok());
+    let after = world.records().len();
+    let retried = boot(&mut journal, &records, &config(1), correlation());
+    assert!(
+        matches!(retried, Err(BootError::StaleRecords { .. })),
+        "boot wrote over records that are not the journal's"
+    );
     assert_eq!(
-        payload["records"],
-        serde_json::json!(booted.report.records),
-        "the boot record does not count what boot read"
+        retried.err().unwrap().code(),
+        uaos_contracts::error::codes::RUNTIME_BOOT_RECORDS_STALE
+    );
+    assert_eq!(world.records().len(), after, "a refused boot wrote");
+}
+
+#[test]
+fn a_journal_failure_during_recovery_keeps_its_code() {
+    // V1 review M1: a full disk while the ledger recovers is a journal failure, not an
+    // inconsistent ledger.
+    let world = World::new();
+    build(&world, &[Fate::Open], 1);
+    let mut journal = world.open();
+    let records = world.records();
+    world.fs.set_capacity(Some(0));
+    let error = boot(&mut journal, &records, &config(1), correlation()).err().unwrap();
+    assert!(
+        matches!(error, BootError::Ledger(_)),
+        "the failure did not come from the ledger's recovery: {error}"
+    );
+    assert_eq!(
+        error.code(),
+        uaos_contracts::error::codes::JOURNAL_WRITE_FAILED,
+        "a journal failure during recovery was reported as a ledger inconsistency"
     );
 }
 
@@ -373,7 +460,14 @@ fn every_boot_is_explained_once() {
 /// journal holds.
 fn outcome(world: &World) -> ((NanoUsd, NanoUsd, NanoUsd), BTreeMap<OperationId, usize>) {
     let records = world.records();
-    let ledger = Ledger::replay(&entries_from_journal(&records).unwrap()).unwrap();
+    let entries = entries_from_journal(&records).unwrap();
+    // V1 review L3: replay absorbs an identical entry under the same key, so count them.
+    let mut keys: BTreeMap<&IdempotencyKey, usize> = BTreeMap::new();
+    for tx in &entries {
+        *keys.entry(&tx.idempotency_key).or_insert(0) += 1;
+    }
+    assert!(keys.values().all(|n| *n == 1), "a ledger entry was journaled twice");
+    let ledger = Ledger::replay(&entries).unwrap();
     let state = ledger.state().pool(pool()).unwrap();
     let mut indeterminate = BTreeMap::new();
     for record in &records {
@@ -393,6 +487,7 @@ fn fates() -> impl Strategy<Value = Vec<Fate>> {
             Fate::Committed,
             Fate::Failed,
             Fate::AlreadyIndeterminate,
+            Fate::Denied,
         ]),
         1..6,
     )
@@ -461,7 +556,7 @@ proptest! {
             world.fs.crash();
             let booted = world.boot(&config(1));
             prop_assert!(booted.is_ok(), "the boot after a crash at append {} failed", n);
-            prop_assert_eq!(booted.unwrap().report.stuck, 0, "recovery left an item stuck");
+            prop_assert!(booted.unwrap().report.stuck.is_empty(), "recovery left an item stuck");
             world.fs.crash();
             prop_assert_eq!(outcome(&world), expected.clone(), "a crash during boot did not converge");
         }

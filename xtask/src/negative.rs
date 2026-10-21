@@ -3267,7 +3267,7 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // Runtime boot contract (PR-6b): §2 step 3, open reservations are settled at boot, never left open or released.
-            seed: replace("crates/uaos-runtime/src/boot.rs", "    let recovery = if ledger.needs_recovery() {\n", "    let recovery = if false && ledger.needs_recovery() {\n"),
+            seed: replace("crates/uaos-runtime/src/boot.rs", "        ledger.recover(&mut sink, &Actor::System).map_err(BootError::Ledger)?\n", "        { let _ = &mut sink; uaos_ledger::Recovery::default() }\n"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-runtime", "--test", "boot", "an_open_reservation_settles_in_full_and_is_never_released"],
@@ -3291,7 +3291,7 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // Runtime boot contract (PR-6b): §3, a crash after the ledger's entries still closes every intent on the next boot. Only the convergence property sees it.
-            seed: replace("crates/uaos-runtime/src/boot.rs", "    let indeterminate = open_intents(records);\n", "    let indeterminate = if recovery.settled_estimated + recovery.completed > 0 { open_intents(records) } else { Vec::new() };\n"),
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    let intents = open_intents(records);\n", "    let intents = if recovery.settled_estimated + recovery.completed > 0 { open_intents(records) } else { Vec::new() };\n"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-runtime", "--test", "boot", "a_crash_during_boot_converges"],
@@ -3321,6 +3321,66 @@ The journal is tamper-proof.
                 args: &["test", "-p", "uaos-runtime", "--test", "boot", "every_boot_is_explained_once"],
             },
             expect: "a boot went unexplained",
+        },
+        Case {
+            id: "boot-denied-reopened",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 4 and V1 review M2, a denied Operation is left alone.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    &types::OP_DENIED,\n", "    &types::OP_FAILED,\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "open_intents_become_indeterminate_once"],
+            },
+            expect: "an open intent was not made indeterminate, or a closed one was",
+        },
+        Case {
+            id: "boot-ledger-error-erased",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): V1 review M1, a journal failure in recovery keeps its code.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "            Self::Ledger(error) => error.code(),\n", "            Self::Ledger(_) => codes::BUDGET_LEDGER_INCONSISTENT,\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "a_journal_failure_during_recovery_keeps_its_code"],
+            },
+            expect: "a journal failure during recovery was reported as a ledger inconsistency",
+        },
+        Case {
+            id: "boot-intent-effect-dropped",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 4 and V1 review M7, the record carries the intent's effect.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "indeterminate_draft(*operation, *effect, correlation, config.version())", "indeterminate_draft(*operation, SideEffectClass::None, correlation, config.version())"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "open_intents_become_indeterminate_once"],
+            },
+            expect: "the indeterminate record hid the intent's effect",
+        },
+        Case {
+            id: "boot-stop-loss-unexplained",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 5 and V1 review M6, a boot after a crash says a stop may be lost.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    let stop_may_be_lost = stop_state == BootState::Running && crashed;\n", "    let stop_may_be_lost = stop_state == BootState::Running && crashed && false;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "a_boot_after_a_crash_says_a_stop_may_be_lost"],
+            },
+            expect: "a crash that may have lost a stop was not said so",
+        },
+        Case {
+            id: "boot-stale-records-accepted",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 0 and V1 review L2, records that are not the journal's are refused.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "        && records_end != journal.next_seq()\n", "        && records_end != journal.next_seq() && false\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "records_that_are_not_the_journals_are_refused_before_anything_is_written"],
+            },
+            expect: "boot wrote over records that are not the journal's",
         },
         Case {
             id: "relay-content-json-cuts",

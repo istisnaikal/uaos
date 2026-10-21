@@ -33,6 +33,17 @@ records, closes what a crash left open, and explains the boot in one record.
   keeps the first entry and raises an alarm.
 - **PR-7, once it journals `op.executing`:** strict mode's release of provably unsent
   reservations (D-6).
+- **PR-6c, the one-record intent (D-6, ADR-0003 rule 4).** Today an intent is two records, a
+  `budget.entry` reserve and `op.reserved_intent`, and boot reads both. A crash between them
+  charges a reservation whose Operation journaled no intent, which T6 accepts. PR-6c's single
+  record changes both of boot's inputs, and amends this contract (V1 review L8).
+- **PR-6c, the startup sequence.** `Journal::open` verifies the whole journal and drops the
+  records, then the caller reads them again for boot: about a third of the measured boot at
+  50,000 records (§7). The state actor opens the journal and keeps what it verified once.
+  PR-6c also brings the payload-coordinated open (`Journal::open_with_payloads`) whose cost
+  ADR-0018's appendix owes (§5).
+- **PR-6c, a clean shutdown record.** Until one exists, a crash with nothing open looks like a
+  clean exit (§2 step 5).
 
 These are a reversible split of the approved PR-6 row (Move 1 plan §7) into units small enough to
 review (D-31).
@@ -43,6 +54,11 @@ review (D-31).
 first), the configuration snapshot the process starts with, and the correlation id its records
 carry. It runs these steps in this order:
 
+0. **The records are the journal's, before anything is written.** Their last record must be the
+   journal's last: the next sequence number after it is the journal's next. Otherwise boot
+   refuses with `RUNTIME_BOOT_RECORDS_STALE`. A retry with the records of an earlier attempt
+   would repeat its writes (V1 review L2). An empty slice is not checked: a journal whose
+   verified records are all shredded can be empty while its sequence goes on.
 1. **Configuration drift, before anything is written.**
    - The highest `config_version` any record carries is the last configuration the kernel used.
    - A configured version below it means the configuration went back without a record of it, so
@@ -50,25 +66,38 @@ carry. It runs these steps in this order:
    - `[CONSCIOUS ASSUMPTION]` Refusal is the default. The way forward is a configuration
      published with a higher version. An explicit downgrade with an approval is M3's (the
      write side).
+   - `[CONSCIOUS ASSUMPTION]` An equal version with different content is not detected: no
+     snapshot digest is journaled yet (V1 review L7). The write side, M3, publishes every change
+     under a new version and journals its digest.
 2. **The stop.** `boot_state(records)` decides it (runtime contract §3 rule 4), and
    `Stop::booted` holds it. A stopped kernel boots stopped: recovery still runs, so the
    journal is closed honestly, but admission refuses everything until a human resumes it (M3).
 3. **The ledger.** The `budget.entry` records replay into a `Ledger` (`entries_from_journal`,
-   `Ledger::replay`). If it needs recovery, `Ledger::recover` closes it, journaling its entries
-   through the ledger's `JournalSink` with actor `system`:
+   `Ledger::replay`). A replayed ledger always runs `Ledger::recover`, which closes what is open,
+   journaling its entries through the ledger's `JournalSink` with actor `system`:
    - an open reservation settles at its full amount, estimated, and is never released: its
      Operation may have spent it;
    - a partly settled one is completed;
    - a half-recorded transfer is completed.
 
-   What it cannot close is counted as stuck (S2), and the ledger then keeps refusing new work.
+   What it cannot close is stuck, an S2 condition for the operator. The boot record counts the
+   stuck items, the report keeps why each stayed open (in memory only), and the ledger refuses
+   new work with `BUDGET_RECOVERY_REQUIRED` until a later recovery closes them. A journal
+   failure while recovering keeps its own code (`JOURNAL_WRITE_FAILED`), not
+   `BUDGET_LEDGER_INCONSISTENT` (V1 review M1).
 4. **Open intents.**
    - An Operation whose last journaled state is `Reserved` has an intent and no outcome.
    - Boot moves it to `Indeterminate` (`Transition::CrashRecovered`) and journals
      `op.indeterminate` for it: critical, with the reason `crash_recovery`.
-   - Neither success nor failure is assumed (red line 3). The explanation says the request may
-     have reached the provider.
-5. **The boot record.** One `kernel.booted` record, critical. Its inline payload counts:
+   - The record carries the side-effect class the intent declared, not compensable, and the
+     payload `{"reason": "crash_recovery", "may_have_taken_effect": true}` (V1 review M7).
+     Neither success nor failure is assumed (red line 3): the request may have reached the
+     provider.
+   - Once an Operation has an outcome, a later intent does not reopen it. Only an inconsistent
+     journal holds one, and reopening would make a committed Operation indeterminate (V1 review
+     L1).
+5. **The boot record.** One `kernel.booted` record, critical. Its inline payload counts, each
+   count a canonical decimal string (the wire rule for 64-bit counters):
    - the records read;
    - the Operations made indeterminate;
    - the reservations settled as estimated;
@@ -76,9 +105,13 @@ carry. It runs these steps in this order:
    - the transfers completed;
    - the items left stuck;
    - whether the kernel booted stopped;
+   - whether a stop may have been lost (`stop_may_be_lost`). The kernel boots running, and work
+     left open shows a crash, so a stop engaged just before it may not have been journaled
+     (runtime contract §3 rule 3). A crash with nothing open looks like a clean exit until
+     PR-6c journals one;
    - the configuration version.
 
-   A boot therefore never goes unexplained.
+   Every complete boot is explained.
 
 `boot` returns the `Stop`, the `Ledger` and a `BootReport` of the same counts.
 
@@ -90,8 +123,9 @@ duplicating anything:
   once per Operation.
 - The ledger's recovery entries make the reservations they close settled, so a second replay
   finds nothing open.
-- A `kernel.booted` from an interrupted boot is not repeated; the next complete boot writes its
-  own.
+- `kernel.booted` is boot's last append, so an interrupted boot writes none. Its recovery records
+  stand, each with its reason, and the next complete boot writes its own record, counting only
+  what it closed itself (V1 review L6).
 
 The property in §5 proves convergence over crashes at every append.
 
@@ -103,39 +137,52 @@ The property in §5 proves convergence over crashes at every append.
 ## 5. Proof obligations
 
 **Tests:**
+- **The records:** records that are not the journal's are refused with
+  `RUNTIME_BOOT_RECORDS_STALE`, and nothing is appended.
 - **Drift:** a configured version below the journal's is refused with `CONFIG_DRIFT`, and
   nothing is appended. An equal or higher one boots.
+- **Error codes:** a journal failure during the ledger's recovery is `JOURNAL_WRITE_FAILED`.
 - **The stop:** a journaled stop boots stopped, and recovery still closes the ledger and the
-  intents.
-- **The ledger:** an open reservation settles at its full amount, estimated, and no money is
-  released.
+  intents. A boot after a crash with work open says a stop may have been lost; one with
+  nothing open does not.
+- **The ledger:** an open reservation settles at its full amount, with an estimated settle
+  entry, and no money is released.
 - **Intents:**
   - every open intent becomes `Indeterminate` exactly once;
   - an Operation that committed, failed, was denied or is already `Indeterminate` is left
-    alone.
-- **The boot record:** it is journaled once per boot, with the counts.
+    alone;
+  - the record carries the intent's side-effect class and says the effect may have happened.
+- **The boot record:** it is journaled once per boot, with counts checked against the fixture.
 - **Convergence (property):** for random journals, a boot cut after its n-th append, for every
   n, then a full boot, leaves what a boot with no cut leaves:
   - the same ledger state, with nothing stuck;
   - the same set of indeterminate Operations;
-  - no Operation with two `op.indeterminate`.
+  - no Operation with two `op.indeterminate`;
+  - no ledger entry journaled twice under one key.
 
-  The cut journal holds exactly the first n records a real boot appended, which is what a crash
+  The random journals hold open, committed, failed, denied and already indeterminate
+  Operations. Partial settles, transfers and a stop are tested by the ledger's and the stop's
+  own suites, not cut at boot level. PR-6d's DST owns that. The cut journal holds exactly the first n records a real boot appended, which is what a crash
   between two appends leaves: an acknowledged append survives a crash, and open cuts a torn one.
 
 **Seeded violations:** recorded in §7 by the commit that adds them, each with its catching test.
 
 **Bench:** boot time against the number of records after a crash (1,000 to 50,000), recorded in
-§7. ADR-0018's appendix owes this product number: 10.8 s was measured on Windows CI for about
-5,000 records, most of it in the journal's own open.
+§7, on the plain `Journal::open`. ADR-0018's appendix owes two more dimensions, and this bench
+does not pay them: boot time against the records after the `FLUSHED` marker, and after an
+interrupted shred, both on `Journal::open_with_payloads`. PR-6c brings that open (§1) and
+measures them (V1 review M5).
 
 ## 6. Threat and privacy note
 
 - **T6:** money that may be spent is never released at boot.
 - **Red line 3:** an interrupted Operation is never called done or undone.
 - **Red line 9:** every boot is explained in the journal.
-- **T11:** boot reads the journal once, and its memory grows with the open items, not with
-  history beyond what the ledger already keeps (its own stated limit).
+- **T11:** boot's memory grows with the journal, not only with the open items. The caller
+  holds every verified record, boot decodes every budget entry, and it keeps one small entry
+  per Operation the journal names, so a closed Operation is never reopened. Holding the
+  journal in memory is the caller's choice today; PR-6c's startup sequence reads it once and
+  streams it (§1, V1 review M3).
 - **Privacy:** the boot record carries counts and versions only.
 
 ## 7. Measured, seeded
@@ -155,8 +202,11 @@ The property in §5 proves convergence over crashes at every append.
 | 49,751 | 125 | 458.0 (464.8) | 311.7 (340.0) | 90.5 (93.3) | 867.0 (889.4) |
 
 - **Where the time goes:** `boot` itself (drift, stop, ledger replay and recovery, intents, the
-  record) is about a tenth of the total at every size. The rest is the journal's own open and
-  the read of its verified records.
+  record) is 2.0% of the total at 997 records, 3.2% at 4,977, 5.1% at 9,951 and 10.4% at
+  49,751. The rest is the journal's own open and the second read of its verified records,
+  which PR-6c removes (§1).
+- **Not measured here:** the payload-coordinated open and the dimensions ADR-0018's appendix
+  owes (§5).
 - **Against ADR-0018's figure:** ADR-0018's appendix measured 10.8 s on Windows CI for about
   5,000 records, inside the kill harness. This bench reproduces neither that machine nor
   that harness's directories, so it does not explain the gap. The CI runners are measured
@@ -172,3 +222,8 @@ The property in §5 proves convergence over crashes at every append.
 | `boot-intents-follow-ledger` | intents are closed only when the ledger had something to close, which only a crash shows | `a_crash_during_boot_converges` |
 | `boot-ignores-journaled-stop` | a journaled stop boots running | `a_journaled_stop_boots_stopped_and_recovery_still_runs` |
 | `boot-unexplained` | no `kernel.booted` record | `every_boot_is_explained_once` |
+| `boot-denied-reopened` | a denied Operation is made `Indeterminate` (V1 review M2) | `open_intents_become_indeterminate_once` |
+| `boot-ledger-error-erased` | a journal failure in recovery reads as an inconsistent ledger (M1) | `a_journal_failure_during_recovery_keeps_its_code` |
+| `boot-intent-effect-dropped` | the record says the Operation had no external effect (M7) | `open_intents_become_indeterminate_once` |
+| `boot-stop-loss-unexplained` | a boot after a crash does not say a stop may be lost (M6) | `a_boot_after_a_crash_says_a_stop_may_be_lost` |
+| `boot-stale-records-accepted` | records that are not the journal's are booted from (L2) | `records_that_are_not_the_journals_are_refused_before_anything_is_written` |
