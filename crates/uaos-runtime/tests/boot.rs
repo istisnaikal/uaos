@@ -410,7 +410,7 @@ fn draft_of(envelope: &EventEnvelope) -> EventDraft {
         parent_id: envelope.parent_id,
         actor: envelope.actor.clone(),
         event_type: envelope.event_type.clone(),
-        payload_ref: envelope.payload_ref.clone(),
+        payload_ref: envelope.payload_ref,
         payload_inline: envelope.payload_inline.clone(),
         cost_estimate: envelope.cost_estimate,
         compensable: envelope.compensable,
