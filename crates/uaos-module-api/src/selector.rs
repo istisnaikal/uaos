@@ -7,8 +7,9 @@
 //! repeats, so it can never name anything outside the view. Its size is bounded (steps, nesting,
 //! keys, the values a predicate lists), and each step visits a node at most once, even when the
 //! nodes selected so far are nested inside one another. Each visit costs O(log ranges) against a
-//! sealed mask. Every resolution spends a [`Visits`] budget, and the host gives one budget to
-//! all of a module call's selectors, so the kernel's cost per call is bounded whatever is asked.
+//! sealed mask. Every resolution spends a [`Visits`] budget. Member scans and string decodes are
+//! not charged yet, so no per-call cost bound is claimed; that is PR-4c's, before PR-8 (contract
+//! §7, §12).
 //!
 //! **Masked content is unknown, never probed.** A masked string equals no value and a masked key
 //! is no name, so a predicate's answer is the same whatever the masked text is.
@@ -284,7 +285,7 @@ impl Selector {
     }
 
     /// As [`Selector::resolve`], spending `visits`: the host passes one budget for all of a
-    /// module call's selectors, so the kernel's cost per call is bounded whatever the module asks.
+    /// module call's selectors. Member scans and string decodes are not charged yet (PR-4c).
     ///
     /// # Errors
     /// As [`Selector::resolve`].

@@ -189,12 +189,12 @@ never shared between pockets (C-18).
   for another (which would clear the mark below and raise its bound) nor keep the handle. Each
   change is atomic, and a refused one marks the state `exceeded`. The host runs every call on a copy and keeps the copy only if
   it is not exceeded and its declarations pass. Otherwise the call is a strike
-  (`state_exceeded`), and the state is left as it was before the call. Only these two, a
-  static strike from `check_decls` and `state_exceeded`, discard a call's state changes. A
-  refusal only the host can make (`not_own_child`, `unknown_candidate`, a quota, a rate
-  limit) drops that declaration and counts a strike but keeps the state, so `on_event` stays
-  a function of the state, the event and the manifest, and a replay rebuilds what the live run
-  kept. The host runs at most
+  (`state_exceeded`), and the state is left as it was before the call. **Every strike refuses
+  all of the call's declarations.** A static strike (from `check_decls`) and `state_exceeded`
+  also discard the call's state changes. A host-side strike keeps them: one the host makes on
+  what only it knows (`not_own_child`, `unknown_candidate`, `budget_exceeded`, a quota, a rate
+  limit). So `on_event` stays a function of the state, the event and the manifest, and a
+  replay rebuilds what the live run kept. The host runs at most
   one call of a module for one pocket at a time, so no two calls work on copies of the same
   state and none of their changes is lost. A cursor advances only on its own pocket's
   events.
@@ -278,10 +278,12 @@ itself, and never anything that touches masked content: a codec assigns roles th
 masked view, so masked content may hide a forbidding role (`RoleMap::may_strip`).
 
 **Cost.** Each step visits a node at most once, and each visit is O(log ranges) against a
-sealed mask, the host seals before it builds a view. Every resolution spends a `Visits`
-budget; the host gives one budget (`MAX_VISITS`) to all of a module call's selectors, and
-running out is a strike (`bound_exceeded`), so the kernel's cost per call is bounded whatever
-the module asks.
+sealed mask; the host seals before it builds a view. Every resolution spends a `Visits`
+budget, and running out is a host-side strike (`budget_exceeded`). **No per-call cost bound is
+claimed yet.** The budget does not charge two costs: the member scan behind a `Key` step or a
+predicate's lookup, O(members), and decoding a member's string for a comparison, O(length).
+Charging both, and with them a bound per call, is PR-4c's, split from this PR under D-31. It
+is owed before PR-8, the first code to resolve a module's selectors (§12).
 
 ## 8. Kernel contract additions (all additive)
 
@@ -324,7 +326,8 @@ the `ModuleName`, the reason and label codes, and two code sets:
   `default_on_reaches_outside`, `config_schema`;
 - **strike codes:** `too_many`, `not_hooked`, `not_allowed_here`, `undeclared_code`,
   `undeclared_action`, `feature_not_required`, `bound_exceeded`, `state_exceeded`, and the
-  two the host checks against what only it knows: `not_own_child` and `unknown_candidate`.
+  three the host checks against what only it knows: `not_own_child`, `unknown_candidate` and
+  `budget_exceeded`.
 
 `Debug` output shows identifiers, lengths and counts only, never a view's content, a
 selector's keys and values, a frame, state bytes or `ModuleText` (I-11).
@@ -420,6 +423,19 @@ make the `language-neutrality` gate active (ADR-0020):
     spell, for the C-61 paper module (L8);
   - binding a `ModuleState` to its pocket in the host's store; this crate only checks the
     cursor (L5).
+- **Split to PR-4c under D-31 (round 5), owed before PR-8:**
+  - M1: the visit budget charges one visit per member a lookup examines, and string
+    comparisons stop past `MAX_SELECTOR_TEXT` without decoding the whole value. That gives
+    the per-call cost bound §7 does not claim yet, with tests for `Key`, `Each` and `Where` on
+    wide objects and long strings;
+  - L1: a variation selector's base must be a visible character, not whitespace, a control or
+    a default-ignorable code point, and U+E0100–U+E01EF only after a CJK ideograph;
+  - L3: a seal is tied to its tape (a view built from a sealed mask checks it), and a key
+    finding on a node with no key refuses the seal;
+  - L4: `Visits` becomes move-only; `RoleMap::assign_within` gives a codec's `roles()` one
+    budget; the host procedure moves into the crate.
+- **Owned by PR-8:** the codec's `dimensions()`, snapshot at admission like a module's
+  manifest (round 5, L4).
 - **PR-8 proof obligations, from the final review:**
   - a hook at `stream.observe`, `stream.assert` or `error.translate` receives the frame or
     error from before rehydration, with a seeded violation that hands it the rehydrated one;
@@ -428,7 +444,7 @@ make the `language-neutrality` gate active (ADR-0020):
   - calls of one module for one pocket never overlap;
   - a host-side refusal keeps the call's state (§5), so replay rebuilds the live state;
   - every call is checked against the admitted manifest snapshot;
-  - one `Visits` budget per call, a strike when spent;
+  - one `Visits` budget per call, a strike (`budget_exceeded`) when spent;
   - `not_own_child` and `unknown_candidate` strike what they name.
 - `[CONSCIOUS ASSUMPTION]` Event values are `i64`. A module that is wrong could still encode
   data in numbers. The trust model is trusted code with minimized authority, not hostile

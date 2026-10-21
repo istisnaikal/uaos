@@ -162,3 +162,30 @@ reading only, 2026-10-21. **Result:** 1 High · 5 Medium · 7 Low.
 
 Under D-31 this is round 4. A scoped round 5 over these fixes follows; a High or a Medium still
 open after it splits the PR.
+
+## Round 5, scoped (D-31): the split
+
+**Reviewed:** `442c59a..bc48643`, by a fresh-context agent reading only, 2026-10-21.
+**Result:** 0 High · 2 Medium · 5 Low.
+**Verified:**
+- `Admitted`;
+- the strip rules;
+- usage dimensions;
+- `FailureUnavailable`;
+- unlisted methods;
+- the seal ranges;
+- the replay rule;
+- all 8 new seeds' anchors.
+
+**D-31:** a PR still holding a Medium after round 5 is split. M1 is split to PR-4c. M2 is two
+sentences of contract that disagreed, so it is fixed here.
+
+| | Finding | What happens |
+|---|---|---|
+| M1 | The visit budget charged one visit per object for `Key` steps and predicate lookups, though `member` scans every child, and comparisons decoded whole strings. So "the kernel's cost per call is bounded" was false. | **Split to PR-4c, owed before PR-8.** PR-8 is the first code to resolve a module's selectors. The contract (§7), the selector docs and the CHANGELOG now claim no per-call bound and say why. §12 lists PR-4c's work. |
+| M2 | The `Strike` doc ("none apply") and §5 ("drops that declaration") disagreed, and §7 gave the budget a static code. | **Fixed.** Every strike refuses all of a call's declarations. Static strikes and `state_exceeded` also discard state; host-side strikes keep it. The budget has its own host-side code, `budget_exceeded`. |
+| L1 | The variation-selector base can be an invisible character. | PR-4c (§12) |
+| L2 | The seal property's `touches_masked` assertion had no message, so its seed could fail on the default one. | **Fixed:** the message is added. |
+| L3 | A seal is not tied to its tape; a key finding on a keyless node seals. | PR-4c (§12) |
+| L4 | `Visits` is `Copy`; `RoleMap::assign` gets a fresh budget; the host procedure lives in tests; `dimensions()` is re-read. | PR-4c (§12); `dimensions()` snapshot: PR-8 |
+| L5 | `sealed_and_unsealed_views_agree` runs 256 cases per merge (20,000 was a one-off local run); `ModuleText`'s errors list was short; `MAX_VISITS` is unstated as a limit. | **Fixed:** the docs and the errors list. The limit is PR-4c's, with the bound. |
