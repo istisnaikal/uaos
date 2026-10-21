@@ -2341,8 +2341,8 @@ pub(crate) fn cases() -> Vec<Case> {
             // list byte, so a URL list reads as one password.
             seed: replace(
                 "crates/uaos-redact/src/detect.rs",
-                "        Some(i) => !before.get(i).is_some_and(|b| LIST_BYTES.contains(b)),\n",
-                "        Some(_) => true,\n",
+                "        return !glue.is_some_and(|b| LIST_BYTES.contains(&b));\n",
+                "        return true;\n",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -2372,7 +2372,31 @@ pub(crate) fn cases() -> Vec<Case> {
                 program: "cargo",
                 args: &["test", "-p", "uaos-redact", "--lib", "another_url_after_a_list_byte_stays_another_url"],
             },
-            expect: "a URL glued to another read as a password",
+            expect: "another URL after a list byte read as a password",
+        },
+        Case {
+            id: "redact-url-scheme-colon-split",
+            gate: "redaction-corpus",
+            tool: None,
+            // ADR-0009 Amendment 2, its scoped round M1: a colon-joined scheme after a list byte is read in parts.
+            seed: replace("crates/uaos-redact/src/detect.rs", "        if glue == Some(b':') && before.get(start.wrapping_sub(2)).copied().is_some_and(scheme_byte) {\n", "        if false {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-redact", "--lib", "another_url_after_a_list_byte_stays_another_url"],
+            },
+            expect: "two listed URLs read as one",
+        },
+        Case {
+            id: "redact-url-chain-blocks-next-url",
+            gate: "redaction-corpus",
+            tool: None,
+            // ADR-0009 Amendment 2, its scoped round M2: a chain that ends keeps the next URL from opening.
+            seed: replace("crates/uaos-redact/src/detect.rs", "            if memo.url_open.is_none() && has_scheme {\n", "            if memo.url_open.is_none() && has_scheme && false {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-redact", "--lib", "url_passwords_may_hold_a_scheme_separator"],
+            },
+            expect: "a password holding `://` survived",
         },
         Case {
             id: "redact-url-password-stops-at-slash",
