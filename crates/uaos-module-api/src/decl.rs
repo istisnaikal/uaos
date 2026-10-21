@@ -33,7 +33,7 @@ pub enum TextError {
     /// default-ignorable code point are none), or another variation selector, or, for an
     /// ideographic one, anything but a CJK ideograph: runs
     /// of them can carry bytes a model decodes and a person cannot see.
-    #[error("module text holds a variation selector that follows no base character")]
+    #[error("module text holds a variation selector that follows no visible base")]
     VariationRun,
     /// A Unicode tag character (U+E0000 to U+E007F): text a model reads and a person cannot see.
     #[error("module text holds a Unicode tag character (U+E0000-U+E007F)")]
@@ -125,8 +125,9 @@ const fn is_unified_ideograph(c: char) -> bool {
 
 /// Text a module adds to a request: bounded, in any language and kept byte for byte (ADR-0020
 /// rule 2), without control characters but newlines, carriage returns and tabs, without
-/// explicit bidirectional controls, tag characters or runs of variation selectors. Like every outbound byte, it is detected and final-scanned by the kernel (contract
-/// §2 rule 4).
+/// explicit bidirectional controls, tag characters, and variation selectors that follow no
+/// visible base (an ideographic one follows a CJK ideograph). Like every outbound byte, it is
+/// detected and final-scanned by the kernel (contract §2 rule 4).
 #[derive(Clone, PartialEq, Eq)]
 pub struct ModuleText(String);
 
@@ -135,7 +136,9 @@ impl ModuleText {
     ///
     /// # Errors
     /// [`TextError`] if it is too long, or holds a control character, an explicit bidirectional
-    /// control, a tag character, or a variation selector that follows no base character.
+    /// control, a tag character, or a variation selector that follows no visible base
+    /// (whitespace, a control and a default-ignorable code point are none), or an ideographic
+    /// one after anything but a CJK unified ideograph.
     pub fn new(text: impl Into<String>) -> Result<Self, TextError> {
         let text = text.into();
         if text.len() > MAX_MODULE_TEXT {

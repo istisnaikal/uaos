@@ -13,10 +13,10 @@ use std::fmt;
 
 use uaos_json::{JsonError, Kind, Node, NodeId, Tape};
 
-/// A finding names a node that is not on the tape, or a key finding names a node with no key:
-/// the view is refused (fail closed).
+/// A finding names a node that is not on the tape, a key finding names a node with no key, or a
+/// value finding names `true`, `false` or `null`: the view is refused (fail closed).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("a finding names a node that is not on the tape, or a key no node has")]
+#[error("a finding names a node that is not on the tape, a key no node has, or a literal")]
 pub struct MaskError;
 
 #[cfg(test)]
@@ -71,6 +71,11 @@ impl Mask {
         let mut covered: Vec<(NodeId, NodeId)> = Vec::new();
         for id in &self.values {
             let node = tape.node(*id).ok_or(MaskError)?;
+            // A value finding names a string, a number or a container. On `true`, `false` or `null`
+            // it would mask nothing: the finding is misplaced (PR-4c round 5 L2).
+            if matches!(node.kind(), Kind::True | Kind::False | Kind::Null) {
+                return Err(MaskError);
+            }
             // Ids come in document order, so a container inside the last range adds nothing.
             let inside_last = covered.last().is_some_and(|(_, end)| *id < *end);
             if node.kind().is_container() && !inside_last {

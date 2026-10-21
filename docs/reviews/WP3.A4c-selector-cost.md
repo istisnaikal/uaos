@@ -117,3 +117,25 @@ allows up to round 5.
 | L6 | The remaining covert channel was not stated: one selector after each visible base. | A conscious assumption in §12, with the numbers. |
 | L7 | Subdivision-flag emoji are refused by the tag rule, unrecorded. | A conscious assumption in §12. |
 | L8 | Wording: §5's "Otherwise", the L6 ranges (U+2066–U+2069 are refused), format bases, and the CHANGELOG's `ModuleText` line. | Fixed. |
+
+## D-31 round 5: a second final fresh full review (`8c3c8ff`)
+
+**Reviewer:** a fresh-context agent, read-only, over the whole six-commit diff.
+**Result:** 0 High · 0 Medium · 5 Low. Nothing forces a split.
+
+**Verified clean:**
+- **Earlier fixes:** each one is real. `with_view` takes a `Sealed`. The event procedure's
+  strike is tested and seeded. `RoleMap` equality compares roles only.
+- **Registration:** the §11 table's 42 rows match the cases and the gates.
+- **The selector cost, `ModuleText`, the seal and the view, the budget, the procedures and the
+  relay** are all correct.
+- **Anchors:** all 194 are unique.
+- **Other crates:** nothing in another crate is broken or weakened.
+
+| | Finding | What was done |
+|---|---|---|
+| L1 | `Each`'s per-child charge and a predicate's per-node charge (an array element `StringOrArrayWith` tests) had no test. Deleting either passed everything. | `each_child_and_array_element_spends_a_visit`. Negative `selector-each-uncharged`. The predicate's charge is covered by the same test. |
+| L2 | A value finding on `true`, `false` or `null` sealed and masked nothing. The value-side twin of the keyless-key refusal. | `Mask::seal` refuses it (`MaskError`), and rule 5 says so. Test `a_value_finding_on_a_literal_refuses_the_seal`; negative `mask-seal-literal-value`. The seal property places value findings on values only. |
+| L3 | `with_view` was never called in a test. | `a_hook_sees_a_sealed_view`. |
+| L4 | A selector can ride a base that renders blank (U+2800). | Named in §12's conscious assumption. |
+| L5 | Wording: §7's "§5's procedure", the covert-channel numbers, and `ModuleText`'s docs and refusal message. | Fixed: 20 selectors or none (4.4 bits), 260 after an ideograph (8.0 bits), and the docs follow the rule. |

@@ -3414,6 +3414,30 @@ The journal is tamper-proof.
             expect: "a masked key matched its name",
         },
         Case {
+            id: "selector-each-uncharged",
+            gate: "test",
+            tool: None,
+            // PR-4c round 5 L1: `Each` charges every child it selects.
+            seed: replace("crates/uaos-module-api/src/selector.rs", "                            visits.spend(1)?;\n                            next.insert(child.id());\n", "                            next.insert(child.id());\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "each_child_and_array_element_spends_a_visit"],
+            },
+            expect: "a child or an element was examined uncharged",
+        },
+        Case {
+            id: "mask-seal-literal-value",
+            gate: "test",
+            tool: None,
+            // PR-4c round 5 L2: a value finding on a literal refuses the seal.
+            seed: replace("crates/uaos-module-api/src/view.rs", "            if matches!(node.kind(), Kind::True | Kind::False | Kind::Null) {\n", "            if false {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-module-api", "--test", "view", "a_value_finding_on_a_literal_refuses_the_seal"],
+            },
+            expect: "a value finding on a literal was sealed",
+        },
+        Case {
             id: "host-procedure-keeps-outgrown-state",
             gate: "test",
             tool: None,

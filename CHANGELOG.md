@@ -272,7 +272,7 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     `MAX_SELECTOR_TEXT`, past which nothing is decoded; one `RoleMap` budget exhausted; a sealed
     view over its own tape; keyless key findings refused; visible bases, ideographic bases and
     the Mongolian free variation selectors.
-  - **Negatives:** eleven seeded violations, and PR-4's variation-run seed retargeted to the new
+  - **Negatives:** thirteen seeded violations, and PR-4's variation-run seed retargeted to the new
     rule; one seed of the first draft, `mask-seal-ignores-tape`, was retired with the check it
     seeded.
 - P3 Move 1, PR-4 (spec first): the module socket's contract,
