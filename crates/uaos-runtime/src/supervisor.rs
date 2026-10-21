@@ -6,7 +6,7 @@
 //!
 //! Its live tasks are bounded, and one past the bound is refused. It implements hyper's
 //! [`Executor`](hyper::rt::Executor), so the door's connection tasks run under it (ADR-0013
-//! Amendment 1 B, wired in PR-7). The CPU pool and the simulated executor (D-7) are PR-6b's.
+//! Amendment 1 B, wired in PR-7). The CPU pool and the simulated executor (D-7) are PR-6d's.
 
 use std::fmt;
 use std::future::Future;

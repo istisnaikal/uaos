@@ -39,8 +39,9 @@ review (D-31).
 
 ## 2. The procedure
 
-`boot(journal, records, config, clock)` takes the open journal, its verified records (oldest first)
-and the configuration snapshot the process starts with. It runs these steps in this order:
+`boot(journal, records, config, correlation)` takes the open journal, its verified records (oldest
+first), the configuration snapshot the process starts with, and the correlation id its records
+carry. It runs these steps in this order:
 
 1. **Configuration drift, before anything is written.**
    - The highest `config_version` any record carries is the last configuration the kernel used.
@@ -71,6 +72,8 @@ and the configuration snapshot the process starts with. It runs these steps in t
    - the records read;
    - the Operations made indeterminate;
    - the reservations settled as estimated;
+   - the partly settled reservations completed;
+   - the transfers completed;
    - the items left stuck;
    - whether the kernel booted stopped;
    - the configuration version.
@@ -111,13 +114,14 @@ The property in §5 proves convergence over crashes at every append.
   - an Operation that committed, failed, was denied or is already `Indeterminate` is left
     alone.
 - **The boot record:** it is journaled once per boot, with the counts.
-- **Convergence (property):** for random journals, a crash injected after the n-th append of a
-  boot (the simulated filesystem refuses every write after it), then a full boot, leaves:
-  - the same ledger state;
+- **Convergence (property):** for random journals, a boot cut after its n-th append, for every
+  n, then a full boot, leaves what a boot with no cut leaves:
+  - the same ledger state, with nothing stuck;
   - the same set of indeterminate Operations;
-  - no Operation with two `op.indeterminate`
+  - no Operation with two `op.indeterminate`.
 
-  as a boot with no crash.
+  The cut journal holds exactly the first n records a real boot appended, which is what a crash
+  between two appends leaves: an acknowledged append survives a crash, and open cuts a torn one.
 
 **Seeded violations:** recorded in §7 by the commit that adds them, each with its catching test.
 

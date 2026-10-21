@@ -204,9 +204,12 @@ pub mod types {
     pub const KERNEL_STOPPED: EventType = EventType::from_static("kernel.stopped");
     /// A human resumed a stopped kernel through a user-present channel (M3, ADR-0012).
     pub const KERNEL_RESUMED: EventType = EventType::from_static("kernel.resumed");
+    /// The kernel booted: its inline payload counts what boot recovery read and closed (runtime
+    /// boot contract §2 step 5).
+    pub const KERNEL_BOOTED: EventType = EventType::from_static("kernel.booted");
 
     /// All kernel event types, for validation and generated documentation.
-    pub const ALL: [&EventType; 15] = [
+    pub const ALL: [&EventType; 16] = [
         &OP_RESERVED_INTENT,
         &OP_COMMITTED,
         &OP_FAILED,
@@ -222,6 +225,7 @@ pub mod types {
         &IDENTITY_ENTRY,
         &KERNEL_STOPPED,
         &KERNEL_RESUMED,
+        &KERNEL_BOOTED,
     ];
 }
 

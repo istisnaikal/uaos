@@ -31,9 +31,11 @@ reorders inside Train A.
 - a minimal **supervisor** (§8).
 
 **Not built here:**
-- **PR-6b:** the state actor and durability coordinator (D-5), the bus (D-9), boot recovery
-  with the configuration drift check, the one-record intent (D-6), the CPU pool and simulated
-  executor (D-7), and the DST harness. It also journals the stop record built here.
+- **PR-6b:** boot recovery with the configuration drift check
+  (`0013-runtime-boot-recovery.md`).
+- **PR-6c:** the state actor and durability coordinator (D-5) and the one-record intent (D-6).
+  It also journals the stop record built here.
+- **PR-6d:** the bus (D-9), the CPU pool and simulated executor (D-7), and the DST harness.
 - **PR-7:** the typestate pipeline, wiring the door and the relay, the dialect's error frame on
   a cut, the E2E stop drill at 8 concurrent Operations, and the overload test.
 - **M2:** the dialect codecs (WP3.4), the pre-request clamp, `uaos.pricing/1` (WP3.5,
@@ -48,7 +50,7 @@ reorders inside Train A.
 |---|---|---|
 | A streaming splice proxy over hyper 1 and tokio channels: p95 ≤ 1 ms, duplicate-key overhead under 2 ms, never a full object in heap memory | The relay is a hyper `Body` that the client's connection pulls (§7). It uses no task and no channel, holds at most one incomplete event, and forwards each event's exact bytes | **No channel.** A pull body gets backpressure from the client's socket. A channel would add a copy and a buffer that stop must drain. **The request is still read whole,** under admission's byte bound: redaction and the final scan see every byte before anything leaves (CLAUDE.md request flow, I-05). Only the response path streams. **Duplicate keys:** every frame read for usage parses with `uaos-json`, which refuses them. The 2 ms ceiling is PR-2's, for a 1.7 MB request (met: p95 1.86 ms) |
 | Ring 2 state sync: ledger budget rules tied to the egress stream. Any single-token overrun mid-stream fires an instantaneous fail-closed kill switch, with no leaked downstream buffer and no grace period | The relay's ceiling is the Operation's reservation (`Reservation<InFlight>::amount`). It prices every usage report the codec finds, and the first one over the ceiling cuts the stream (one nano-USD over is enough). That report is never forwarded. The upstream is dropped at once, the kernel stop engages (`budget_overrun`), and the client sees an error, never a clean end (§7.4) | **Rings.** The runtime and the ledger are Ring 0; Ring 2 is entitlement and the Hub (`arch.toml`). Nothing changes ring. **Physics.** The kernel learns token counts only when the provider reports them: Anthropic in `message_start` and `message_delta`, OpenAI's Responses API in its final event. Content between reports carries no count the kernel can trust. So **the hard cap is the reservation taken before the request,** sized at the clamped `max_tokens` (WP3.5), past which the provider cannot generate. The mid-stream cut is the second line, for a wrong price or a wrong clamp. **Honesty (red line 3).** Bytes already forwarded cannot be recalled. Tokens the provider generated after its last report or before it saw the disconnect are billed but uncounted, so a stream that did not finish settles the full reservation (§7.5); nothing claims a rollback. **Buffers.** The over-ceiling event is never queued, and the relay keeps no downstream buffer of its own |
-| @devam and @resume in seven languages (EN, TR, DE, FR, ES, IT, AR) across every rehydration boundary, with every recovery prefix-stable and byte-identical | The configuration snapshot carries the locale as an opaque tag, pinned per Operation. A published change reaches the next pin only (§5). The relay is byte-exact for any chunking, proven over the seven-locale corpus (§12) | **No locale matrix in Ring 0.** CLAUDE.md (language neutrality) and ADR-0020 (Proposed, D-36) keep the list above the kernel, so an eighth language never breaks a contract. **@devam is a module** (C-14). Replaying journaled injected bytes is proven with the state actor (PR-6b); rehydration with ADR-0017 (M2) |
+| @devam and @resume in seven languages (EN, TR, DE, FR, ES, IT, AR) across every rehydration boundary, with every recovery prefix-stable and byte-identical | The configuration snapshot carries the locale as an opaque tag, pinned per Operation. A published change reaches the next pin only (§5). The relay is byte-exact for any chunking, proven over the seven-locale corpus (§12) | **No locale matrix in Ring 0.** CLAUDE.md (language neutrality) and ADR-0020 (Proposed, D-36) keep the list above the kernel, so an eighth language never breaks a contract. **@devam is a module** (C-14). Replaying journaled injected bytes is proven with the state actor (PR-6c); rehydration with ADR-0017 (M2) |
 
 ## 3. The stop
 
@@ -63,11 +65,11 @@ reorders inside Train A.
    `kernel.stopped`: critical durability, an inline payload `{"reason": <code>}`.
    - Whoever engages the stop need not journal it: a relay has no journal.
    - `Stop::unrecorded` returns the engaged stop until `Stop::recorded` says its record is
-     in the journal. PR-6b's state actor journals `Engaged::draft` and then calls
+     in the journal. PR-6c's state actor journals `Engaged::draft` and then calls
      `recorded`. While the process runs, a failed write is therefore retried.
    - **The window.** A restart before the record is durable boots running: a kill, a crash, a
      power loss, or a write that keeps failing (a `disk_full` stop on a full disk) followed
-     by a restart. Rule 3 accepts that window by acting before the record. PR-6b's DST bounds
+     by a restart. Rule 3 accepts that window by acting before the record. PR-6d's DST bounds
      it, and the explanation of such a boot says a stop may have been lost.
    - This PR builds the record and the hand-off, and reads the record at boot.
    - A record that fails to write leaves the stop engaged, so it fails closed.
@@ -77,7 +79,7 @@ reorders inside Train A.
 5. **The first reason wins.** Engaging again changes nothing and says so (`Engaged::first`).
 6. **Reasons:** `operator`, `budget_overrun`, `payload_flush_failed`, `disk_full`, `canary_hit`.
    - This PR wires `budget_overrun`, from the relay.
-   - The others are wired where their sources live: journal health in PR-6b, the canary in
+   - The others are wired where their sources live: journal health in PR-6c, the canary in
      PR-3 and PR-7.
 7. **Resume** needs presence (I-13, ADR-0012) and arrives in M3. Until then, a stopped kernel
    stays stopped across restarts.
@@ -115,7 +117,7 @@ Rule 3 is the ADR-0010 amendment that plan part two names. It is **proposed, not
   - The seven GA tags pass, and so does any other well-formed tag. The list lives in the
     surface layer (ADR-0020 rule 3).
 - **Text injected into a request** is rendered once, in the pinned locale, and journaled as
-  bytes (CLAUDE.md). This PR provides the pin. PR-6b's actor journals the bytes and proves that
+  bytes (CLAUDE.md). This PR provides the pin. PR-6c's actor journals the bytes and proves that
   replay never renders them again.
 
 ## 6. Declared pricing
@@ -296,7 +298,7 @@ queued for the client.
   after its last usage report.
 
 A cost that is not final is a running total, a lower bound on what the provider bills (review
-H1). `RelayReport::settlement` is the rule PR-7 applies through PR-6b's actor:
+H1). `RelayReport::settlement` is the rule PR-7 applies through PR-6c's actor:
 - a final cost: `Usage::Reported(cost)`;
 - a cost past the reservation: `Usage::Reported(cost)`. The provider billed at least that much,
   and the ledger records the overrun (`Settlement::overrun`, S1). The ledger's `Usage` has no
@@ -374,7 +376,7 @@ H1). `RelayReport::settlement` is the rule PR-7 applies through PR-6b's actor:
 - **Admission refusals** by reason.
 - **`Stop::reason`.**
 
-PR-6b exports these through the bus as metrics, with the ids of CLAUDE.md §4.
+PR-6d exports these through the bus as metrics, with the ids of CLAUDE.md §4.
 
 ## 12. Proof obligations (PR-6a)
 
@@ -524,4 +526,4 @@ for content and usage events, with the environment label (§13).
   merge; it passed 20,000 cases once locally (2026-10-21).
 - **D-37 (E, open):** the ADR-0010 amendment for §3 rule 3. The stop restricts, takes effect
   before its record, and never waits on the state actor, so I-02 holds. Recommendation: accept.
-  It is needed before PR-6b journals the record.
+  It is needed before PR-6c journals the record.

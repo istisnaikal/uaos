@@ -3251,6 +3251,78 @@ The journal is tamper-proof.
             expect: "a request that can never fit was told to retry",
         },
         Case {
+            id: "boot-config-drift-unchecked",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 1, a configuration older than the journal's is refused.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "        && journaled > config.version()\n", "        && journaled < config.version()\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "an_older_configuration_is_refused_before_anything_is_written"],
+            },
+            expect: "a configuration older than the journal booted",
+        },
+        Case {
+            id: "boot-recovery-skipped",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 3, open reservations are settled at boot, never left open or released.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    let recovery = if ledger.needs_recovery() {\n", "    let recovery = if false && ledger.needs_recovery() {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "an_open_reservation_settles_in_full_and_is_never_released"],
+            },
+            expect: "boot left an open reservation open",
+        },
+        Case {
+            id: "boot-indeterminate-twice",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §3, an Operation already indeterminate is terminal for boot.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    &types::OP_INDETERMINATE,\n];\n", "    &types::OP_DENIED,\n];\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "open_intents_become_indeterminate_once"],
+            },
+            expect: "an open intent was not made indeterminate, or a closed one was",
+        },
+        Case {
+            id: "boot-intents-follow-ledger",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §3, a crash after the ledger's entries still closes every intent on the next boot. Only the convergence property sees it.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    let indeterminate = open_intents(records);\n", "    let indeterminate = if recovery.settled_estimated + recovery.completed > 0 { open_intents(records) } else { Vec::new() };\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "a_crash_during_boot_converges"],
+            },
+            expect: "a crash during boot did not converge",
+        },
+        Case {
+            id: "boot-ignores-journaled-stop",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 2, a journaled stop boots stopped.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    let stop = Stop::booted(stop_state);\n", "    let stop = Stop::running();\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "a_journaled_stop_boots_stopped_and_recovery_still_runs"],
+            },
+            expect: "a journaled stop did not boot stopped",
+        },
+        Case {
+            id: "boot-unexplained",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 5, every boot is journaled with its counts (red line 9).
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    journal.append(booted_draft(&report, correlation)?)?;\n", "    let _ = booted_draft(&report, correlation)?;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "every_boot_is_explained_once"],
+            },
+            expect: "a boot went unexplained",
+        },
+        Case {
             id: "relay-content-json-cuts",
             gate: "test",
             tool: None,
