@@ -180,10 +180,14 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - no task and no channel;
     - at most one incomplete event held;
     - each event's exact bytes forwarded, zero-copy inside one upstream frame;
-    - every event but a ping read for usage, whatever its kind: parsed by `uaos-json`
-      (duplicate keys refused, object-shaped data must parse, at most 65,536 nodes), read by
-      the codec, checked against its dimensions and priced against the Operation's
-      reservation. A report naming no dimension is no report.
+    - every usage, end or error frame read for usage, and a content frame forwarded unread,
+      so a lone surrogate or a whole fetched document never cuts a stream. A read frame is
+      parsed by `uaos-json` (duplicate keys refused, object-shaped data must parse, at most
+      2^20 nodes), read by the codec, checked against its dimensions and priced against the
+      Operation's reservation. A report naming no dimension is no report;
+    - one upstream frame forwarded in at most two pieces, with nothing kept per event, and
+      an event bound of 32 MiB, the door's request bound. Charging the relay's held bytes to
+      the Operation's permit is owed by PR-7.
   - **Settlement:** `RelayReport::settlement`.
     - A cost settles as reported only when it is final: the stream completed, and the
       dialect's end came at or after its last report.
@@ -222,19 +226,22 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - error codes `RUNTIME_STOPPED` and `BUDGET_STREAM_OVERRUN`.
 
     No schema change: types and codes are strings.
-  - **Tests:** 52.
+  - **Tests:** 57.
     - A property over random events, line endings and chunking (CRLF and the byte-order mark
       split across chunks, the seven-locale corpus): the bytes received are the bytes sent, and
       the events the codec sees are the ones a whole-body event-stream parser reads. 256 cases
       per merge; 20,000 once locally.
     - A journaled stop survives a restart on a real journal.
-  - **Measured:** per event on the reference machine, with every event parsed for usage: p95
-    0.7 µs for content and 0.8 µs for a usage report (the budget is 1 ms). About 230 MB/s.
+  - **Measured:** per event on the reference machine: p95 0.2–0.3 µs for content and 1.0–1.6 µs
+    for a usage report (the budget is 1 ms). About 430–560 MB/s.
   - **Reviews** (`docs/reviews/WP3.A6a-runtime-relay.md`):
     - V1: 1 High, 2 Medium and 13 Low, all resolved apart from one Low owed to PR-9;
     - the D-31 scoped round: 0 High, 2 Medium and 8 Low, all resolved. An empty usage report
-      is no report, and the stop's restart window is stated.
-  - **Negatives:** 20 seeded violations.
+      is no report, and the stop's restart window is stated;
+    - the final full review: 0 High, 2 Medium and 7 Low, all resolved. Two parts are owed
+      by PR-7, which owns the permit and the response: charging the relay's memory to the
+      permit, and a close-delimited client.
+  - **Negatives:** 22 seeded violations.
 - P3 Move 1, PR-4 (spec first): the module socket's contract,
   `docs/adr/appendix/0010-module-socket.md`, before any code.
   - **`uaos.module/1` (draft):** a manifest built through a builder, with `requires`, a closed set

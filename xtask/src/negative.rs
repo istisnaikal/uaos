@@ -3221,6 +3221,30 @@ The journal is tamper-proof.
             },
             expect: "a report after the dialect's end counted as final",
         },
+        Case {
+            id: "relay-reads-content-frames",
+            gate: "test",
+            tool: None,
+            // Final review M2: a content frame is forwarded unread.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "        if matches!(kind, FrameKind::Ping | FrameKind::Content | FrameKind::Other) {\n", "        if matches!(kind, FrameKind::Ping) {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_content_frame_is_forwarded_unread"],
+            },
+            expect: "a content frame was cut for its JSON",
+        },
+        Case {
+            id: "admission-tells-a-misfit-to-retry",
+            gate: "test",
+            tool: None,
+            // Final review L6: a request that can never fit is refused for good.
+            seed: replace("crates/uaos-runtime/src/admission.rs", "        (bytes > self.limits.max_bytes).then_some(Refusal {\n", "        (bytes > u64::MAX).then_some(Refusal {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "stop", "a_request_that_can_never_fit_is_not_told_to_retry"],
+            },
+            expect: "a request that can never fit was told to retry",
+        },
     ]
 }
 

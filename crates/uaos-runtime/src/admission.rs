@@ -51,6 +51,9 @@ pub enum RefusalReason {
     Operations,
     /// Too many bytes in flight.
     Bytes,
+    /// The Operation alone needs more bytes than the bound allows, so it can never fit:
+    /// `INGRESS_TOO_LARGE`, not retryable, and `retry-after` zero (final review L6).
+    TooLarge,
 }
 
 /// A refusal, with the code and `retry-after` the client receives.
@@ -59,9 +62,9 @@ pub enum RefusalReason {
 pub struct Refusal {
     /// Why.
     pub reason: RefusalReason,
-    /// The registered code: `RUNTIME_STOPPED` or `RUNTIME_OVERLOAD`.
+    /// The registered code: `RUNTIME_STOPPED`, `RUNTIME_OVERLOAD` or `INGRESS_TOO_LARGE`.
     pub code: ErrorCode,
-    /// When to retry.
+    /// When to retry; zero for a refusal no retry can change.
     pub retry_after: Duration,
 }
 
@@ -94,6 +97,14 @@ impl Inner {
             reason: RefusalReason::Stopped(reason),
             code: codes::RUNTIME_STOPPED,
             retry_after: self.limits.stopped_retry_after,
+        })
+    }
+
+    fn too_large(&self, bytes: u64) -> Option<Refusal> {
+        (bytes > self.limits.max_bytes).then_some(Refusal {
+            reason: RefusalReason::TooLarge,
+            code: codes::INGRESS_TOO_LARGE,
+            retry_after: Duration::ZERO,
         })
     }
 
@@ -139,12 +150,16 @@ impl Admission {
     /// Admits one Operation that declares `bytes` in flight.
     ///
     /// # Errors
-    /// [`Refusal`]: stopped (checked first), or over either bound.
+    /// [`Refusal`]: stopped (checked first); larger than the bytes bound alone, which no retry
+    /// changes; or over either bound now.
     pub fn admit(&self, bytes: u64) -> Result<Permit, Refusal> {
         // Subscribe, then check: a stop engaged after this line reaches the permit's watch, and
         // one engaged before it is refused here (rule 2).
         let watch = self.inner.stop.watch();
         if let Some(refusal) = self.inner.stopped() {
+            return Err(refusal);
+        }
+        if let Some(refusal) = self.inner.too_large(bytes) {
             return Err(refusal);
         }
         let mut used = self.inner.used();
@@ -196,6 +211,9 @@ impl Permit {
     /// [`Refusal`] if the kernel stopped or the bytes do not fit; nothing is charged.
     pub fn charge(&mut self, more: u64) -> Result<(), Refusal> {
         if let Some(refusal) = self.inner.stopped() {
+            return Err(refusal);
+        }
+        if let Some(refusal) = self.inner.too_large(self.bytes.saturating_add(more)) {
             return Err(refusal);
         }
         let mut used = self.inner.used();

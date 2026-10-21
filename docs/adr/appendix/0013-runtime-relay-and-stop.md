@@ -46,7 +46,7 @@ reorders inside Train A.
 
 | Asked | Built here | Corrected, and why |
 |---|---|---|
-| A streaming splice proxy over hyper 1 and tokio channels: p95 ≤ 1 ms, duplicate-key overhead under 2 ms, never a full object in heap memory | The relay is a hyper `Body` that the client's connection pulls (§7). It uses no task and no channel, holds at most one incomplete event, and forwards each event's exact bytes | **No channel.** A pull body gets backpressure from the client's socket. A channel would add a copy and a buffer that stop must drain. **The request is still read whole,** under admission's byte bound: redaction and the final scan see every byte before anything leaves (CLAUDE.md request flow, I-05). Only the response path streams. **Duplicate keys:** every object-shaped event parses with `uaos-json`, which refuses them. The 2 ms ceiling is PR-2's, for a 1.7 MB request (met: p95 1.86 ms) |
+| A streaming splice proxy over hyper 1 and tokio channels: p95 ≤ 1 ms, duplicate-key overhead under 2 ms, never a full object in heap memory | The relay is a hyper `Body` that the client's connection pulls (§7). It uses no task and no channel, holds at most one incomplete event, and forwards each event's exact bytes | **No channel.** A pull body gets backpressure from the client's socket. A channel would add a copy and a buffer that stop must drain. **The request is still read whole,** under admission's byte bound: redaction and the final scan see every byte before anything leaves (CLAUDE.md request flow, I-05). Only the response path streams. **Duplicate keys:** every frame read for usage parses with `uaos-json`, which refuses them. The 2 ms ceiling is PR-2's, for a 1.7 MB request (met: p95 1.86 ms) |
 | Ring 2 state sync: ledger budget rules tied to the egress stream. Any single-token overrun mid-stream fires an instantaneous fail-closed kill switch, with no leaked downstream buffer and no grace period | The relay's ceiling is the Operation's reservation (`Reservation<InFlight>::amount`). It prices every usage report, and the first one over the ceiling cuts the stream (one nano-USD over is enough). That report is never forwarded. The upstream is dropped at once, the kernel stop engages (`budget_overrun`), and the client sees an error, never a clean end (§7.4) | **Rings.** The runtime and the ledger are Ring 0; Ring 2 is entitlement and the Hub (`arch.toml`). Nothing changes ring. **Physics.** The kernel learns token counts only when the provider reports them: Anthropic in `message_start` and `message_delta`, OpenAI's Responses API in its final event. Content between reports carries no count the kernel can trust. So **the hard cap is the reservation taken before the request,** sized at the clamped `max_tokens` (WP3.5), past which the provider cannot generate. The mid-stream cut is the second line, for a wrong price or a wrong clamp. **Honesty (red line 3).** Bytes already forwarded cannot be recalled. Tokens the provider generated after its last report or before it saw the disconnect are billed but uncounted, so a stream that did not finish settles the full reservation (§7.5); nothing claims a rollback. **Buffers.** The over-ceiling event is never queued, and the relay keeps no downstream buffer of its own |
 | @devam and @resume in seven languages (EN, TR, DE, FR, ES, IT, AR) across every rehydration boundary, with every recovery prefix-stable and byte-identical | The configuration snapshot carries the locale as an opaque tag, pinned per Operation. A published change reaches the next pin only (§5). The relay is byte-exact for any chunking, proven over the seven-locale corpus (§12) | **No locale matrix in Ring 0.** CLAUDE.md (language neutrality) and ADR-0020 (Proposed, D-36) keep the list above the kernel, so an eighth language never breaks a contract. **@devam is a module** (C-14). Replaying journaled injected bytes is proven with the state actor (PR-6b); rehydration with ADR-0017 (M2) |
 
@@ -91,7 +91,9 @@ Rule 3 is the ADR-0010 amendment that plan part two names. It is **proposed, not
   it declares, and its permit charges more as copies are made: the body, the tape and the
   splice. Dropping the permit releases both.
 - **Refusals:**
-  - over either bound: `RUNTIME_OVERLOAD`, with a short `retry-after` (1 s);
+  - over either bound now: `RUNTIME_OVERLOAD`, with a short `retry-after` (1 s);
+  - an Operation that alone needs more than the bytes bound, which no retry changes:
+    `INGRESS_TOO_LARGE`, not retryable, `retry-after` zero (final review L6);
   - stopped: `RUNTIME_STOPPED` (§3).
 - **Defaults** `[CONSCIOUS ASSUMPTION]`:
   - 64 Operations and 256 MiB in flight;
@@ -140,17 +142,25 @@ its report; `.bytes(upstream)` does the same for a body that is not an event str
 - **The client pulls.** The body is pulled by the client's connection. No task runs it, and no
   channel feeds it.
 - **Bounded memory.** It holds:
-  - at most one incomplete event (at most `max_event_bytes`, default 1 MiB);
-  - the upstream frame it is splitting;
-  - the finished segments of that frame not yet forwarded.
+  - at most one incomplete event (at most `max_event_bytes`, default 32 MiB);
+  - what one upstream frame cleared, as at most two pieces: the event it completed from
+    earlier frames, then one slice of the frame's own events. Each event is metered as the
+    splitter finds it, and nothing is kept per event (final review M1);
+  - while a frame is read for usage, a transient tape of at most 2^20 nodes (24 MiB at 24
+    bytes a node), freed before the next event.
 
-  A finished event copied from earlier frames can sit next to a new incomplete one, so the bound
-  is about twice `max_event_bytes` plus one upstream frame. Reading an event for usage adds a
-  transient tape of at most 65,536 nodes (about 1.5 MiB at 24 bytes a node), freed before the
-  next event; admission does not count it.
-- **Exact bytes.** It forwards each event's exact bytes. When an event lies inside one upstream
-  frame, it forwards a slice of that frame without copying. The stream's first bytes are always
-  copied once, until three have arrived to tell a byte-order mark.
+  Per stream that is about twice `max_event_bytes`, one upstream frame and one tape.
+  **Admission does not count it yet.** Charging the relay's held bytes to the Operation's
+  permit is PR-7's, which owns the permit and the body's lifetime. The overload test proves
+  it (owed, final review M2).
+- **The default event bound** is the door's request bound, 32 MiB:
+  - the `OpenAI` Responses API's last event echoes the request;
+  - a server tool's result, a fetched page or a file, arrives whole in one Anthropic
+    event (final review M2).
+- **Exact bytes.** It forwards each event's exact bytes, without copying, except an event that
+  began in an earlier frame, which is copied once. A first frame of three bytes or more is told
+  for a byte-order mark in place; only a shorter one is held until three bytes arrive (final
+  review L7).
 - **Uncompressed only.** A `content-encoding` other than `identity` is refused before any byte,
   since the stream must be observed to be metered (D-29: the request then asks for `identity`).
 - **Bytes mode** relays frames untouched, under the same bounds and the same stop. It does not
@@ -159,8 +169,9 @@ its report; `.bytes(upstream)` does the same for a body that is not an event str
   read as more body. PR-7 settles such a body as §7.5 says for a stream with no final report.
 - **Idle.** `idle_timeout` (default 600 s, `[CONSCIOUS ASSUMPTION]` until WP3.0d measures real
   gaps) counts from when the relay starts waiting on the upstream. A slow client never causes an
-  idle cut, and every upstream frame starts the next wait afresh. A timeout too large to add to
-  the clock disables the cut.
+  idle cut, and every upstream frame starts the next wait afresh. A timeout over a year
+  disables the cut: tokio's timer adds to a deadline itself, so one near the clock's end would
+  panic there (final review L1).
 - **Before rehydration.** The relay forwards what the provider sent. Rehydration (ADR-0017, M2)
   becomes a splice over the relay's output.
 
@@ -181,16 +192,27 @@ forwarded, because a lenient client may act on it.
 ### 7.3 Metering
 
 - **Every event is classified** with `codec.frame`.
-- **Every event but a ping is read for usage, whatever its kind** (review M2). A dialect may
-  report usage on its last frame, as the `OpenAI` Responses API does.
-  - Data shaped like a JSON object must parse with `uaos-json` as one document, which also
-    refuses duplicate keys (T19), within `max_event_bytes`, 128 levels and 65,536 nodes.
-    Otherwise the stream is cut: a broken object never slips past metering while a client
-    reads it.
-  - `[CONSCIOUS ASSUMPTION]` Every dialect's event data is JSON, or not shaped like an
-    object. A dialect with text events that may begin with `{` needs a codec declaration
-    first. WP3.0d counts rejects on real streams; an `OpenAI`-compatible local server (C-01)
-    is where a false cut would show.
+- **Which frames are read for usage.**
+  - **Read:** a frame the codec classifies as `Usage`, `End` or `Error`, and any kind the
+    codec contract adds later. A dialect may report usage on its last frame, as the `OpenAI`
+    Responses API does (review M2), and an unknown kind fails closed.
+  - **Forwarded unread:** a `Content`, `Other` or `Ping` frame (final review M2). Its data
+    is the model's output, and two things in it must never cut a stream:
+    - a lone surrogate escape, from an emoji split across two text deltas, which
+      `uaos-json` refuses;
+    - a whole fetched document.
+  - **The codec's duty.** A usage report a dialect places on a frame its codec calls content
+    therefore goes unmetered, and codec conformance (M2) must catch such a codec.
+  - **How a read frame parses.** Data shaped like a JSON object must parse with `uaos-json`
+    as one document, which refuses duplicate keys (T19), within `max_event_bytes`, 128
+    levels and 2^20 nodes. Otherwise the stream is cut: a broken object never slips past
+    metering while a client reads it.
+  - `[CONSCIOUS ASSUMPTION]` The data of a read frame is JSON, or not shaped like an object,
+    and within the bounds. WP3.0d checks it on real streams, among them:
+    - an `OpenAI` Responses `response.completed` with `top_logprobs`, roughly 100 nodes a
+      token;
+    - one that echoes a large `instructions` and `tools`;
+    - an `OpenAI`-compatible local server (C-01).
   - It is shown to the codec with nothing masked, and the codec reads it with `codec.usage`.
   - A report that names no dimension is no report (scoped round M-a), so a provider that renames
     or empties its usage never settles a final cost of zero.
@@ -236,7 +258,12 @@ On every cut:
    connection;
 3. with a terminal frame from the caller (the dialect's error event, PR-7), an event stream
    yields it and ends. Without one, and always in bytes mode, the body ends in an error, so a
-   client never takes a cut for a complete answer (red line 9);
+   client never takes a cut for a complete answer (red line 9).
+   - **Precondition:** this holds when the client's response is chunked or length-delimited
+     HTTP/1.1, or HTTP/2.
+   - **Close-delimited responses:** an HTTP/1.0 response looks the same whether it ended
+     cleanly or in an error, so PR-7 relays to such a client only with a terminal frame, or
+     refuses it (final review L5);
 4. the report says what was forwarded, the last priced usage and the reason.
 
 When the client goes away and its body is dropped, the upstream is dropped with it, and the
@@ -303,13 +330,17 @@ H1). `RelayReport::settlement` is the rule PR-7 applies through PR-6b's actor:
   the cut reason and the kernel stop. Neither is hidden.
 - **T11, local DoS:**
   - admission by bytes;
-  - bounded events and bodies, and a node bound on reading an event;
+  - bounded events and bodies, a node bound on reading a frame for usage, and at most two
+    queued pieces per upstream frame;
+  - per stream about twice `max_event_bytes`, one frame and one tape; charging that to the
+    Operation's permit is PR-7's (§7.1);
   - an idle timeout;
   - bounded tasks;
   - no channels on the relay path.
-- **T19, parser differential:** usage is parsed by `uaos-json`, which refuses duplicate keys, and
-  object-shaped data must parse. A repeated usage key or a broken object therefore cannot make
-  UAOS meter less than a client reads.
+- **T19, parser differential:** a frame read for usage is parsed by `uaos-json`, which refuses
+  duplicate keys, and object-shaped data must parse. A repeated usage key or a broken object
+  on such a frame therefore cannot make UAOS meter less than a client reads. Content frames
+  are not read (§7.3).
 - **Privacy:**
   - frames are never logged;
   - reports and errors carry counts and codes only (I-11);
@@ -340,6 +371,7 @@ PR-6b exports these through the bus as metrics, with the ids of CLAUDE.md §4.
   - a `kernel.resumed` boots running only from a human.
 - **Admission:**
   - bytes in flight are counted, not requests;
+  - a request, or a charge, that can never fit is refused for good, not told to retry;
   - a permit's extra charge is refused past the bound;
   - dropping a permit releases both bounds.
 - **Configuration:**
@@ -361,7 +393,12 @@ PR-6b exports these through the bus as metrics, with the ids of CLAUDE.md §4.
   - an empty usage report is no report: on a usage frame it cuts, and on an end frame the
     stream settles the full reservation;
   - a report after the dialect's end is not final;
-  - an event past the node bound cuts;
+  - a frame read for usage past the node bound cuts;
+  - a content frame is forwarded unread, a lone surrogate escape and a 2 MiB tool result
+    included;
+  - one upstream frame of 10,000 blank lines and two events is forwarded in at most two
+    pieces;
+  - a huge idle timeout disables the cut without a panic;
   - a cut for `unpriced` or `cost_out_of_range` reports usage and cost that agree;
   - usage on an end frame, or on a frame the codec calls content, is metered;
   - an overrun engages the kernel stop and settles at least its cost;
@@ -393,7 +430,7 @@ PR-6b exports these through the bus as metrics, with the ids of CLAUDE.md §4.
   - a finished task frees its slot;
   - it runs hyper's executor tasks.
 
-**Seeded violations** (`cargo xtask negative`, 20):
+**Seeded violations** (`cargo xtask negative`, 22):
 
 | id | Seed | Caught by |
 |---|---|---|
@@ -414,6 +451,8 @@ PR-6b exports these through the bus as metrics, with the ids of CLAUDE.md §4.
 | `relay-idle-deadline-never-resets` | the idle deadline is set once, at the first wait | `upstream_activity_resets_the_idle_deadline` |
 | `sse-split-crlf-twice` | a CRLF split across frames counts as two line endings | `any_chunking_relays_the_same_bytes_and_events` |
 | `sse-empty-event-name-kept` | an empty event name reaches the codec as a name | `an_empty_event_name_is_no_name` |
+| `relay-reads-content-frames` | a content frame is read for usage | `a_content_frame_is_forwarded_unread` |
+| `admission-tells-a-misfit-to-retry` | a request that can never fit is told to retry | `a_request_that_can_never_fit_is_not_told_to_retry` |
 | `relay-empty-usage-report-counts` | a report naming no dimension counts as a report | `an_empty_usage_report_is_no_report` |
 | `relay-report-after-end-final` | a report after the dialect's end keeps the usage final | `a_report_after_the_end_is_not_final` |
 | `unbounded-channel` | an unbounded channel in the runtime | `cargo xtask clippy` |
@@ -421,9 +460,14 @@ PR-6b exports these through the bus as metrics, with the ids of CLAUDE.md §4.
 **Bench:** `cargo bench -p uaos-runtime --bench relay`: per-event p50, p95, p99 and the maximum,
 for content and usage events, with the environment label (§13).
 
-**Owed elsewhere:** a panic in a codec unwinds through the body, and the report then says
-`client_gone`. The client still sees a reset, not a clean end. The panic boundary (D-8) is PR-9's,
-and it reports such a cut as its own reason.
+**Owed elsewhere:**
+- **PR-9, the panic boundary (D-8):** a panic in a codec unwinds through the body, and the
+  report then says `client_gone`. The client still sees a reset, not a clean end. PR-9 reports
+  such a cut as its own reason.
+- **PR-7, owed with the overload test (final review M2):** charge the relay's held bytes, its
+  incomplete event, its queued pieces and its transient tape, to the Operation's permit.
+- **PR-7, close-delimited responses (final review L5):** relay to an HTTP/1.0 client only with
+  a terminal frame, or refuse it.
 
 ## 13. Measured, and open decisions
 
@@ -433,15 +477,16 @@ and it reports such a cut as its own reason.
     usage report.
   - **Attribution:** one event per chunk, so each timed poll is one event's work (review L5). One
     chunk in four ends mid-event.
-  - **What is timed:** every event is parsed and read for usage.
+  - **What is timed:** every usage event is parsed, read and priced; content events are split
+    and classified, not parsed (final review M2).
   - **Resolution:** the timer resolves about 100 ns here.
 
   | Events | n | p50 | p95 | p99 | max |
   |---|---|---|---|---|---|
-  | content | 38,000 | 0.6 µs | 0.7 µs | 0.8–1.1 µs | 19–100 µs |
-  | usage (parse, read, price, compare) | 2,000 | 0.7 µs | 0.8 µs | 0.9–1.3 µs | 1.6–98 µs |
+  | content | 38,000 | 0.2 µs | 0.2–0.3 µs | 0.3–0.4 µs | 14–30 µs |
+  | usage (parse, read, price, compare) | 2,000 | 0.8–1.1 µs | 1.0–1.6 µs | 1.3–1.9 µs | 2.4–4.1 µs |
 
-  - **Throughput:** about 230 MB/s through the relay.
+  - **Throughput:** about 430–560 MB/s through the relay.
   - **Budget:** the per-event budget of p95 ≤ 1 ms holds on this machine.
   - **Scope:** this is the kernel's own work over an always-ready upstream; network time is the
     provider's.

@@ -9,8 +9,9 @@
 //! - an event ends at a blank line;
 //! - a leading byte-order mark is not part of the first line.
 //!
-//! Each segment it emits is one event's exact bytes, its final line ending included, so the
-//! bytes forwarded are the bytes received.
+//! Each event is shown to a check, in order, as its exact bytes, final line ending included.
+//! What one piece clears for the client comes back as at most two runs of exact bytes, so the
+//! bytes forwarded are the bytes received and nothing is kept per event (final review M1).
 
 use std::borrow::Cow;
 use std::fmt;
@@ -20,42 +21,75 @@ use bytes::{Bytes, BytesMut};
 /// UTF-8 byte-order mark.
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
-/// One event's exact bytes. `skip` bytes at the front (the stream's byte-order mark) are
-/// forwarded but not parsed.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Segment {
-    pub(crate) bytes: Bytes,
-    pub(crate) skip: usize,
+/// One event as a check sees it: its exact bytes, of which the first `skip` (the stream's
+/// byte-order mark) are forwarded but not parsed.
+#[derive(Clone, Copy)]
+pub(crate) struct Event<'a> {
+    raw: &'a [u8],
+    skip: usize,
 }
 
-impl fmt::Debug for Segment {
+impl fmt::Debug for Event<'_> {
     // Lengths only: the bytes are upstream content.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Segment")
-            .field("len", &self.bytes.len())
+        f.debug_struct("Event")
+            .field("len", &self.raw.len())
             .field("skip", &self.skip)
             .finish()
     }
 }
 
-impl Segment {
+impl<'a> Event<'a> {
     /// The bytes an event-stream parser reads.
-    pub(crate) fn parsed(&self) -> &[u8] {
-        self.bytes.get(self.skip..).unwrap_or_default()
+    pub(crate) fn parsed(&self) -> &'a [u8] {
+        self.raw.get(self.skip..).unwrap_or_default()
+    }
+
+    /// Its exact bytes.
+    #[cfg(test)]
+    pub(crate) const fn raw(&self) -> &'a [u8] {
+        self.raw
     }
 }
 
-/// An event longer than the bound.
+/// What one piece cleared for the client, in order: the event completed from earlier pieces
+/// (copied once, as its start was held), then one run of the piece's own bytes, a slice of it.
+#[derive(Default)]
+pub(crate) struct Cleared {
+    pub(crate) copied: Option<Bytes>,
+    pub(crate) run: Option<Bytes>,
+    /// Events and comment blocks in `copied` and `run`.
+    pub(crate) events: u64,
+}
+
+impl fmt::Debug for Cleared {
+    // Lengths only: the bytes are upstream content.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Cleared")
+            .field("copied", &self.copied.as_ref().map(Bytes::len))
+            .field("run", &self.run.as_ref().map(Bytes::len))
+            .field("events", &self.events)
+            .finish()
+    }
+}
+
+/// Why a piece was not cleared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TooLarge;
+pub(crate) enum PushError<E> {
+    /// An event passed the bound.
+    TooLarge,
+    /// The check refused an event.
+    Refused(E),
+}
 
 /// Splits a byte stream into events.
 pub(crate) struct Splitter {
     /// The start of an event whose end has not arrived yet.
     pending: BytesMut,
-    /// The first bytes of the stream, held until three have arrived, to tell a byte-order mark.
+    /// The first bytes of a stream whose first piece was shorter than three bytes, held until
+    /// three have arrived to tell a byte-order mark. `None` once that is decided.
     prelude: Option<BytesMut>,
-    /// Bytes at the front of `pending` the parser skips (the byte-order mark).
+    /// Bytes at the front of the next event the parser skips (the byte-order mark).
     skip: usize,
     /// Nothing is on the current line yet.
     at_line_start: bool,
@@ -88,80 +122,101 @@ impl Splitter {
         }
     }
 
-    /// Splits `chunk`: every event that ends in it goes to `out`, in order. What remains is kept
-    /// for the next chunk.
+    /// Splits `chunk`. Every event that ends in it is shown to `check`, in order; what remains
+    /// is kept for the next chunk. Returns what the chunk cleared.
     ///
     /// # Errors
-    /// [`TooLarge`] once an event passes the bound; the events before it are in `out`.
-    pub(crate) fn push(&mut self, chunk: &Bytes, out: &mut Vec<Segment>) -> Result<(), TooLarge> {
-        if let Some(prelude) = &mut self.prelude {
+    /// [`PushError::TooLarge`] once an event passes the bound, or [`PushError::Refused`] with
+    /// the check's error. Either way nothing of the chunk is cleared.
+    pub(crate) fn push<E>(
+        &mut self,
+        chunk: &Bytes,
+        check: impl FnMut(Event<'_>) -> Result<(), E>,
+    ) -> Result<Cleared, PushError<E>> {
+        let Some(prelude) = &mut self.prelude else {
+            return self.split(chunk, 0, check);
+        };
+        // The byte-order mark is told in place when the first piece holds three bytes, so
+        // the first piece is not copied (final review L7).
+        let first = if prelude.is_empty() && chunk.len() >= BOM.len() {
+            chunk.clone()
+        } else {
             prelude.extend_from_slice(chunk);
             if prelude.len() < BOM.len() {
                 return if prelude.len() > self.max_event {
-                    Err(TooLarge)
+                    Err(PushError::TooLarge)
                 } else {
-                    Ok(())
+                    Ok(Cleared::default())
                 };
             }
-            let first = prelude.split().freeze();
-            self.prelude = None;
-            let from = if first.starts_with(BOM) { BOM.len() } else { 0 };
-            self.skip = from;
-            return self.split(&first, from, out);
-        }
-        self.split(chunk, 0, out)
+            prelude.split().freeze()
+        };
+        self.prelude = None;
+        let from = if first.starts_with(BOM) { BOM.len() } else { 0 };
+        self.skip = from;
+        self.split(&first, from, check)
     }
 
-    /// At the end of the stream: whatever remains, as one last segment. A lenient client may act
-    /// on an event that no blank line ended, so the relay classifies it too.
-    pub(crate) fn finish(&mut self) -> Option<Segment> {
+    /// At the end of the stream: whatever remains, as one last event. A lenient client may act
+    /// on an event that no blank line ended, so the relay classifies it too. Returns its bytes
+    /// and how many at the front the parser skips.
+    pub(crate) fn finish(&mut self) -> Option<(Bytes, usize)> {
         if let Some(prelude) = self.prelude.take() {
             // Fewer than three bytes ever arrived: no byte-order mark fits.
-            return (!prelude.is_empty()).then(|| Segment {
-                bytes: prelude.freeze(),
-                skip: 0,
-            });
+            return (!prelude.is_empty()).then(|| (prelude.freeze(), 0));
         }
         self.pending_cr = None;
         if self.pending.is_empty() {
             return None;
         }
-        let skip = std::mem::take(&mut self.skip);
-        Some(Segment {
-            bytes: self.pending.split().freeze(),
-            skip,
-        })
+        Some((self.pending.split().freeze(), std::mem::take(&mut self.skip)))
     }
 
-    fn split(&mut self, chunk: &Bytes, from: usize, out: &mut Vec<Segment>) -> Result<(), TooLarge> {
-        // `start` is where the chunk's not yet emitted bytes begin; `scan` is where to look.
+    fn split<E>(
+        &mut self,
+        chunk: &Bytes,
+        from: usize,
+        mut check: impl FnMut(Event<'_>) -> Result<(), E>,
+    ) -> Result<Cleared, PushError<E>> {
+        // `start` is where the chunk's not yet emitted bytes begin; `scan` is where to look;
+        // `run` is the span of this chunk's own cleared events.
+        let mut cleared = Cleared::default();
+        let mut run: Option<(usize, usize)> = None;
         let mut start = 0;
         let mut scan = from;
         loop {
             let Some(end) = self.find_end(chunk, scan) else {
                 let held = self.pending.len() + (chunk.len() - start);
                 if held > self.max_event {
-                    return Err(TooLarge);
+                    return Err(PushError::TooLarge);
                 }
                 self.pending.extend_from_slice(&chunk[start..]);
-                return Ok(());
+                break;
             };
             if self.pending.len() + (end - start) > self.max_event {
-                return Err(TooLarge);
+                return Err(PushError::TooLarge);
             }
-            let bytes = if self.pending.is_empty() {
-                chunk.slice(start..end)
+            let skip = std::mem::take(&mut self.skip);
+            if self.pending.is_empty() {
+                check(Event {
+                    raw: &chunk[start..end],
+                    skip,
+                })
+                .map_err(PushError::Refused)?;
+                run = Some((run.map_or(start, |(begin, _)| begin), end));
             } else {
+                // Only the first event of a chunk can have started in an earlier one.
                 self.pending.extend_from_slice(&chunk[start..end]);
-                self.pending.split().freeze()
-            };
-            out.push(Segment {
-                bytes,
-                skip: std::mem::take(&mut self.skip),
-            });
+                let copied = self.pending.split().freeze();
+                check(Event { raw: &copied, skip }).map_err(PushError::Refused)?;
+                cleared.copied = Some(copied);
+            }
+            cleared.events += 1;
             start = end;
             scan = end;
         }
+        cleared.run = run.map(|(begin, end)| chunk.slice(begin..end));
+        Ok(cleared)
     }
 
     /// The offset just past the blank line that ends the current event, looking from `from`, or
@@ -282,21 +337,36 @@ pub(crate) fn fields(raw: &[u8]) -> Fields<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+
     use super::*;
 
-    fn split_all(pieces: &[&[u8]]) -> Vec<Vec<u8>> {
+    /// Every event's exact bytes, and everything cleared, piece by piece.
+    fn split_all(pieces: &[&[u8]]) -> (Vec<Vec<u8>>, Vec<u8>) {
         let mut s = Splitter::new(1 << 20);
-        let mut out = Vec::new();
+        let (mut events, mut cleared) = (Vec::new(), Vec::new());
         for p in pieces {
-            s.push(&Bytes::copy_from_slice(p), &mut out).unwrap();
+            let out = s
+                .push(&Bytes::copy_from_slice(p), |e| {
+                    events.push(e.raw().to_vec());
+                    Ok::<(), Infallible>(())
+                })
+                .unwrap();
+            for part in [out.copied, out.run].into_iter().flatten() {
+                cleared.extend_from_slice(&part);
+            }
         }
-        out.extend(s.finish());
-        out.into_iter().map(|seg| seg.bytes.to_vec()).collect()
+        if let Some((tail, _)) = s.finish() {
+            events.push(tail.to_vec());
+            cleared.extend_from_slice(&tail);
+        }
+        (events, cleared)
     }
 
     #[test]
     fn events_end_at_blank_lines_in_every_line_ending() {
-        let events = split_all(&[b"data: a\n\ndata: b\r\n\r\ndata: c\r\rdata: d"]);
+        let body: &[u8] = b"data: a\n\ndata: b\r\n\r\ndata: c\r\rdata: d";
+        let (events, cleared) = split_all(&[body]);
         assert_eq!(
             events,
             vec![
@@ -306,26 +376,48 @@ mod tests {
                 b"data: d".to_vec()
             ]
         );
+        assert_eq!(cleared, body.to_vec());
     }
 
     #[test]
     fn a_crlf_split_across_pieces_is_one_line_ending() {
         // `\r` | `\n\r` | `\ndata` : one line "data: a", then a CRLF blank line.
         assert_eq!(
-            split_all(&[b"data: a\r", b"\n\r", b"\ndata: b\n\n"]),
+            split_all(&[b"data: a\r", b"\n\r", b"\ndata: b\n\n"]).0,
             vec![b"data: a\r\n\r\n".to_vec(), b"data: b\n\n".to_vec()]
         );
         // A blank line ended by a lone CR at the end of a piece waits for the next byte.
         assert_eq!(
-            split_all(&[b"data: a\r\r", b"\ndata: b\n\n"]),
+            split_all(&[b"data: a\r\r", b"\ndata: b\n\n"]).0,
             vec![b"data: a\r\r\n".to_vec(), b"data: b\n\n".to_vec()]
         );
     }
 
     #[test]
     fn a_byte_order_mark_is_not_line_content() {
-        let events = split_all(&[b"\xEF", b"\xBB\xBF\ndata: a\n\n"]);
-        assert_eq!(events, vec![b"\xEF\xBB\xBF\n".to_vec(), b"data: a\n\n".to_vec()]);
+        // Split across pieces, and whole in a first piece of three bytes or more.
+        for pieces in [
+            &[&b"\xEF"[..], b"\xBB\xBF\ndata: a\n\n"][..],
+            &[&b"\xEF\xBB\xBF\ndata: a\n\n"[..]][..],
+        ] {
+            let (events, _) = split_all(pieces);
+            assert_eq!(events, vec![b"\xEF\xBB\xBF\n".to_vec(), b"data: a\n\n".to_vec()]);
+        }
+    }
+
+    #[test]
+    fn one_piece_clears_at_most_two_runs() {
+        // Final review M1: an event completed from an earlier piece, then the piece's own events.
+        let mut s = Splitter::new(1 << 20);
+        let ok = |_: Event<'_>| Ok::<(), Infallible>(());
+        let first = s.push(&Bytes::from_static(b"data: a"), ok).unwrap();
+        assert!(first.copied.is_none() && first.run.is_none());
+        let blank_lines = "\n".repeat(10_000);
+        let second = Bytes::from(format!("\n\n{blank_lines}data: b\n\ndata: c"));
+        let out = s.push(&second, ok).unwrap();
+        assert_eq!(out.copied.as_deref(), Some(&b"data: a\n\n"[..]));
+        assert_eq!(out.run.map(|r| r.len()), Some(10_000 + "data: b\n\n".len()));
+        assert_eq!(out.events, 1 + 10_000 + 1);
     }
 
     #[test]
@@ -342,13 +434,14 @@ mod tests {
     }
 
     #[test]
-    fn an_event_past_the_bound_is_refused() {
+    fn an_event_past_the_bound_is_refused_and_nothing_clears() {
         let mut s = Splitter::new(12);
-        let mut out = Vec::new();
-        assert_eq!(
-            s.push(&Bytes::from_static(b"data: 1\n\ndata: 123456789"), &mut out),
-            Err(TooLarge)
-        );
-        assert_eq!(out.len(), 1, "the event before the oversized one was kept");
+        let mut seen = 0;
+        let out = s.push(&Bytes::from_static(b"data: 1\n\ndata: 123456789"), |_| {
+            seen += 1;
+            Ok::<(), Infallible>(())
+        });
+        assert_eq!(out.map(|_| ()), Err(PushError::TooLarge));
+        assert_eq!(seen, 1, "the event before the oversized one was checked");
     }
 }

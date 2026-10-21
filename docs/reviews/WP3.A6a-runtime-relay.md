@@ -71,3 +71,29 @@ fresh-context agent reading only, 2026-10-21.
 | L-f | The property no longer read object-shaped events. | A one-line JSON event in all seven locales under any chunking, nothing cut. The serializer keeps a blank line after a CR a blank line, so events never merge into one that is not a document. 20,000 cases pass. |
 | L-g | Two tests could stall instead of failing on a regression. | `tokio::time::timeout` on both, with the exact cut reason. |
 | L-h | Doc drift in `lib.rs`, §2 and §8. | Corrected. |
+
+## Final full review (D-31)
+
+**Reviewed:** `9a05b29..33193f0`, the whole PR, by a fresh-context agent reading only, 2026-10-21.
+The agent formed its view before reading this record.
+**Result:** 0 High · 2 Medium · 7 Low.
+**Verified:**
+- **Stop paths:** no byte forwarded after a cut or a stop.
+- **Wakers:** no lost waker; no completed future polled again.
+- **Reports:** exactly one report on every path.
+- **Settlement:** correct for every end and cost.
+- **Splitter:** against WHATWG.
+- **Stop, admission and supervisor:** all three hold.
+- **Seeds:** all 20 bite with their messages.
+
+| | Finding | Fix |
+|---|---|---|
+| M1 | The splitter queued every segment of a frame twice, in a reused scratch vector and in the forward queue, and neither shrank. One 400 KB frame of blank lines held about 36 MiB per stream, outside the stated bound and outside admission. | Each event is metered as the splitter finds it, and one frame clears at most two pieces: the event completed from earlier frames, then one slice of the frame's own events. Test `one_upstream_frame_is_forwarded_in_at_most_two_pieces` (10,000 blank lines). |
+| M2 | The 1 MiB event bound and the strict parse of every object-shaped event cut legitimate streams: a server tool's whole result, a `response.completed` with `top_logprobs` or echoing the request, and, found while fixing, a lone surrogate escape from an emoji split across two text deltas, which `uaos-json` refuses. | Only usage, end and error frames, and kinds added later, are read; content, other and ping frames are forwarded unread. The event bound is the door's request bound, 32 MiB, and a read frame may hold 2^20 nodes. The per-stream memory bound is stated; charging it to the Operation's permit is **owed by PR-7** with the overload test. Test `a_content_frame_is_forwarded_unread`; negative `relay-reads-content-frames`. |
+| L1 | `checked_add` guarded the deadline, but tokio's timer adds to it again and could panic. | A timeout over a year disables the cut. Test `a_huge_idle_timeout_disables_the_cut_without_a_panic`. |
+| L2 | `a_stop_reaches_every_live_permit` never polled the watch before the stop. | The watch is polled and waiting before the stop engages. |
+| L3 | The event-bound seed was caught only through the cut reason, never by the splitter's bound alone. | The test sends data that is not object-shaped, in an event no blank line ends, and asserts nothing is forwarded. |
+| L4 | `SseEvent`'s doc promised JSON data, which `[DONE]` is not. | The doc says data is as sent and need not be JSON. |
+| L5 | Red line 9's error end holds only for chunked or length-delimited responses. | §7.4 states the precondition; a close-delimited client is **owed by PR-7**. |
+| L6 | A request that can never fit was told to retry in 1 s, forever. | `INGRESS_TOO_LARGE`, not retryable, `retry-after` zero, for an admission or a charge. Negative `admission-tells-a-misfit-to-retry`. |
+| L7 | The first frame was copied whole, not just its first three bytes. | A first frame of three bytes or more is told for a byte-order mark in place. |

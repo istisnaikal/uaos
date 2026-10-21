@@ -293,7 +293,8 @@ impl EndpointDecl {
     }
 }
 
-/// One server-sent event of a response stream; `data` is one complete JSON document. Built by
+/// One server-sent event of a response stream; `data` is as the provider sent it, and need not
+/// be JSON (`[DONE]`, say), so a codec never assumes it parses (runtime contract §7.3). Built by
 /// the host; `#[non_exhaustive]` (contract §9).
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
