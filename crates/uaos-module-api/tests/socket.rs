@@ -496,6 +496,33 @@ impl Module for Counter {
             out.push(Decl::Emit(ModuleEvent::new(code("noted")))).unwrap();
         }
     }
+
+    fn on_event(&self, _event: &EventView<'_>, mut state: StateMut<'_>, out: DeclsMut<'_>) {
+        // As on a hook: the append is attempted on every event, and past the bound it is refused
+        // and marks the state.
+        let grew = state.append(&[1]).is_ok();
+        let _ = (grew, out);
+    }
+}
+
+/// A module with no `on_event` of its own.
+struct Silent(Manifest);
+
+impl Module for Silent {
+    fn manifest(&self) -> &Manifest {
+        &self.0
+    }
+
+    fn on_hook(&self, _cx: &HookCx<'_>, _state: StateMut<'_>, _out: DeclsMut<'_>) {}
+}
+
+fn counter_manifest() -> Manifest {
+    builder()
+        .hook(HookDecl::new(HookPoint::Classify, HookMode::Observe))
+        .event(event("noted", EventClass::Ephemeral, &[]))
+        .state_bytes(4)
+        .build()
+        .unwrap()
 }
 
 #[test]
@@ -523,14 +550,38 @@ fn a_call_that_outgrows_its_state_is_struck_whole() {
     assert_eq!(state.as_bytes().len(), 4, "the state stopped at its bound");
     assert!(!state.exceeded(), "a struck copy never becomes the state");
 
-    let mut out = Decls::new(8);
+    // The default `on_event` declares nothing and leaves the state as it was.
+    let silent = full_offer().admit_module(Silent(counter_manifest())).unwrap();
     let event_type = EventType::new("op.created").unwrap();
-    module.module().on_event(
-        &EventView::new(pocket(1), Seq(1), &event_type, None),
-        StateMut::new(&mut state),
-        DeclsMut::new(&mut out),
+    let before = state.as_bytes().to_vec();
+    assert_eq!(
+        silent.call_event(&EventView::new(pocket(1), Seq(1), &event_type, None), &mut state),
+        Ok(Vec::new()),
+        "the default on_event declared something"
     );
-    assert!(out.is_empty(), "the default on_event declares nothing");
+    assert_eq!(state.as_bytes(), before.as_slice());
+}
+
+/// PR-4c final review M1: `call_event` strikes an event that outgrows its state, live and on
+/// replay, and the struck copy never becomes the state.
+#[test]
+fn an_event_that_outgrows_its_state_is_struck_whole() {
+    let module = full_offer().admit_module(Counter(counter_manifest())).unwrap();
+    let event_type = EventType::new("op.created").unwrap();
+    for replay in [false, true] {
+        let mut state = ModuleState::new(module.manifest().state_bytes());
+        let outcomes: Vec<_> = (1..=6)
+            .map(|n| {
+                let live = EventView::new(pocket(1), Seq(n), &event_type, None);
+                let event = if replay { live.replayed() } else { live };
+                module.call_event(&event, &mut state)
+            })
+            .collect();
+        assert_eq!(outcomes[4], Err(Strike::StateExceeded), "an outgrown event was kept");
+        assert_eq!(outcomes[5], Err(Strike::StateExceeded));
+        assert_eq!(state.as_bytes().len(), 4, "the state stopped at its bound");
+        assert!(!state.exceeded(), "a struck copy never becomes the state");
+    }
 }
 
 #[test]

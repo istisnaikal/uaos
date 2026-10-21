@@ -15,7 +15,7 @@ use crate::decl::{CandidateId, Decl, Decls, DeclsMut, Strike, check_decls};
 use crate::grant_ref::GrantRef;
 use crate::manifest::{HookPoint, KernelOffer, Manifest, Refusal};
 use crate::state::{ModuleState, StateMut};
-use crate::view::StructuralView;
+use crate::view::{Sealed, StructuralView};
 
 /// What a hook may know about its Operation: identifiers and metadata, never content. Built by
 /// the host; `#[non_exhaustive]` so it grows additively (contract §9).
@@ -113,8 +113,10 @@ impl<'c> HookCx<'c> {
 
     /// Shows the redacted structural view.
     #[must_use]
-    pub const fn with_view(mut self, view: StructuralView<'c, 'c>) -> Self {
-        self.view = Some(view);
+    pub fn with_view(mut self, sealed: &'c Sealed<'c, 'c>) -> Self {
+        // From a seal only: a seal refuses a finding it cannot place, where an unsealed view would
+        // mask nothing for it (contract §2 rule 5; PR-4c final review M2).
+        self.view = Some(sealed.view());
         self
     }
 

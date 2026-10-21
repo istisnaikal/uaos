@@ -261,18 +261,20 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     comparison decodes more than six times `MAX_SELECTOR_TEXT` bytes. One call costs at most
     `MAX_VISITS` visits, each O(`MAX_SELECTOR_TEXT` + log ranges).
   - **`ModuleText`:** a variation selector's base is visible, and an ideographic one follows
-    a CJK ideograph.
+    a CJK ideograph. The Mongolian free variation selectors U+180B–U+180D and U+180F now count
+    as variation selectors, so a run of them is refused too.
   - **Seals:** `Mask::seal` returns a `Sealed` (`#[must_use]`) that holds its tape and builds the
-    view, so a seal is never used over another tape; the runtime relay reads through it. A key
-    finding on a node with no key refuses the seal.
+    view, so a seal is never used over another tape; the runtime relay reads through it, and
+    `HookCx::with_view` takes one. A key finding on a node with no key refuses the seal.
   - **Procedure:** `Visits` is not `Copy`; a `RoleMap` carries one budget; the call procedure
     is the crate's own (`Admitted::call_hook`, `Admitted::call_event`).
   - **Tests:** a member scan charged per member; the raw bound at exactly six times
     `MAX_SELECTOR_TEXT`, past which nothing is decoded; one `RoleMap` budget exhausted; a sealed
     view over its own tape; keyless key findings refused; visible bases, ideographic bases and
     the Mongolian free variation selectors.
-  - **Negatives:** eight seeded violations, plus PR-4's variation-run seed retargeted to the
-    new rule (after the reviews: one retired, two added).
+  - **Negatives:** eleven seeded violations, and PR-4's variation-run seed retargeted to the new
+    rule; one seed of the first draft, `mask-seal-ignores-tape`, was retired with the check it
+    seeded.
 - P3 Move 1, PR-4 (spec first): the module socket's contract,
   `docs/adr/appendix/0010-module-socket.md`, before any code.
   - **`uaos.module/1` (draft):** a manifest built through a builder, with `requires`, a closed set

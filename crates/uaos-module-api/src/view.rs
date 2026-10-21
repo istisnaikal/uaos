@@ -61,7 +61,8 @@ impl Mask {
     /// longer grows with depth (contract §7). The [`Sealed`] holds `tape` and the mask and builds
     /// the view itself, so a seal is never used over another tape, and the mask cannot change
     /// while it lives (contract §2 rule 5; PR-4c V1 review M2: a fingerprint of the tape could
-    /// match a refilled buffer). An unsealed view is as correct and slower.
+    /// match a refilled buffer). An unsealed view cannot refuse: a finding it cannot place masks
+    /// nothing in it, so a host hands modules and codecs views from seals (PR-4c final review M2).
     ///
     /// # Errors
     /// [`MaskError`] if a finding names a node that is not on `tape`, or a key finding a node
@@ -156,8 +157,11 @@ pub struct StructuralView<'v, 'a> {
 }
 
 impl<'v, 'a> StructuralView<'v, 'a> {
-    /// A view over `tape` in which what `mask` names reads as masked, each visit O(depth). The
-    /// host builds it; a sealed mask builds its own ([`Sealed::view`]), O(log ranges) a visit.
+    /// A view over `tape` in which what `mask` names reads as masked, each visit O(depth). It
+    /// cannot refuse: a finding off the tape, or a key finding on a node with no key, masks nothing
+    /// in it. A host hands modules and codecs the view of a seal ([`Sealed::view`]), which refuses
+    /// those and costs O(log ranges) a visit; this one serves tests and views with nothing
+    /// masked.
     #[must_use]
     pub const fn new(tape: &'v Tape<'a>, mask: &'v Mask) -> Self {
         Self {
