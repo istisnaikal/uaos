@@ -117,6 +117,7 @@ impl fmt::Debug for Mask {
 /// containers as disjoint `[start, end)` id ranges, so "inside a masked container" is a binary
 /// search. It borrows both, so neither can change while it lives.
 #[derive(Clone)]
+#[must_use = "a seal is used only through its view (`Sealed::view`); dropped, the view reads unsealed"]
 pub struct Sealed<'v, 'a> {
     tape: &'v Tape<'a>,
     mask: &'v Mask,
