@@ -607,6 +607,7 @@ fn every_code_is_one_the_contract_lists() {
         "state_exceeded",
         "not_own_child",
         "unknown_candidate",
+        "budget_exceeded",
     ]
     .into_iter()
     .collect();
@@ -658,6 +659,7 @@ fn every_code_is_one_the_contract_lists() {
         Strike::StateExceeded,
         Strike::NotOwnChild,
         Strike::UnknownCandidate,
+        Strike::BudgetExceeded,
     ]
     .iter()
     .map(Strike::code)

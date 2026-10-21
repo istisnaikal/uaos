@@ -75,8 +75,8 @@ impl ModuleText {
     /// Checks and wraps `text`, unchanged: no normalization, no case folding.
     ///
     /// # Errors
-    /// [`TextError`] if it is too long, holds a control character, or holds an explicit
-    /// bidirectional control.
+    /// [`TextError`] if it is too long, or holds a control character, an explicit bidirectional
+    /// control, a tag character, or a variation selector that follows no base character.
     pub fn new(text: impl Into<String>) -> Result<Self, TextError> {
         let text = text.into();
         if text.len() > MAX_MODULE_TEXT {
@@ -347,7 +347,11 @@ impl Decl {
     }
 }
 
-/// Why one hook call's declarations are refused; the module gets a strike and none of them apply.
+/// Why one hook call's declarations are refused: the module gets a strike and none of the
+/// call's declarations apply. A static strike (from [`check_decls`]) and
+/// [`Strike::StateExceeded`] also discard the call's state changes; a host-side strike
+/// ([`Strike::NotOwnChild`], [`Strike::UnknownCandidate`], [`Strike::BudgetExceeded`]) keeps them
+/// (contract §5).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Strike {
@@ -371,6 +375,9 @@ pub enum Strike {
     /// A ranking naming a candidate outside the offer; the host checks it against the offer.
     #[error("a ranking names a candidate outside the offer")]
     UnknownCandidate,
+    /// The call's selectors ran past the host's visit budget ([`crate::Visits`]).
+    #[error("the call's selectors ran past their visit budget")]
+    BudgetExceeded,
     /// A declaration the point, or the hook's mode, does not allow.
     #[error("a declaration this point or mode does not allow")]
     NotAllowedHere,
@@ -396,6 +403,7 @@ impl Strike {
             Self::StateExceeded => "state_exceeded",
             Self::NotOwnChild => "not_own_child",
             Self::UnknownCandidate => "unknown_candidate",
+            Self::BudgetExceeded => "budget_exceeded",
             Self::NotAllowedHere => "not_allowed_here",
             Self::UndeclaredCode => "undeclared_code",
             Self::UndeclaredAction => "undeclared_action",

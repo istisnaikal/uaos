@@ -702,7 +702,11 @@ proptest! {
             prop_assert_eq!(a.key().unwrap(), b.key().unwrap(), "a sealed view disagreed with an unsealed one");
             prop_assert_eq!(a.text().unwrap(), b.text().unwrap(), "a sealed view disagreed with an unsealed one");
             prop_assert_eq!(a.number_text(), b.number_text(), "a sealed view disagreed with an unsealed one");
-            prop_assert_eq!(slow.touches_masked(*id), fast.touches_masked(*id));
+            prop_assert_eq!(
+                slow.touches_masked(*id),
+                fast.touches_masked(*id),
+                "a sealed view disagreed with an unsealed one"
+            );
         }
     }
 }

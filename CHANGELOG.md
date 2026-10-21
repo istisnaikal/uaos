@@ -223,10 +223,12 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       discard the declarations. Two further rules are contract text and PR-8 proof obligations,
       not code here: hooks see frames and errors from before rehydration, and one call of a
       module per pocket runs at a time.
-    - A module is checked against the manifest it was admitted under (`Admitted`). Masks seal
-      against their tape, and every selector resolution spends a visit budget, so the kernel's
-      cost per call is bounded. Codecs declare their billing dimensions, and a strip keeps its
-      anchor and never touches masked content.
+    - A module is checked against the manifest it was admitted under (`Admitted`).
+    - Masks seal against their tape, and every selector resolution spends a visit budget. No
+      per-call cost bound is claimed yet: member scans and string decodes are not charged, and
+      that is PR-4c's, split under D-31, before PR-8.
+    - Codecs declare their billing dimensions.
+    - A strip keeps its anchor and never touches masked content.
     - A strip may not enclose a forbidden role (`RoleMap::touching`, `RoleMap::may_strip`), and
       a masked container masks everything inside it.
     - `ModuleText` refuses Unicode tag characters and accepts CRLF.
