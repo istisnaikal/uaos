@@ -183,8 +183,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     property: a boot cut after its n-th append, for every n, converges on the next boot.
   - **Bench (§7):** 49,751 records after a crash boot in 867 ms median on the reference
     machine, about a tenth of it in `boot` itself.
-  - **Negatives:** thirteen seeded violations.
-  - **Review:** the V1 review (0 High, 7 Medium, 9 Low) is filed in
+  - **Negatives:** seventeen seeded violations.
+  - **Review:** the V1 review (0 High, 7 Medium, 9 Low), the scoped round (0 High, 2 Medium,
+    4 Low) and the final review (0 High, 2 Medium, 7 Low) are filed in
     `docs/reviews/WP3.A6b-boot-recovery.md`.
 - P3 Move 1, PR-6a (WP3.A6a): the crate `uaos-runtime`, first half of the runtime spine: the
   kernel stop, admission, the pinned configuration snapshot, declared pricing, the metered relay

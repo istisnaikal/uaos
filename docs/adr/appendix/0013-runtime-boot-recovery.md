@@ -44,6 +44,9 @@ records, closes what a crash left open, and explains the boot in one record.
   ADR-0018's appendix owes (§5).
 - **PR-6c, a clean shutdown record.** Until one exists, a crash with nothing open looks like a
   clean exit (§2 step 5).
+- **PR-6c, the ledger's recovery entries' attribution.** They carry the boot's correlation and
+  no `operation_id`: the ledger keeps no Operation per reservation. The one-record intent links
+  them (final review L4).
 
 These are a reversible split of the approved PR-6 row (Move 1 plan §7) into units small enough to
 review (D-31).
@@ -58,7 +61,9 @@ carry. It runs these steps in this order:
    (sequence 0) and end at its head: the next sequence number after the last is the journal's
    next, and the last record's chain hash is the journal's head. A journal never drops a
    verified record (a shred adds `chunk.shredded`), so an empty slice must mean an empty
-   journal. Otherwise boot refuses with `RUNTIME_BOOT_RECORDS_STALE`. A retry with the records
+   journal. The records also follow one another, by sequence and chain link, so a slice with a
+   gap or a record twice is refused too (final review L1). Otherwise boot refuses with
+   `RUNTIME_BOOT_RECORDS_STALE`. A retry with the records
    of an earlier attempt, a suffix, or another journal's records would repeat writes, boot a
    journaled stop running, or rebuild the wrong ledger (V1 review L2, scoped round M1).
 1. **Configuration drift, before anything is written.**
@@ -67,7 +72,7 @@ carry. It runs these steps in this order:
      boot refuses: `CONFIG_DRIFT`, and nothing is journaled.
    - `[CONSCIOUS ASSUMPTION]` Refusal is the default. The way forward is a configuration
      published with a higher version. An explicit downgrade with an approval is M3's (the
-     write side).
+     write side), and so is the registered remediation's review-and-approve path.
    - `[CONSCIOUS ASSUMPTION]` An equal version with different content is not detected: no
      snapshot digest is journaled yet (V1 review L7). The write side, M3, publishes every change
      under a new version and journals its digest.
@@ -94,13 +99,19 @@ carry. It runs these steps in this order:
    `JOURNAL_DISK_FULL` here as at boot's own records. Anything else the ledger reports, at
    replay or recovery, is `BUDGET_LEDGER_INCONSISTENT` (V1 review M1, scoped round M2 and L1).
 4. **Open intents.**
-   - An Operation whose last journaled state is `Reserved` has an intent and no outcome.
+   - An Operation whose records hold an intent and no outcome is open.
    - Boot moves it to `Indeterminate` (`Transition::CrashRecovered`) and journals
      `op.indeterminate` for it: critical, with the reason `crash_recovery`.
    - The record carries the side-effect class the intent declared, not compensable, and the
      payload `{"reason": "crash_recovery", "may_have_taken_effect": true}` (V1 review M7).
      Neither success nor failure is assumed (red line 3): the request may have reached the
-     provider.
+     provider. The record is the Operation's. It carries the first intent's session, pocket,
+     request and agent ids and its correlation, and links to it (`parent_id`).
+   - `[CONSCIOUS ASSUMPTION]` One ordering window says more than happened. A crash between
+     releasing a denied Operation's reservation and journaling `op.denied` leaves an intent
+     with no outcome, and boot makes it indeterminate with `may_have_taken_effect`, though a
+     released reservation never began. That overstates the effect, never hides it. PR-6c's
+     one-record transitions close the window (final review L3).
    - Once an Operation has an outcome, a later intent does not reopen it. Only an inconsistent
      journal holds one, and reopening would make a committed Operation indeterminate (V1 review
      L1).
@@ -117,11 +128,18 @@ carry. It runs these steps in this order:
      running and a crash shows: work left open, or an interrupted boot's `op.indeterminate` with
      no `kernel.booted` after it. A stop engaged just before the crash may not have been
      journaled (runtime contract §3 rule 3). A stuck item is no evidence: it stays from boot to
-     boot. A crash with nothing open looks like a clean exit until PR-6c journals one, and so
-     does a boot interrupted after closing only a reservation that no intent named;
+     boot. Recovered ledger work counts too: a crash between a reserve and its intent leaves a
+     reservation no intent names. What leaves no evidence until PR-6c:
+     - a crash with nothing open, which looks like a clean exit until a clean shutdown is
+       journaled;
+     - a boot interrupted after closing only reservations no intent named, which the one-record
+       intent removes;
+     - a crash whose only open work is a stuck item;
    - the configuration version.
 
-   Every complete boot is explained.
+   Every complete boot is explained. The record is critical. It is journaled at the highest risk
+   tier when the boot closed anything or says a stop may have been lost, and at the lowest when
+   nothing was open.
 
 `boot` returns the `Stop`, the `Ledger` and a `BootReport` of the same counts.
 
@@ -192,7 +210,8 @@ measures them (V1 review M5).
 
 - **T6:** money that may be spent is never released at boot.
 - **Red line 3:** an interrupted Operation is never called done or undone.
-- **Red line 9:** every boot is explained in the journal.
+- **Red line 9:** every complete boot is explained in the journal. An interrupted boot's records
+  stand with their reasons (§3).
 - **T11:** boot's memory grows with the journal, not only with the open items. The caller
   holds every verified record, boot decodes every budget entry, and it keeps one small entry
   per Operation the journal names, so a closed Operation is never reopened. Holding the
@@ -203,7 +222,9 @@ measures them (V1 review M5).
 ## 7. Measured, seeded
 
 **Bench** (`cargo bench -p uaos-runtime --bench boot`, 2026-10-21, at `d503a43`; the boot
-procedure has changed since only in checks that read no more than the records already held):
+procedure has changed since only in work over the records already held, and the appends are the
+same. That work is the checks of step 0, the intents' bookkeeping, the payload's strings and
+the evidence scan):
 - **Machine:** the reference machine, Windows 10, environment label `reference-win10-local` (D-33).
 - **Method:** 3 rounds per size, each on a fresh copy of a journal that a crash left. Every
   Operation reserved, journaled its intent, settled and committed, except one in a hundred,
@@ -245,3 +266,7 @@ procedure has changed since only in checks that read no more than the records al
 | `boot-stale-records-accepted` | records that are not the journal's are booted from (L2) | `records_that_are_not_the_journals_are_refused_before_anything_is_written` |
 | `boot-partial-records-accepted` | a slice that does not start at the genesis is booted from (scoped round M1) | `records_that_are_not_the_journals_are_refused_before_anything_is_written` |
 | `boot-interrupted-boot-unseen` | an interrupted boot is no evidence of a crash (scoped round L2) | `a_crash_during_boot_converges` |
+| `boot-gapped-records-accepted` | a slice with a gap is booted from (final review L1) | `records_that_are_not_the_journals_are_refused_before_anything_is_written` |
+| `boot-ledger-evidence-ignored` | recovered ledger work is no evidence of a crash (final review M2) | `a_boot_after_a_crash_says_a_stop_may_be_lost` |
+| `boot-closed-reopened` | a later intent reopens a closed Operation (V1 L1, final review L2) | `a_closed_operation_stays_closed_and_its_first_intent_speaks` |
+| `boot-evidence-from-first-boot` | the evidence is read after the first boot record (final review L2) | `a_boot_after_complete_boots_claims_no_lost_stop` |

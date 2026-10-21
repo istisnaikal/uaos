@@ -87,6 +87,8 @@ pub struct RiskTierError;
 impl RiskTier {
     /// The highest risk tier.
     pub const MAX: Self = Self(3);
+    /// The lowest tier: routine bookkeeping.
+    pub const MIN: Self = Self(0);
 
     /// Creates a risk tier.
     ///

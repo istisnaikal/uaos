@@ -17,7 +17,9 @@
 use std::collections::BTreeMap;
 
 use uaos_contracts::error::{ErrorCode, codes};
-use uaos_contracts::event::{Actor, Durability, EnvelopeError, EventType, InlinePayload, Metadata, types};
+use uaos_contracts::event::{
+    Actor, Durability, EnvelopeError, EventEnvelope, EventType, InlinePayload, Metadata, types,
+};
 use uaos_contracts::id::{CorrelationId, OperationId};
 use uaos_contracts::operation::{RiskTier, SideEffectClass};
 use uaos_contracts::wire::{ConfigVersion, Seq};
@@ -77,8 +79,8 @@ pub enum BootError {
     /// against records that are not the journal's, and a retry with the same records would repeat
     /// its writes (§2 step 0). Nothing was written.
     #[error(
-        "the records are not the journal's: they end before {records_end}, the journal's next is \
-         {journal_next}, or they miss its genesis or its head"
+        "the records are not the whole journal from its genesis to its head, one record after \
+         another (they end before {records_end}; the journal's next is {journal_next})"
     )]
     StaleRecords {
         /// The sequence number after the last record handed to boot.
@@ -147,7 +149,12 @@ pub fn boot(
         records_end == journal.next_seq() && last.hash == journal.head()
     });
     let from_genesis = records.first().is_none_or(|first| first.envelope.seq == Seq(0));
-    if !(ends_at_head && from_genesis) {
+    // One after another, by sequence and chain link: no gap, no record twice (final review L1).
+    let contiguous = records
+        .iter()
+        .zip(records.iter().skip(1))
+        .all(|(a, b)| b.envelope.seq.0 == a.envelope.seq.0.saturating_add(1) && b.envelope.prev_hash == a.hash);
+    if !(ends_at_head && from_genesis && contiguous) {
         return Err(BootError::StaleRecords {
             records_end,
             journal_next: journal.next_seq(),
@@ -184,8 +191,8 @@ pub fn boot(
 
     // 4. Every intent with no outcome becomes indeterminate, once, with the effect it declared.
     let intents = open_intents(records);
-    for (operation, effect) in &intents {
-        journal.append(indeterminate_draft(*operation, *effect, correlation, config.version())?)?;
+    for intent in &intents {
+        journal.append(indeterminate_draft(intent, config.version())?)?;
     }
 
     // 5. The boot, explained.
@@ -205,7 +212,7 @@ pub fn boot(
     let report = BootReport {
         records: u64::try_from(records.len()).unwrap_or(u64::MAX),
         stop: stop_state,
-        indeterminate: intents.into_iter().map(|(operation, _)| operation).collect(),
+        indeterminate: intents.iter().filter_map(|intent| intent.operation_id).collect(),
         settled_estimated: recovery.settled_estimated,
         completed: recovery.completed,
         transfers_completed: recovery.transfers_completed,
@@ -227,69 +234,64 @@ const OUTCOMES: [&EventType; 5] = [
 ];
 
 /// What the records say of one Operation.
-enum Seen {
-    /// An intent with no outcome yet: where it was first journaled, and the effect it declared.
-    Open { at: usize, effect: SideEffectClass },
+enum Seen<'r> {
+    /// An intent with no outcome yet: where it was first journaled, and that first intent.
+    Open { at: usize, intent: &'r EventEnvelope },
     /// An outcome or a human's decision: terminal for boot, whatever a later record says.
     Closed,
 }
 
-/// Operations whose intent has no outcome, with the effect each intent declared, in the order
-/// their intents were journaled. Once an Operation is closed, a later intent does not reopen it:
+/// The first intent of each Operation that has no outcome, in the order those intents were
+/// journaled. Once an Operation is closed, a later intent does not reopen it:
 /// only an inconsistent journal holds one, and reopening would make a committed Operation
 /// indeterminate.
-fn open_intents(records: &[VerifiedRecord]) -> Vec<(OperationId, SideEffectClass)> {
-    let mut seen: BTreeMap<OperationId, Seen> = BTreeMap::new();
+fn open_intents(records: &[VerifiedRecord]) -> Vec<&EventEnvelope> {
+    let mut seen: BTreeMap<OperationId, Seen<'_>> = BTreeMap::new();
     for (at, record) in records.iter().enumerate() {
         let envelope = &record.envelope;
         let Some(operation) = envelope.operation_id else {
             continue;
         };
         if envelope.event_type == types::OP_RESERVED_INTENT {
-            seen.entry(operation).or_insert(Seen::Open {
-                at,
-                effect: envelope.side_effect_class,
-            });
+            seen.entry(operation).or_insert(Seen::Open { at, intent: envelope });
         } else if OUTCOMES.contains(&&envelope.event_type) {
             seen.insert(operation, Seen::Closed);
         }
     }
-    let mut open: Vec<(usize, OperationId, SideEffectClass)> = seen
-        .into_iter()
-        .filter_map(|(operation, seen)| match seen {
-            Seen::Open { at, effect } => Some((at, operation, effect)),
+    let mut open: Vec<(usize, &EventEnvelope)> = seen
+        .into_values()
+        .filter_map(|seen| match seen {
+            Seen::Open { at, intent } => Some((at, intent)),
             Seen::Closed => None,
         })
         .collect();
-    open.sort_unstable_by_key(|(at, ..)| *at);
-    open.into_iter()
-        .map(|(_, operation, effect)| (operation, effect))
-        .collect()
+    open.sort_unstable_by_key(|(at, _)| *at);
+    open.into_iter().map(|(_, intent)| intent).collect()
 }
 
-fn draft(
-    event_type: EventType,
-    operation: Option<OperationId>,
-    side_effect_class: SideEffectClass,
-    correlation: CorrelationId,
-    config_version: ConfigVersion,
-    payload: serde_json::Value,
-) -> Result<EventDraft, EnvelopeError> {
+/// `op.indeterminate` for an intent with no outcome (`Transition::CrashRecovered`). It is the
+/// Operation's record: it carries the intent's ids and correlation, links to the intent, keeps the
+/// effect the intent declared, and says the effect may have happened. The request may have reached
+/// the provider, and neither success nor failure is assumed (red line 3; final review L4).
+fn indeterminate_draft(intent: &EventEnvelope, config_version: ConfigVersion) -> Result<EventDraft, EnvelopeError> {
     Ok(EventDraft {
-        session_id: None,
-        pocket_id: None,
-        operation_id: operation,
-        request_id: None,
-        agent_id: None,
-        correlation_id: correlation,
-        parent_id: None,
+        session_id: intent.session_id,
+        pocket_id: intent.pocket_id,
+        operation_id: intent.operation_id,
+        request_id: intent.request_id,
+        agent_id: intent.agent_id,
+        correlation_id: intent.correlation_id,
+        parent_id: Some(intent.id),
         actor: Actor::System,
-        event_type,
+        event_type: types::OP_INDETERMINATE,
         payload_ref: None,
-        payload_inline: Some(InlinePayload::new(payload)?),
+        payload_inline: Some(InlinePayload::new(serde_json::json!({
+            "reason": CRASH_RECOVERY,
+            "may_have_taken_effect": true,
+        }))?),
         cost_estimate: None,
         compensable: false,
-        side_effect_class,
+        side_effect_class: intent.side_effect_class,
         // Recovery surfaces: an interrupted Operation is never routine bookkeeping.
         risk_tier: RiskTier::MAX,
         durability: Durability::Critical,
@@ -298,34 +300,14 @@ fn draft(
     })
 }
 
-/// `op.indeterminate` for an intent with no outcome (`Transition::CrashRecovered`). It carries the
-/// effect the intent declared, and says the effect may have happened: the request may have reached
-/// the provider, and neither success nor failure is assumed (red line 3).
-fn indeterminate_draft(
-    operation: OperationId,
-    effect: SideEffectClass,
-    correlation: CorrelationId,
-    config_version: ConfigVersion,
-) -> Result<EventDraft, EnvelopeError> {
-    draft(
-        types::OP_INDETERMINATE,
-        Some(operation),
-        effect,
-        correlation,
-        config_version,
-        serde_json::json!({ "reason": CRASH_RECOVERY, "may_have_taken_effect": true }),
-    )
-}
-
-/// `kernel.booted`, with the boot's counts as canonical decimal strings (`wire`'s rule).
+/// `kernel.booted`, with the boot's counts as canonical decimal strings (`wire`'s rule). A boot
+/// that closed anything, or says a stop may have been lost, surfaces at the highest risk tier; a
+/// clean boot is routine (final review L4).
 fn booted_draft(report: &BootReport, correlation: CorrelationId) -> Result<EventDraft, EnvelopeError> {
-    draft(
-        types::KERNEL_BOOTED,
-        None,
-        SideEffectClass::None,
-        correlation,
-        report.config_version,
-        serde_json::json!({
+    let recovered = !report.indeterminate.is_empty()
+        || report.settled_estimated + report.completed + report.transfers_completed + report.stuck.len() > 0
+        || report.stop_may_be_lost;
+    let payload = serde_json::json!({
             "records": report.records.to_string(),
             "indeterminate": report.indeterminate.len().to_string(),
             "settled_estimated": report.settled_estimated.to_string(),
@@ -335,6 +317,25 @@ fn booted_draft(report: &BootReport, correlation: CorrelationId) -> Result<Event
             "stopped": report.stop != BootState::Running,
             "stop_may_be_lost": report.stop_may_be_lost,
             "config_version": report.config_version.0.to_string(),
-        }),
-    )
+    });
+    Ok(EventDraft {
+        session_id: None,
+        pocket_id: None,
+        operation_id: None,
+        request_id: None,
+        agent_id: None,
+        correlation_id: correlation,
+        parent_id: None,
+        actor: Actor::System,
+        event_type: types::KERNEL_BOOTED,
+        payload_ref: None,
+        payload_inline: Some(InlinePayload::new(payload)?),
+        cost_estimate: None,
+        compensable: false,
+        side_effect_class: SideEffectClass::None,
+        risk_tier: if recovered { RiskTier::MAX } else { RiskTier::MIN },
+        durability: Durability::Critical,
+        config_version: report.config_version,
+        metadata: Metadata::default(),
+    })
 }

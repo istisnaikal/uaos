@@ -3351,7 +3351,7 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // Runtime boot contract (PR-6b): §2 step 4 and V1 review M7, the record carries the intent's effect.
-            seed: replace("crates/uaos-runtime/src/boot.rs", "indeterminate_draft(*operation, *effect, correlation, config.version())", "indeterminate_draft(*operation, SideEffectClass::None, correlation, config.version())"),
+            seed: replace("crates/uaos-runtime/src/boot.rs", "        side_effect_class: intent.side_effect_class,\n", "        side_effect_class: SideEffectClass::None,\n"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-runtime", "--test", "boot", "open_intents_become_indeterminate_once"],
@@ -3375,7 +3375,7 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // Runtime boot contract (PR-6b): §2 step 0 and V1 review L2, records that are not the journal's are refused.
-            seed: replace("crates/uaos-runtime/src/boot.rs", "    if !(ends_at_head && from_genesis) {\n", "    if !(ends_at_head && from_genesis) && false {\n"),
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    if !(ends_at_head && from_genesis && contiguous) {\n", "    if !(ends_at_head && from_genesis && contiguous) && false {\n"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-runtime", "--test", "boot", "records_that_are_not_the_journals_are_refused_before_anything_is_written"],
@@ -3405,6 +3405,54 @@ The journal is tamper-proof.
                 args: &["test", "-p", "uaos-runtime", "--test", "boot", "a_crash_during_boot_converges"],
             },
             expect: "an interrupted boot hid a lost stop",
+        },
+        Case {
+            id: "boot-gapped-records-accepted",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 0 and final review L1, the records follow one another.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "    let contiguous = records\n", "    let contiguous = true || records\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "records_that_are_not_the_journals_are_refused_before_anything_is_written"],
+            },
+            expect: "boot accepted records that are not the journal's",
+        },
+        Case {
+            id: "boot-ledger-evidence-ignored",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 5 and final review M2, recovered ledger work is evidence of a crash.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "        || recovery.settled_estimated + recovery.completed + recovery.transfers_completed > 0;\n", "        || false;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "a_boot_after_a_crash_says_a_stop_may_be_lost"],
+            },
+            expect: "a crash that may have lost a stop was not said so",
+        },
+        Case {
+            id: "boot-closed-reopened",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 4 and V1 review L1, a closed Operation stays closed.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "            seen.entry(operation).or_insert(Seen::Open { at, intent: envelope });\n", "            seen.insert(operation, Seen::Open { at, intent: envelope });\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "a_closed_operation_stays_closed_and_its_first_intent_speaks"],
+            },
+            expect: "a closed Operation was reopened",
+        },
+        Case {
+            id: "boot-evidence-from-first-boot",
+            gate: "test",
+            tool: None,
+            // Runtime boot contract (PR-6b): §2 step 5, the evidence is read after the last boot record.
+            seed: replace("crates/uaos-runtime/src/boot.rs", "        .rposition(|r| r.envelope.event_type == types::KERNEL_BOOTED);\n", "        .position(|r| r.envelope.event_type == types::KERNEL_BOOTED);\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "boot", "a_boot_after_complete_boots_claims_no_lost_stop"],
+            },
+            expect: "a clean boot after complete boots claimed a lost stop",
         },
         Case {
             id: "relay-content-json-cuts",
