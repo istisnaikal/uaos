@@ -9,7 +9,7 @@ use uaos_json::NodeId;
 
 use crate::code::Code;
 use crate::manifest::HookPoint;
-use crate::selector::{Selector, SelectorError};
+use crate::selector::{MAX_VISITS, Selector, SelectorError, Visits};
 use crate::view::StructuralView;
 
 /// A role a part of a request plays (ADR-0014 Decision 2). Roles only restrict edits; they never
@@ -54,30 +54,46 @@ impl Role {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoleMap {
     roles: BTreeMap<NodeId, BTreeSet<Role>>,
+    /// Visits its assignments have spent, from one budget of [`MAX_VISITS`] (contract §7).
+    spent: usize,
 }
 
 impl RoleMap {
     /// An empty map.
     #[must_use]
     pub const fn new() -> Self {
-        Self { roles: BTreeMap::new() }
+        Self {
+            roles: BTreeMap::new(),
+            spent: 0,
+        }
     }
 
     /// Gives `role` to every node `selector` selects in `view`; returns how many it selected.
+    /// Every assignment to one map spends from one budget of [`MAX_VISITS`], so a codec's
+    /// `roles()` is bounded however many selectors it assigns (contract §7).
     ///
     /// # Errors
-    /// As [`Selector::resolve`].
+    /// As [`Selector::resolve`]; [`SelectorError::Budget`] once the map's budget is spent.
     pub fn assign(
         &mut self,
         view: &StructuralView<'_, '_>,
         selector: &Selector,
         role: Role,
     ) -> Result<usize, SelectorError> {
-        let ids = selector.resolve(view)?;
+        let mut visits = Visits::new(MAX_VISITS.saturating_sub(self.spent));
+        let resolved = selector.resolve_within(view, &mut visits);
+        self.spent = MAX_VISITS.saturating_sub(visits.left());
+        let ids = resolved?;
         for id in &ids {
             self.roles.entry(*id).or_default().insert(role);
         }
         Ok(ids.len())
+    }
+
+    /// The visits its assignments may still spend.
+    #[must_use]
+    pub const fn visits_left(&self) -> usize {
+        MAX_VISITS.saturating_sub(self.spent)
     }
 
     /// The roles given to `id` itself.

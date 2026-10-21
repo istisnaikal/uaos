@@ -6,10 +6,11 @@
 //! A selector resolves to node ids taken from the tape itself, in document order and without
 //! repeats, so it can never name anything outside the view. Its size is bounded (steps, nesting,
 //! keys, the values a predicate lists), and each step visits a node at most once, even when the
-//! nodes selected so far are nested inside one another. Each visit costs O(log ranges) against a
-//! sealed mask. Every resolution spends a [`Visits`] budget. Member scans and string decodes are
-//! not charged yet, so no per-call cost bound is claimed; that is PR-4c's, before PR-8 (contract
-//! §7, §12).
+//! nodes selected so far are nested inside one another. Every node a step or a predicate examines
+//! spends one visit from a [`Visits`] budget, each member a lookup examines included, and no
+//! comparison decodes more than six times [`MAX_SELECTOR_TEXT`] bytes. With each visit O(log
+//! ranges) against a sealed mask, one call costs at most [`MAX_VISITS`] visits, each
+//! O(`MAX_SELECTOR_TEXT` + log ranges) (contract §7).
 //!
 //! **Masked content is unknown, never probed.** A masked string equals no value and a masked key
 //! is no name, so a predicate's answer is the same whatever the masked text is.
@@ -35,7 +36,8 @@ pub const MAX_VISITS: usize = 1 << 20;
 
 /// A budget of node visits. Resolving a selector spends one visit per node it examines, and stops
 /// with [`SelectorError::Budget`] when the budget is spent; for a module's call that is a strike.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not `Copy` and not `Clone`: a budget is spent once, never duplicated.
+#[derive(Debug, PartialEq, Eq)]
 pub struct Visits(usize);
 
 impl Visits {
@@ -53,13 +55,53 @@ impl Visits {
 
     /// The visits left.
     #[must_use]
-    pub const fn left(self) -> usize {
+    pub const fn left(&self) -> usize {
         self.0
     }
 
     fn spend(&mut self, n: usize) -> Result<(), SelectorError> {
         self.0 = self.0.checked_sub(n).ok_or(SelectorError::Budget)?;
         Ok(())
+    }
+}
+
+/// The raw length past which a string decodes to more than [`MAX_SELECTOR_TEXT`] bytes: an escape
+/// shrinks at most six raw bytes to one (`\\u0041` is `A`), so a longer one equals no value a
+/// selector names, without being decoded (contract §7).
+const MAX_RAW_TEXT: usize = 6 * MAX_SELECTOR_TEXT;
+
+/// `node`'s member `key`, spending one visit per member examined (contract §7). A member whose
+/// key is masked is never found, as for [`ViewNode::member`].
+fn member_within<'v, 'a>(
+    node: &ViewNode<'v, 'a>,
+    key: &str,
+    visits: &mut Visits,
+) -> Result<Option<ViewNode<'v, 'a>>, SelectorError> {
+    if node.kind() != Kind::Object {
+        return Ok(None);
+    }
+    for child in node.children() {
+        visits.spend(1)?;
+        // A key compares as it decodes and stops at the first difference: O(key) at most.
+        if child.key_is(key).map_err(|_| SelectorError::Undecodable)? {
+            return Ok(Some(child));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether `member` is a string in `values`. A masked or non-string member is in no set, and a
+/// string too long to decode to any value is in none without being decoded.
+fn in_values(member: Option<ViewNode<'_, '_>>, values: &BTreeSet<String>) -> Result<bool, SelectorError> {
+    let Some(member) = member else {
+        return Ok(false);
+    };
+    if member.raw_text_len().is_some_and(|len| len > MAX_RAW_TEXT) {
+        return Ok(false);
+    }
+    match member.text().map_err(|_| SelectorError::Undecodable)? {
+        Some(ViewText::Plain(text)) => Ok(values.contains(text.as_ref())),
+        Some(ViewText::Masked) | None => Ok(false),
     }
 }
 
@@ -150,21 +192,10 @@ impl Predicate {
         if node.kind() != Kind::Object {
             return Ok(false);
         }
-        let member = |key: &str| node.member(key).map_err(|_| SelectorError::Undecodable);
-        // Decoded once; a masked or non-string member is in no set.
-        let in_values = |member: Option<ViewNode<'_, '_>>, values: &BTreeSet<String>| -> Result<bool, SelectorError> {
-            let Some(member) = member else {
-                return Ok(false);
-            };
-            match member.text().map_err(|_| SelectorError::Undecodable)? {
-                Some(ViewText::Plain(text)) => Ok(values.contains(text.as_ref())),
-                Some(ViewText::Masked) | None => Ok(false),
-            }
-        };
         match self {
-            Self::MemberIn { key, values } => in_values(member(key)?, values),
-            Self::MemberNotIn { key, values } => Ok(!in_values(member(key)?, values)?),
-            Self::StringOrArrayWith { key, element } => match member(key)? {
+            Self::MemberIn { key, values } => in_values(member_within(node, key, visits)?, values),
+            Self::MemberNotIn { key, values } => Ok(!in_values(member_within(node, key, visits)?, values)?),
+            Self::StringOrArrayWith { key, element } => match member_within(node, key, visits)? {
                 Some(m) if m.kind() == Kind::String => Ok(true),
                 Some(m) if m.kind() == Kind::Array => {
                     for item in m.children() {
@@ -285,7 +316,7 @@ impl Selector {
     }
 
     /// As [`Selector::resolve`], spending `visits`: the host passes one budget for all of a
-    /// module call's selectors. Member scans and string decodes are not charged yet (PR-4c).
+    /// module call's selectors, so the call's cost is bounded (contract §7).
     ///
     /// # Errors
     /// As [`Selector::resolve`].
@@ -302,7 +333,7 @@ impl Selector {
                     let mut next = BTreeSet::new();
                     for node in nodes.iter().filter(|n| n.kind() == Kind::Object) {
                         visits.spend(1)?;
-                        if let Some(m) = node.member(key).map_err(|_| SelectorError::Undecodable)? {
+                        if let Some(m) = member_within(node, key, visits)? {
                             next.insert(m.id());
                         }
                     }

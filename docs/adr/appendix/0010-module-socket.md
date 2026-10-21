@@ -355,12 +355,22 @@ selector's keys and values, a frame, state bytes or `ModuleText` (I-11).
   refusal code is one §10 lists;
 - `requires` is compared by set: an unknown feature, and a feature the kernel lacks, are refused;
 - `ModuleState` refuses growth past its bound and leaves the state unchanged, and a call that
-  outgrew it is struck whole through the host procedure of §5;
+  outgrew it is struck whole through the crate's own procedure of §5 (`Admitted::call_hook`,
+  `Admitted::call_event`, PR-4c);
 - declarations: a strike for each reason in §10, including an unhooked point, an undeclared
   event value name, an undeclared tool or configuration key, and a ranking past its bound;
 - the view: a masked key reads as masked, matches no name and is not found by name; a masked
   number reads as masked; every predicate answers the same whatever the masked text is;
 - path patterns match canonical paths by whole segments;
+- **the per-call cost bound (PR-4c):**
+  - a `Key` step and a predicate's lookup spend a visit per member examined;
+  - an escaped string at exactly six times `MAX_SELECTOR_TEXT` raw bytes still matches the
+    value it decodes to, and one byte past the bound matches none;
+  - one `RoleMap` exhausts one budget across its assignments;
+- **seals (PR-4c):** a seal from another tape is ignored, and a key finding on a keyless node
+  refuses the seal;
+- **`ModuleText` bases (PR-4c):** whitespace, a control and a default-ignorable code point are
+  no base, and an ideographic selector follows a CJK ideograph only;
 - a `GrantRef` is checked against the live grant at every use (the host's test, PR-8). Building
   one confers nothing (§2 rule 3);
 - `AgentId` round-trips; an envelope without `agent_id` serializes to the exact bytes main
@@ -412,6 +422,14 @@ make the `language-neutrality` gate active (ADR-0020):
 | `usage-undeclared-dimension` | undeclared dimensions pass | `usage_reports_name_declared_dimensions_once` |
 | `module-text-accepts-variation-run` | variation-selector runs pass | `module_text_refuses_variation_runs` |
 | `failure-deny-after-the-fact` | `Deny` loads at an observe-after point | `a_failure_cannot_deny_after_the_fact` |
+| `selector-member-scan-uncharged` | a lookup's member scan spends no visits (PR-4c) | `a_lookup_spends_a_visit_per_member` |
+| `selector-raw-bound-too-tight` | the raw-length shortcut refuses a string that decodes to a value (PR-4c) | `a_string_that_decodes_short_enough_still_matches` |
+| `module-text-invisible-base` | any character is a variation selector's base (PR-4c) | `module_text_needs_a_visible_base` |
+| `module-text-ideographic-any-base` | an ideographic selector follows any base (PR-4c) | `module_text_needs_a_visible_base` |
+| `mask-seal-ignores-tape` | a seal is used over any tape (PR-4c) | `a_seal_belongs_to_its_tape` |
+| `mask-seal-keyless-key` | a key finding on a keyless node seals (PR-4c) | `a_key_finding_on_a_keyless_node_refuses_the_seal` |
+| `rolemap-fresh-budget-per-assign` | each assignment gets a fresh budget (PR-4c) | `a_codecs_roles_share_one_budget` |
+| `host-procedure-keeps-outgrown-state` | the crate's procedure keeps a call that outgrew its state (PR-4c) | `a_call_that_outgrows_its_state_is_struck_whole` |
 
 `schema-breaking-change` is re-proven over the new schemas.
 

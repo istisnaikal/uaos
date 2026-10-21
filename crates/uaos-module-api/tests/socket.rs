@@ -19,7 +19,7 @@ use uaos_contracts::id::{OperationId, PocketId, TypedId};
 use uaos_contracts::operation::{OperationKind, RiskTier};
 use uaos_contracts::wire::Seq;
 use uaos_module_api::{
-    Admitted, CandidateId, ChildBody, ChildKind, ChildOpRequest, Code, ConfigSchema, Decl, DeclError, Decls, DeclsMut,
+    CandidateId, ChildBody, ChildKind, ChildOpRequest, Code, ConfigSchema, Decl, DeclError, Decls, DeclsMut,
     EventClass, EventDecl, EventView, GrantDecl, HookCx, HookDecl, HookMode, HookPoint, KernelFeature, KernelOffer,
     MAX_DECLS, MAX_MODULE_TEXT, MAX_RANK, MAX_STATE_BYTES, Manifest, ManifestBuilder, ManifestError, Module,
     ModuleApiVersion, ModuleEvent, ModuleState, ModuleText, ModuleVersion, OnFailure, OpMeta, PocketCursor, Refusal,
@@ -498,23 +498,6 @@ impl Module for Counter {
     }
 }
 
-/// The host's procedure (contract §5): run the call on a copy; keep it only if it stayed within
-/// its bound and its declarations pass; otherwise strike and keep the state as it was.
-fn host_call<M: Module>(module: &Admitted<M>, cx: &HookCx<'_>, state: &mut ModuleState) -> Result<Vec<Decl>, Strike> {
-    let mut copy = state.clone();
-    let mut out = Decls::new(module.manifest().max_decls());
-    module
-        .module()
-        .on_hook(cx, StateMut::new(&mut copy), DeclsMut::new(&mut out));
-    if copy.exceeded() {
-        return Err(Strike::StateExceeded);
-    }
-    // The admitted snapshot, never a fresh `manifest()` (fresh full review, M1).
-    check_decls(module.manifest(), Some(cx.point()), out.as_slice())?;
-    *state = copy;
-    Ok(out.into_inner())
-}
-
 #[test]
 fn a_call_that_outgrows_its_state_is_struck_whole() {
     let manifest = builder()
@@ -532,7 +515,7 @@ fn a_call_that_outgrows_its_state_is_struck_whole() {
     );
     let cx = HookCx::new(HookPoint::Classify, op);
     let mut state = ModuleState::new(module.manifest().state_bytes());
-    let outcomes: Vec<_> = (0..6).map(|_| host_call(&module, &cx, &mut state)).collect();
+    let outcomes: Vec<_> = (0..6).map(|_| module.call_hook(&cx, &mut state)).collect();
     let emitted: usize = outcomes.iter().flatten().map(Vec::len).sum();
     assert_eq!(emitted, 2);
     assert_eq!(outcomes[4], Err(Strike::StateExceeded), "an outgrown call was kept");
@@ -709,26 +692,6 @@ impl Module for Summarizer {
     }
 }
 
-/// The host's event procedure (contract §5): as for a hook, and a replay keeps the state changes
-/// and discards every declaration.
-fn host_event<M: Module>(
-    module: &Admitted<M>,
-    event: &EventView<'_>,
-    state: &mut ModuleState,
-) -> Result<Vec<Decl>, Strike> {
-    let mut copy = state.clone();
-    let mut out = Decls::new(module.manifest().max_decls());
-    module
-        .module()
-        .on_event(event, StateMut::new(&mut copy), DeclsMut::new(&mut out));
-    if copy.exceeded() {
-        return Err(Strike::StateExceeded);
-    }
-    check_decls(module.manifest(), None, out.as_slice())?;
-    *state = copy;
-    Ok(if event.replay { Vec::new() } else { out.into_inner() })
-}
-
 #[test]
 fn a_replay_rebuilds_state_and_declares_nothing() {
     let manifest = builder()
@@ -741,14 +704,14 @@ fn a_replay_rebuilds_state_and_declares_nothing() {
     let event_type = EventType::new("op.committed").unwrap();
     let live = EventView::new(pocket(1), Seq(1), &event_type, None);
     let mut state = ModuleState::new(8);
-    assert_eq!(host_event(&module, &live, &mut state).unwrap().len(), 1);
+    assert_eq!(module.call_event(&live, &mut state).unwrap().len(), 1);
 
     // After a restart without a checkpoint, the same events are replayed into a fresh state.
     let mut rebuilt = ModuleState::new(8);
     let replayed: Vec<Decl> = (1..=3)
         .flat_map(|n| {
             let event = EventView::new(pocket(1), Seq(n), &event_type, None).replayed();
-            host_event(&module, &event, &mut rebuilt).unwrap()
+            module.call_event(&event, &mut rebuilt).unwrap()
         })
         .collect();
     assert!(replayed.is_empty(), "a replay requested a child Operation again");
@@ -825,7 +788,7 @@ fn a_module_is_checked_against_its_admitted_manifest() {
     let cx = HookCx::new(HookPoint::ResponsePost, op);
     let mut state = ModuleState::new(0);
     assert_eq!(
-        host_call(&module, &cx, &mut state),
+        module.call_hook(&cx, &mut state),
         Err(Strike::UndeclaredAction),
         "a module grew its manifest after admission"
     );

@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use proptest::prelude::*;
 use uaos_json::{Kind, Limits, NodeId, parse};
 use uaos_module_api::{
-    Code, ConfigSchema, EndpointClass, EndpointDecl, MAX_PREDICATE_VALUES, MAX_SELECTOR_TEXT, Mask, Method,
+    Code, ConfigSchema, EndpointClass, EndpointDecl, MAX_PREDICATE_VALUES, MAX_SELECTOR_TEXT, Mask, MaskError, Method,
     ModuleState, ModuleText, PathPattern, Predicate, Role, RoleMap, Selector, SelectorError, SseEvent, Step,
     StructuralView, UsageReport, ViewText, Visits, classify,
 };
@@ -679,6 +679,150 @@ fn an_unlisted_method_is_denied() {
     }
 }
 
+/// An object with `n` members, none named `absent`.
+fn wide(n: usize) -> String {
+    let members: Vec<String> = (0..n).map(|i| format!("\"m{i}\":0")).collect();
+    format!("{{{}}}", members.join(","))
+}
+
+#[test]
+fn a_lookup_spends_a_visit_per_member() {
+    // PR-4c, M1: a `Key` step and a predicate's lookup each spend a visit per member examined.
+    let doc = wide(5_000);
+    let tape = parse(doc.as_bytes(), &Limits::DEFAULT).unwrap();
+    let none = Mask::new();
+    let view = StructuralView::new(&tape, &none);
+    let lookups = [
+        Selector::new(vec![Step::Key("absent".to_owned())]).unwrap(),
+        Selector::new(vec![Step::Where(Predicate::MemberIn {
+            key: "absent".to_owned(),
+            values: BTreeSet::from(["x".to_owned()]),
+        })])
+        .unwrap(),
+    ];
+    for selector in &lookups {
+        assert_eq!(
+            selector.resolve_within(&view, &mut Visits::new(1_000)),
+            Err(SelectorError::Budget),
+            "a member scan was not charged"
+        );
+        let mut ample = Visits::per_call();
+        assert_eq!(selector.resolve_within(&view, &mut ample).map(|ids| ids.len()), Ok(0));
+        assert!(
+            Visits::per_call().left() - ample.left() >= 5_000,
+            "a member scan was not charged"
+        );
+    }
+}
+
+#[test]
+fn a_string_that_decodes_short_enough_still_matches() {
+    // PR-4c, M1: the raw-length shortcut refuses only what cannot decode to a value. 256
+    // six-byte escapes are 1,536 raw bytes, exactly the bound, and decode to 256 bytes.
+    let escaped = "~u0041".repeat(MAX_SELECTOR_TEXT).replace('~', "\\");
+    let doc = format!("{{\"k\":\"{escaped}\"}}");
+    let tape = parse(doc.as_bytes(), &Limits::DEFAULT).unwrap();
+    let none = Mask::new();
+    let view = StructuralView::new(&tape, &none);
+    let value = "A".repeat(MAX_SELECTOR_TEXT);
+    let selector = Selector::new(vec![Step::Where(Predicate::MemberIn {
+        key: "k".to_owned(),
+        values: BTreeSet::from([value]),
+    })])
+    .unwrap();
+    assert_eq!(
+        selector.resolve(&view).map(|ids| ids.len()),
+        Ok(1),
+        "an escaped string that decodes to a value was refused"
+    );
+    // One byte past the bound decodes past any value, and is equal to none.
+    let long = format!("{{\"k\":\"{}\"}}", "A".repeat(6 * MAX_SELECTOR_TEXT + 1));
+    let tape = parse(long.as_bytes(), &Limits::DEFAULT).unwrap();
+    let view = StructuralView::new(&tape, &none);
+    assert_eq!(selector.resolve(&view).map(|ids| ids.len()), Ok(0));
+}
+
+#[test]
+fn a_codecs_roles_share_one_budget() {
+    // PR-4c, L4: every assignment to one `RoleMap` spends from one budget, so `roles()` is bounded
+    // however many selectors a codec assigns.
+    let doc = wide(4_000);
+    let tape = parse(doc.as_bytes(), &Limits::DEFAULT).unwrap();
+    let none = Mask::new();
+    let view = StructuralView::new(&tape, &none);
+    let selector = Selector::new(vec![Step::AnyDepthKey("absent".to_owned())]).unwrap();
+    let mut roles = RoleMap::new();
+    let mut exhausted = false;
+    for _ in 0..1_000 {
+        if roles.assign(&view, &selector, Role::SystemMessage) == Err(SelectorError::Budget) {
+            exhausted = true;
+            break;
+        }
+    }
+    assert!(exhausted, "a codec's roles each got a fresh budget");
+    assert_eq!(roles.visits_left(), 0);
+}
+
+#[test]
+fn a_key_finding_on_a_keyless_node_refuses_the_seal() {
+    // PR-4c, L3.
+    let tape = parse(br#"{"a":[1,2]}"#, &Limits::DEFAULT).unwrap();
+    let none = Mask::new();
+    let view = StructuralView::new(&tape, &none);
+    let nodes: Vec<(NodeId, bool)> = view
+        .root()
+        .descendants()
+        .map(|n| (n.id(), n.key().unwrap().is_some()))
+        .collect();
+    let keyed = nodes.iter().find(|(_, has)| *has).unwrap().0;
+    let keyless = nodes.iter().find(|(_, has)| !*has).unwrap().0;
+    let mut ok = Mask::new();
+    ok.key(keyed);
+    assert!(ok.seal(&tape).is_ok());
+    for id in [keyless, view.root().id()] {
+        let mut bad = Mask::new();
+        bad.key(id);
+        assert_eq!(
+            bad.seal(&tape),
+            Err(MaskError),
+            "a key finding on a keyless node was sealed"
+        );
+    }
+}
+
+#[test]
+fn a_seal_belongs_to_its_tape() {
+    // PR-4c, L3: sealed against one tape, a mask's ranges would mask the wrong nodes of another,
+    // so a view over another tape reads it unsealed.
+    let first = parse(br#"{"a":{"x":"1"},"b":"2"}"#, &Limits::DEFAULT).unwrap();
+    let second = parse(br#"{"a":"1","b":{"y":"2"}}"#, &Limits::DEFAULT).unwrap();
+    let none = Mask::new();
+    let first_ids: Vec<NodeId> = StructuralView::new(&first, &none)
+        .root()
+        .descendants()
+        .map(|n| n.id())
+        .collect();
+    let second_ids: Vec<NodeId> = StructuralView::new(&second, &none)
+        .root()
+        .descendants()
+        .map(|n| n.id())
+        .collect();
+    // The container `a` of the first tape covers its own id and the next.
+    let mut mask = Mask::new();
+    mask.value(first_ids[0]);
+    mask.seal(&first).unwrap();
+    // On the second tape that next id is `b`, outside any masked container.
+    let b = StructuralView::new(&second, &mask).node(second_ids[1]).unwrap();
+    assert_eq!(
+        b.key().unwrap(),
+        Some(ViewText::Plain("b".into())),
+        "a seal from another tape masked the wrong node"
+    );
+    // On its own tape the seal still holds.
+    let x = StructuralView::new(&first, &mask).node(first_ids[1]).unwrap();
+    assert_eq!(x.key().unwrap(), Some(ViewText::Masked));
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
@@ -687,11 +831,14 @@ proptest! {
     fn sealed_and_unsealed_views_agree(doc in json(), masked in prop::collection::vec((any::<u16>(), any::<bool>()), 0..6)) {
         let tape = parse(doc.as_bytes(), &Limits::DEFAULT).unwrap();
         let plain = Mask::new();
-        let ids: Vec<NodeId> = StructuralView::new(&tape, &plain).root().descendants().map(|n| n.id()).collect();
+        let plain_view = StructuralView::new(&tape, &plain);
+        let ids: Vec<NodeId> = plain_view.root().descendants().map(|n| n.id()).collect();
         let mut mask = Mask::new();
         for (pick, key) in &masked {
             if let Some(id) = ids.get(usize::from(*pick) % ids.len().max(1)) {
-                if *key { mask.key(*id) } else { mask.value(*id) }
+                // A key finding goes only where a key is: elsewhere it refuses the seal (PR-4c).
+                let has_key = plain_view.node(*id).is_some_and(|n| n.key().unwrap().is_some());
+                if *key && has_key { mask.key(*id) } else { mask.value(*id) }
             }
         }
         let mut sealed = mask.clone();
