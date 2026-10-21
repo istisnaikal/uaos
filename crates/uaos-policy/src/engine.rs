@@ -3,7 +3,9 @@
 //! The policy engine: Cedar evaluation with UAOS semantics layered on top (plan D8, §2.5;
 //! ADR-0008 and its Amendment 1).
 //!
-//! * **Default deny.** Nothing is allowed unless a permit or a grant matches.
+//! * **Default deny.** Nothing is allowed unless a permit or a grant matches. A read of another
+//!   pocket is the exception that narrows it: only the grant the request names allows it, and a
+//!   permit at most asks (ADR-0008 appendix §2).
 //! * **Fail closed.** Cedar skips a policy whose evaluation errors (for example an integer
 //!   overflow), so an erroring `forbid` would silently stop forbidding. UAOS turns any
 //!   evaluation error into `Deny`, as it does a request or entity set that fails validation, and a
@@ -20,7 +22,8 @@
 //! * **Grants** are exact-match capabilities, indexed by principal, action, resource and pocket,
 //!   and only live while `now_ms` is before their expiry. Evaluating them costs a map lookup, not
 //!   a Cedar policy each; a property test proves the result equals compiling the grant to a Cedar
-//!   permit.
+//!   permit, except for a cross-pocket read, where a compiled permit would only ask. The engine
+//!   loads no grant `uaos.grant/1` cannot journal and no grant id twice (`check_grant`).
 //! * **Slicing.** Policies are partitioned at load by their action constraint (following the
 //!   schema's action groups) and, within an action, by an exact `resource ==` constraint. A
 //!   decision evaluates the action's common policies plus those for its resource, merging the
@@ -40,6 +43,7 @@ use cedar_policy::{
 use uaos_contracts::id::GrantId;
 
 use crate::model::{Action, Basis, Decision, Effect, Grant, Principal, Request, Resource};
+use crate::wire::check_grant;
 
 const SCHEMA_SRC: &str = include_str!("uaos.cedarschema");
 const NAMESPACE: &str = "Uaos";
@@ -91,6 +95,26 @@ pub enum PolicyError {
 }
 
 /// What a grant matches exactly: action, principal, resource and pocket.
+/// The engine loads no grant the wire cannot journal, and no grant id twice (V1 review of PR-4b,
+/// M2 and L2): every grant it holds can be journaled and reloaded exactly.
+fn check_grants(grants: &[Grant]) -> Result<(), PolicyError> {
+    let mut ids = BTreeSet::new();
+    for grant in grants {
+        let label = format!("{GRANT_PREFIX}{}", grant.id);
+        check_grant(grant).map_err(|e| PolicyError::Rule {
+            policy: label.clone(),
+            problem: e.to_string(),
+        })?;
+        if !ids.insert(grant.id) {
+            return Err(PolicyError::Rule {
+                policy: label,
+                problem: "the grant id is used twice".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
 type GrantKey = (Action, String, String, String);
 
 /// A live grant in the index, with what its approval covered.
@@ -279,6 +303,8 @@ impl PolicyEngine {
             let errors: Vec<String> = validation.validation_errors().map(ToString::to_string).collect();
             return Err(PolicyError::Invalid(errors.join("; ")));
         }
+
+        check_grants(grants)?;
 
         let mut index: BTreeMap<GrantKey, Vec<GrantEntry>> = BTreeMap::new();
         for grant in grants.iter().filter(|g| g.expires_at_ms > now_ms) {

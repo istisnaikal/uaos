@@ -7,7 +7,7 @@ found that the policy engine ignores which grant a request carries (M4) and that
 cannot represent every grant the engine holds (M5). Both change the policy engine and the grant
 contract, so the whole grant path left PR-4 for this PR. That covers `uaos.grant/1`, the Cedar
 `Pocket` entity, and the `memory.read` action with its consent rule. PR-4's module socket
-contract (`0010-module-socket.md` §6.2, §8) still states the rules; this PR builds and proves
+contract (`0010-module-socket.md` §6.2, §8, in #32, not yet on main) still states the rules; this PR builds and proves
 them.
 **Builds on:** ADR-0008 and its Amendment 1 (grants satisfy asks, never override a forbid);
 ADR-0004 (approvals); ADR-0007 (pocket keys); ADR-0010 Decision 6 (child Operations carry
@@ -33,7 +33,8 @@ grants).
    answer into an approval request. A forbid still wins over a grant, and an evaluation error
    still denies.
 3. **The requesting pocket is not crossed.** A read of the requesting pocket itself follows
-   policy as any action does. No grant can name it (`SamePocket`).
+   policy as any action does. A grant that satisfies an ask for it carries no injection
+   policy, because nothing is injected from elsewhere.
 4. **A request names the grant it carries** (`Request::grant`, M4).
    - When it names one, only that grant can satisfy it.
    - A cross-pocket read that names none is never allowed.
@@ -41,12 +42,22 @@ grants).
      policy and no other. With two live grants for the same read (a renewal, say), the one the
      module carried decides.
 5. **`memory.read` grants are on a pocket, and only they are** (`ResourceMismatch`). The
-   injection policy is present on exactly those grants (`InjectionMismatch`).
+   injection policy is present on exactly the cross-pocket ones (`InjectionMismatch`).
 
 ## 3. The exact wire form (M5)
 
 `uaos.grant/1` is the journaled form of the engine's `Grant`. A grant journaled when issued must
-reload into the engine at boot exactly, so every engine grant has a record and back:
+reload into the engine at boot exactly. So the engine loads only grants the wire can hold
+(`check_grant`, run both at load and when journaling), and each of them has a record and
+back. Grants that fail it:
+- a model provider with `/`, which the engine's provider entity cannot hold;
+- more than 8 data classes or approved asks;
+- an expiry after the wire's maximum, 9999-12-30T22:00Z;
+- `memory.read` without a pocket, or a pocket on another action;
+- a grant id used twice in one set.
+
+The field-by-field mapping:
+
 
 | Engine (`uaos-policy::model`) | Wire (`uaos.grant/1`) |
 |---|---|
@@ -85,8 +96,17 @@ the caller's.
   - the decision cites it;
   - a cross-pocket read naming no grant is never allowed;
   - a property over random grants, policies and named grants compares the engine with the rule;
-- §3: a property shows that every engine grant goes to a record and back unchanged, and that the
-  name grammars of the two crates accept the same strings.
+- §3:
+  - a property over every principal, resource and action, 128-byte names, providers with `/`,
+    sets past 8 and expiries past 9999 shows two things: the engine loads exactly what
+    `check_grant` accepts, and every grant it loads goes to a record and back unchanged;
+  - the two crates' name grammars accept the same strings;
+  - policy identifiers match the engine's `@id`s;
+  - a finer expiry floors;
+  - a grant id twice is refused;
+- rule 3: an own-pocket read behind an ask is approved by a grant that the wire journals;
+- rule 4 beyond `memory.read`: naming a grant narrows every action, and a carried
+  cross-pocket grant must also approve every ask that fires.
 
 **Seeded violations** (`cargo xtask negative`, gate `test`):
 
@@ -97,5 +117,9 @@ the caller's.
 | `cedar-own-pocket-read-asks` | an own-pocket read is treated as cross-pocket | `a_permit_alone_only_asks_for_a_cross_pocket_read` |
 | `grant-carried-ignored` | the engine ignores the grant a request names | `only_the_carried_grant_allows_a_cross_pocket_read` |
 | `grant-wire-drops-provider` | the conversion drops a model's provider | `every_engine_grant_round_trips_through_the_wire` |
+| `grant-unnamed-cross-pocket-allowed` | a cross-pocket read naming no grant keeps every grant | `only_the_carried_grant_allows_a_cross_pocket_read` |
+| `grant-own-pocket-unjournalable` | own-pocket grants must carry an injection policy | `an_own_pocket_read_grant_carries_no_injection_policy` |
+| `engine-loads-unjournalable-grant` | the engine loads grants the wire refuses | `every_engine_grant_round_trips_through_the_wire` |
 
-`schema-breaking-change` is re-proven over `grant.v1.json`.
+`schema-compat` checks `grant.v1.json` like every schema; its own seeded violation lives on
+another schema.

@@ -8,9 +8,11 @@
 //! into a child Operation as a `GrantRef`, which only names a grant: the runtime re-checks the
 //! live grant at every use, so an expired or revoked grant fails closed.
 //!
-//! **Cross-project memory** (C-44) is a grant of action `memory.read` on another pocket. It is
-//! the only grant that carries an [`InjectionPolicy`], and it can never name its own pocket:
-//! reading one's own pocket needs no consent.
+//! **Cross-project memory** (C-44) is a grant of action `memory.read` on another pocket: consent
+//! for a cross-pocket read, and the only grant that carries an [`InjectionPolicy`]. A
+//! `memory.read` grant on the pocket it applies in satisfies an ask policy for an own-pocket
+//! read, as any grant does, and carries no injection policy: nothing is injected from
+//! elsewhere.
 //!
 //! This module defines the wire shapes only. Issuing, matching and revoking are the policy
 //! engine's and the runtime's. **Draft until RC-1**, like every kernel contract (ADR-0003).
@@ -47,16 +49,13 @@ pub enum GrantError {
     /// The grant expires at or before its issue.
     #[error("a grant must expire after it is issued")]
     ExpiresBeforeIssue,
-    /// An injection policy on a grant other than `memory.read` on a pocket, or none on one.
-    #[error("an injection policy belongs exactly to `memory.read` grants on a pocket")]
+    /// An injection policy on a grant other than a cross-pocket `memory.read`, or none on one.
+    #[error("an injection policy belongs exactly to `memory.read` grants on another pocket")]
     InjectionMismatch,
     /// A `memory.read` grant on something other than a pocket, or a pocket resource on another
     /// action.
     #[error("a `memory.read` grant is on a pocket, and only `memory.read` grants are")]
     ResourceMismatch,
-    /// A `memory.read` grant naming the pocket it applies in.
-    #[error("a `memory.read` grant must name another pocket than the one it applies in")]
-    SamePocket,
 }
 
 /// The longest name, data class or policy identifier a grant carries, in bytes: the policy
@@ -127,7 +126,7 @@ impl PolicyId {
     }
 }
 
-string_token_serde!(PolicyId, "^[A-Za-z0-9._:-]{1,128}$");
+string_token_serde!(PolicyId, "^(?!grant:)[A-Za-z0-9._:-]{1,128}$");
 
 /// A data class a grant's approved content carried (`secret.aws`, `pii.email`), in the policy
 /// engine's `Name` grammar.
@@ -278,11 +277,10 @@ impl GrantRecord {
         if memory_read != source.is_some() {
             return Err(GrantError::ResourceMismatch);
         }
-        if memory_read != self.injection.is_some() {
+        // Only a read of another pocket injects anything, so only it carries the policy.
+        let cross_pocket = memory_read && source != Some(self.pocket);
+        if cross_pocket != self.injection.is_some() {
             return Err(GrantError::InjectionMismatch);
-        }
-        if memory_read && source == Some(self.pocket) {
-            return Err(GrantError::SamePocket);
         }
         Ok(())
     }
@@ -424,8 +422,15 @@ mod tests {
     }
 
     #[test]
-    fn a_grant_to_read_its_own_pocket_is_refused() {
-        assert_eq!(reading(pocket(1), pocket(1)).validate(), Err(GrantError::SamePocket));
+    fn an_own_pocket_read_grant_carries_no_injection_policy() {
+        let mut own = reading(pocket(1), pocket(1));
+        assert_eq!(
+            own.validate(),
+            Err(GrantError::InjectionMismatch),
+            "an own-pocket grant took an injection policy"
+        );
+        own.injection = None;
+        assert_eq!(own.validate(), Ok(()), "an own-pocket grant could not be journaled");
     }
 
     #[test]

@@ -16,13 +16,13 @@ use std::collections::BTreeSet;
 
 use proptest::prelude::*;
 use uaos_contracts::event::ModuleName;
-use uaos_contracts::grant::{DataClass, GrantError, GrantName, InjectionPolicy};
-use uaos_contracts::id::{ApprovalId, CredentialId, GrantId, PocketId, TypedId};
+use uaos_contracts::grant::{DataClass, GrantName, InjectionPolicy, PolicyId};
+use uaos_contracts::id::{ApprovalId, CredentialId, GrantId, PocketId, PoolId, TypedId};
 use uaos_contracts::operation::RiskTier;
 use uaos_contracts::time::WallTime;
 use uaos_policy::{
     Action, Basis, CLOCK_TOLERANCE_MS, Effect, Grant, Name, PolicyEngine, PolicyError, Principal, Request, Resource,
-    WireError, grant_record,
+    check_grant, grant_crosses_pockets, grant_record,
 };
 
 const NOW: u64 = 1_760_000_000_000;
@@ -634,7 +634,9 @@ proptest! {
             .enumerate()
             .map(|(i, (k, a, f))| policy_piece(i, if k % 4 == 2 { 0 } else { *k }, *a, *f))
             .collect();
-        let grants: Vec<Grant> = grants.into_iter().map(random_grant).collect();
+        // One grant per id: the engine refuses an id twice.
+        let mut seen = BTreeSet::new();
+        let grants: Vec<Grant> = grants.into_iter().map(random_grant).filter(|g| seen.insert(g.id)).collect();
         let native = PolicyEngine::load(&policies.join("\n"), &grants, NOW).unwrap();
         let mut texts = policies.clone();
         texts.extend(
@@ -1043,21 +1045,27 @@ proptest! {
         prop_assert_eq!(e.authorize(&r).effect, expected, "the named grant did not decide the read");
     }
 
-    /// Final review M5: every engine grant goes to a `uaos.grant/1` record and back unchanged.
+    /// Final review M5, as narrowed by PR-4b's V1 review (M2): the engine loads exactly the grants
+    /// the wire can hold, and every grant it loads goes to a record and back unchanged. The
+    /// generator reaches every principal and resource, every action, names at 128 bytes, providers
+    /// with `/`, sets past 8, and expiries on both sides of the wire's maximum.
     #[test]
-    fn every_engine_grant_round_trips_through_the_wire(
-        seed in (any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>()),
-        asks in prop::collection::btree_set("[a-f][a-z0-9._-]{0,12}", 0..3),
-    ) {
-        let mut grant = random_grant(seed);
-        grant.approves = asks;
-        let injection = matches!(grant.resource, Resource::Pocket(_)).then_some(InjectionPolicy::Ask);
-        let issued_at = WallTime::from_unix_nanos(i128::from(grant.expires_at_ms - 1) * 1_000_000).unwrap();
-        match grant_record(&grant, ApprovalId::from_parts(1, [3; 10]), issued_at, injection) {
-            Ok(record) => prop_assert_eq!(Grant::try_from(&record).unwrap(), grant, "a grant changed through the wire"),
-            // The one refusal the generator can reach: a memory.read grant naming its own pocket.
-            Err(e) => prop_assert!(matches!(e, WireError::Invalid(GrantError::SamePocket)), "unexpected refusal {e:?}"),
+    fn every_engine_grant_round_trips_through_the_wire(grant in any_wide_grant()) {
+        let loads = PolicyEngine::load("", std::slice::from_ref(&grant), NOW).is_ok();
+        prop_assert_eq!(loads, check_grant(&grant).is_ok(), "the engine loaded a grant the wire cannot hold");
+        if loads {
+            let injection = grant_crosses_pockets(&grant).then_some(InjectionPolicy::Ask);
+            let issued_at = WallTime::from_unix_nanos(i128::from(NOW - 1) * 1_000_000).unwrap();
+            let record = grant_record(&grant, ApprovalId::from_parts(1, [3; 10]), issued_at, injection).unwrap();
+            prop_assert_eq!(Grant::try_from(&record).unwrap(), grant, "a grant changed through the wire");
         }
+    }
+
+    /// The wire's policy identifiers are exactly the engine's `@id`s.
+    #[test]
+    fn policy_ids_agree_with_engine_ids(id in prop_oneof!["[A-Za-z0-9._:/ -]{0,20}", "grant:[a-z]{0,4}", "[a-z]{128,129}"]) {
+        let engine = PolicyEngine::load(&format!(r#"@id("{id}") permit(principal, action, resource);"#), &[], NOW).is_ok();
+        prop_assert_eq!(PolicyId::new(id.clone()).is_ok(), engine, "{}", id);
     }
 
     /// The two crates' name grammars accept exactly the same strings.
@@ -1066,4 +1074,170 @@ proptest! {
         prop_assert_eq!(Name::new(s.clone()).is_ok(), GrantName::new(s.clone()).is_ok());
         prop_assert_eq!(Name::new(s.clone()).is_ok(), DataClass::new(s).is_ok());
     }
+}
+
+/// A name in the engine's grammar, boundary lengths and `/` included.
+fn any_name() -> impl Strategy<Value = Name> {
+    prop_oneof!["[A-Za-z0-9._:-]{1,12}", "[a-z0-9]{1,6}/[a-z0-9]{1,6}", "[a-z]{128}"]
+        .prop_map(|s| Name::new(s).unwrap())
+}
+
+fn any_wide_grant() -> impl Strategy<Value = Grant> {
+    let principal = prop_oneof![
+        any::<u8>().prop_map(|n| Principal::Agent(CredentialId::from_parts(u64::from(n), [n; 10]))),
+        Just(Principal::Human),
+        Just(Principal::Module(ModuleName::new("mod-x").unwrap())),
+        Just(Principal::System),
+    ];
+    let resource = prop_oneof![
+        (any_name(), any_name()).prop_map(|(provider, model)| Resource::Model { provider, model }),
+        any_name().prop_map(Resource::Tool),
+        any::<u8>().prop_map(|n| Resource::Pool(PoolId::from_parts(u64::from(n), [n; 10]))),
+        any_name().prop_map(Resource::ConfigKey),
+        (0_u8..2).prop_map(|n| Resource::Pocket(pocket(n))),
+    ];
+    let expiry = prop_oneof![
+        NOW..NOW + 100_000,
+        253_402_207_199_000_u64..=253_402_207_201_100,
+        (u64::MAX - 10)..=u64::MAX
+    ];
+    let asks = prop::collection::btree_set(
+        prop_oneof!["[a-f][a-z0-9._:-]{0,12}", "grant:[a-z]{1,4}", "[a-z]{1,4}/[a-z]{1,4}"],
+        0..10,
+    );
+    (
+        principal,
+        prop::sample::select(Action::ALL.to_vec()),
+        resource,
+        0_u8..2,
+        expiry,
+        0_u8..4,
+        prop::collection::btree_set(any_name(), 0..10),
+        asks,
+    )
+        .prop_map(
+            |(principal, action, resource, place, expires_at_ms, tier, data_classes, approves)| Grant {
+                id: GrantId::from_parts(1, [1; 10]),
+                principal,
+                action,
+                resource,
+                pocket: pocket(place),
+                expires_at_ms,
+                max_risk_tier: RiskTier::new(tier).unwrap(),
+                data_classes,
+                approves,
+            },
+        )
+}
+
+/// PR-4b's V1 review M1: an own-pocket read behind an ask is approved by a grant, and the wire
+/// can journal that grant.
+#[test]
+fn an_own_pocket_read_behind_an_ask_is_approved_by_a_grant() {
+    let ask_all = r#"@id("ask-all") @effect("ask") permit(principal, action, resource);"#;
+    let own = Request {
+        pocket: pocket(1),
+        ..reading_with(None)
+    };
+    assert_eq!(
+        PolicyEngine::load(ask_all, &[], NOW).unwrap().authorize(&own).effect,
+        Effect::Ask
+    );
+    let grant = Grant {
+        pocket: pocket(1),
+        approves: BTreeSet::from(["ask-all".to_owned()]),
+        ..memory_grant(1, NOW + 60_000)
+    };
+    let issued = WallTime::from_unix_nanos(i128::from(NOW) * 1_000_000).unwrap();
+    let record = grant_record(&grant, ApprovalId::from_parts(1, [3; 10]), issued, None);
+    assert!(record.is_ok(), "an own-pocket grant could not be journaled: {record:?}");
+    let approved = PolicyEngine::load(ask_all, &[grant], NOW).unwrap();
+    assert_eq!(
+        approved.authorize(&own).effect,
+        Effect::Allow,
+        "the approval did not satisfy the ask"
+    );
+}
+
+/// PR-4b's V1 review L4: naming a grant narrows any action, not only memory reads.
+#[test]
+fn a_named_grant_narrows_other_actions_too() {
+    let ask = r#"@id("ask-exec") @effect("ask") permit(principal, action == Uaos::Action::"exec", resource);"#;
+    let tool = Resource::Tool(Name::new("git").unwrap());
+    let grant = |n: u8, approves: &[&str]| Grant {
+        id: GrantId::from_parts(u64::from(n), [n; 10]),
+        principal: agent(1),
+        action: Action::Exec,
+        resource: tool.clone(),
+        pocket: pocket(1),
+        expires_at_ms: NOW + 60_000,
+        max_risk_tier: RiskTier::new(3).unwrap(),
+        data_classes: BTreeSet::new(),
+        approves: approves.iter().map(|s| (*s).to_owned()).collect(),
+    };
+    let (silent, approving) = (grant(1, &[]), grant(2, &["ask-exec"]));
+    let e = PolicyEngine::load(ask, &[silent.clone(), approving.clone()], NOW).unwrap();
+    let mut r = request(agent(1), Action::Exec, tool.clone());
+    assert_eq!(
+        e.authorize(&r).effect,
+        Effect::Allow,
+        "naming none, any covering grant decides"
+    );
+    r.grant = Some(silent.id);
+    assert_eq!(
+        e.authorize(&r).effect,
+        Effect::Ask,
+        "a named grant that does not approve the ask satisfied it"
+    );
+    r.grant = Some(approving.id);
+    assert_eq!(e.authorize(&r).effect, Effect::Allow);
+}
+
+/// PR-4b's V1 review L4: a carried cross-pocket grant must also approve every ask that fires.
+#[test]
+fn a_carried_grant_must_approve_the_asks_of_a_cross_pocket_read() {
+    let ask_all = r#"@id("ask-all") @effect("ask") permit(principal, action, resource);"#;
+    let approving = Grant {
+        approves: BTreeSet::from(["ask-all".to_owned()]),
+        ..memory_grant(1, NOW + 60_000)
+    };
+    let silent = memory_grant(2, NOW + 60_000);
+    let e = PolicyEngine::load(ask_all, &[approving.clone(), silent.clone()], NOW).unwrap();
+    assert_eq!(e.authorize(&reading_with(Some(approving.id))).effect, Effect::Allow);
+    assert_eq!(
+        e.authorize(&reading_with(Some(silent.id))).effect,
+        Effect::Ask,
+        "a carried grant skipped the ask"
+    );
+}
+
+/// The wire keeps nanoseconds and the engine milliseconds: a finer expiry floors, so a reloaded
+/// grant ends early, never late.
+#[test]
+fn a_finer_expiry_floors_on_reload() {
+    let grant = memory_grant(1, NOW + 60_000);
+    let issued = WallTime::from_unix_nanos(i128::from(NOW) * 1_000_000).unwrap();
+    let mut record = grant_record(
+        &grant,
+        ApprovalId::from_parts(1, [3; 10]),
+        issued,
+        Some(InjectionPolicy::Ask),
+    )
+    .unwrap();
+    record.expires_at = WallTime::from_unix_nanos(i128::from(NOW + 60_000) * 1_000_000 + 999_999).unwrap();
+    assert_eq!(
+        Grant::try_from(&record).unwrap().expires_at_ms,
+        NOW + 60_000,
+        "a reloaded grant ended late"
+    );
+}
+
+/// PR-4b's V1 review L2: one grant id twice refuses the set.
+#[test]
+fn a_grant_id_twice_is_refused() {
+    let grant = memory_grant(1, NOW + 60_000);
+    assert!(
+        PolicyEngine::load("", &[grant.clone(), grant], NOW).is_err(),
+        "a grant id was loaded twice"
+    );
 }
