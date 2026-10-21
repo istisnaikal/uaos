@@ -106,8 +106,8 @@ impl TryFrom<&GrantRecord> for Grant {
         let principal = match &record.principal {
             GrantPrincipal::Agent { credential } => Principal::Agent(*credential),
             GrantPrincipal::Module { name } => Principal::Module(name.clone()),
-            GrantPrincipal::Human => Principal::Human,
-            GrantPrincipal::System => Principal::System,
+            GrantPrincipal::Human {} => Principal::Human,
+            GrantPrincipal::System {} => Principal::System,
         };
         let resource = match &record.resource {
             GrantResource::Model { provider, name } => Resource::Model {
@@ -160,8 +160,8 @@ pub fn grant_record(
             credential: *credential,
         },
         Principal::Module(name) => GrantPrincipal::Module { name: name.clone() },
-        Principal::Human => GrantPrincipal::Human,
-        Principal::System => GrantPrincipal::System,
+        Principal::Human => GrantPrincipal::Human {},
+        Principal::System => GrantPrincipal::System {},
     };
     let resource = match &grant.resource {
         Resource::Model { provider, model } => GrantResource::Model {

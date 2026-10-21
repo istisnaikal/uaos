@@ -128,7 +128,7 @@
           ]
         },
         {
-          "description": "A human, through a user-present channel.",
+          "description": "A human, through a user-present channel. It has no other field, and one is refused.",
           "type": "object",
           "properties": {
             "kind": {
@@ -142,7 +142,7 @@
           ]
         },
         {
-          "description": "The kernel itself.",
+          "description": "The kernel itself. It has no other field, and one is refused.",
           "type": "object",
           "properties": {
             "kind": {
@@ -162,7 +162,7 @@
       "type": "object",
       "properties": {
         "action": {
-          "description": "What it allows: a kernel action such as `memory.read`, or a module action.",
+          "description": "What it allows: one of the engine's Cedar action names, such as `memory.read`. A record\nnaming another action does not reload, and boot skips it with an alarm (appendix §3).",
           "$ref": "#/$defs/ActionName"
         },
         "approval": {

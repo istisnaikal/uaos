@@ -52,3 +52,23 @@ all). Under D-31, a scoped round over the fixes follows, then a final fresh full
 | L3 | Stale `grant.rs` docs ("another pocket", "on a pocket only"), carried into the schema. | Reworded; schema regenerated. |
 | L4 | A duplicate id refuses the whole set at boot, the boot behaviour is unspecified, and the test was weak. | §3: issuing refuses a known id, and boot keeps the first and alarms (PR-6/PR-8). The test asserts the reason; negative `grant-id-twice-loaded`. |
 | L5 | The `(?!` lookahead is not portable across schema validators. | `PolicyId`'s schema is `allOf` a pattern and `not` a `^grant:` pattern. |
+
+## Final full review (D-31)
+
+**Reviewed:** `main..1d1bf8b`, the whole PR, by a fresh-context agent reading only, 2026-10-21.
+**Result:** 0 High · 1 Medium · 4 Low.
+**Verified:**
+- the consent rule;
+- the carried grant;
+- `check_grant` against the wire;
+- the duplicate-id refusal;
+- the schema;
+- the seeds' anchors.
+
+| | Finding | Fix |
+|---|---|---|
+| M1 | Seed `grant-wire-drops-provider` was caught only when the wide property loaded a model grant, which it rarely does: about 8% of runs missed it, so the merge-blocking `negative` job would fail at random. | The seed runs `every_valid_grant_loads_and_round_trips`, where a fifth of the grants are model grants; its round trip carries the seed's message. |
+| L1 | `GrantPrincipal::Human` and `System` were unit variants, and serde ignores unknown fields on them. | Both are struct variants with no fields, and a field is refused. Test in `humans_and_the_kernel_can_hold_grants`; negative `grant-principal-ignores-fields`. |
+| L2 | `any_valid_grant` drew no name with `/`. | Names with `/` for models, tools, configuration keys and data classes; providers keep none (§3). |
+| L3 | Stale text: the CHANGELOG's moved-unchanged bullet kept the old injection rule, the seed count said 8, the scoped round was missing; the appendix said "policies" for a property that uses none or a blanket permit. | Corrected. |
+| L4 | `GrantRecord.action` said a module action is allowed, though only engine actions reload; `grant.rs` cited the socket contract, which is on #32. | Engine actions only, and boot skips any other with an alarm (§3); the citation names #32. |
