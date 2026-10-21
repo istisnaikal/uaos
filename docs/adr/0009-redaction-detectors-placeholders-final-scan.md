@@ -26,7 +26,7 @@ logs).
    only set. An unknown version is an error, never a silent fallback. Once a release has shipped a
    set, changing any rule, anchor or bound means a new version. **The freeze starts at RC-1:**
    before it, no session outside development has pinned v1, so v1 was corrected in place by
-   Amendment 1.
+   Amendments 1 and 2.
 2. **Detection** is a leftmost-first Aho–Corasick search over anchor literals that restarts one
    byte after each match, so an anchor overlapping another anchor's literal is still found. A
    per-format validator then confirms each candidate. Boundaries fail closed:
@@ -55,7 +55,9 @@ logs).
    | `stripe_key` | `sk_`/`rk_` + `live_`/`test_` + ≥ 24 alphanumerics |
    | `google_api_key` | `AIza` + ≥ 35 token chars |
    | `aws_access_key_id` | `AKIA`/`ASIA`/`ABIA`/`ACCA` + ≥ 16 `[A-Z0-9]` (the key **id**; secret access keys are not claimed) |
-   | `url_credentials` | the password in `scheme://user:password@host`, within 512 bytes of the `://`. The user ends at the first `:` (no `/`, `?`, `#` before it; placeholders inside it are skipped whole). The password ends at the **last** `@` that a host follows, before a hard stop (whitespace, control, `"`, `<`, `>`, backtick) or the next `://`. So `/`, `#`, `?`, `'`, `\` and `@` inside a password are covered. Not a password: an authority starting with an IPv6 literal; `host:port/path@x`, when the password starts with a port number and `/`, `?` or `#`, and either the user is host-like (dotted, contains `@`, `localhost`) or the rest is a lowercase path; an scp-style path after an email-like user; a template reference (`${NAME}`, `$NAME`, `%(name)s`, `{{name}}`) |
+   | `url_credentials` | the password in `scheme://user:password@host`, within 512 bytes of the `://`, or, when the
+   userinfo runs on past a later `://` (Amendment 2), within 512 bytes before its last `://` and
+   512 after it. The user ends at the first `:` (no `/`, `?`, `#` before it; placeholders inside it are skipped whole). The password ends at the **last** `@` that a host follows, before a hard stop (whitespace, control, `"`, `<`, `>`, backtick) or the next `://`. So `/`, `#`, `?`, `'`, `\` and `@` inside a password are covered. Not a password: an authority starting with an IPv6 literal; `host:port/path@x`, when the password starts with a port number and `/`, `?` or `#`, and either the user is host-like (dotted, contains `@`, `localhost`) or the rest is a lowercase path; an scp-style path after an email-like user; a template reference (`${NAME}`, `$NAME`, `%(name)s`, `{{name}}`) |
 
 4. **Schema-agnostic JSON.** Every string is scanned after its escapes are decoded: keys and
    values, known and unknown fields, at any depth. A decoded→raw offset map splices each
@@ -183,19 +185,19 @@ equals the full scan).
     of a longer token;
   - URL passwords:
     - containing an unencoded `"`, `<`, `>` or backtick, which end a URL in text;
-    - containing a `://` whose scheme-like run follows a list or nesting byte (`,` `;` `|` `=`
-      `&` `?` `/` `(` `[` `{` `'` `]`) since the previous `://`, or since the user's `:`. That
-      reads as another URL starting there (`p,ss://x`);
-    - containing a `://` and starting with a port and `/`, `?` or `#` (`8080/x://y`), which
-      reads as `host:port/…`;
+    - containing a `://` whose scheme-like run, or colon-joined runs (`jdbc:mysql`), follows a
+      list or nesting byte (`,` `;` `|` `=` `&` `?` `/` `(` `[` `{` `'` `]`) since the previous
+      `://`, or since the user's `:`. That reads as another URL starting there (`p,ss://x`);
+    - containing a `://` and starting, before its first `://`, with 1 to 5 digits and then a byte
+      that is neither a letter nor a digit (`8080!x://y`), which reads as `host:port…`;
     - holding a `://`, or starting with `//`, after a user holding a byte other than letters,
       digits, `+`, `.`, `-`, `_` or an earlier placeholder (`smtp://o'brien://pw@h`,
       `smtp://me@example.com:ab://cd@h`), which reads as glue between two URLs.
 
       Any other `://` in a password is covered, and so is any other password starting with
       `//`, the generator's users being plain (Amendment 2);
-    - with userinfo longer than 512 bytes, or, across a `://`, longer than 512 bytes before its
-      last `://`;
+    - with userinfo longer than 512 bytes, unless it runs on past a `://` (Amendment 2). Then
+      the bound is 512 bytes before its last `://` and 512 after it;
     - that start with a port number and `/`, `?` or `#` after a host-like user, or continue as a
       lowercase path;
     - that look like an scp path after an email-like user;
@@ -224,7 +226,7 @@ equals the full scan).
 ## Verification
 
 - **Gate `redaction-corpus`** (active): `crates/uaos-redact/tests/corpus.rs`, with the URL
-  rule's unit tests. Seven seeded negative cases prove it bites; the five of Amendment 2 are
+  rule's unit tests. Eight seeded negative cases prove it bites; the six of Amendment 2 are
   listed there. The first two:
   - `redact-detector-drops-a-format`: a coarse one, which drops the `ASIA` prefix;
   - `redact-url-password-stops-at-slash`: a subtle one, one byte wide; it brings back review
@@ -344,3 +346,31 @@ the same detectors, so it missed it too.
 | `redact-url-chain-past-list-byte` | a userinfo runs on after a list byte | `another_url_after_a_list_byte_stays_another_url` |
 | `redact-url-chain-from-host-port` | a userinfo runs on after `host:port/` | `another_url_after_a_list_byte_stays_another_url` |
 | `redact-url-chain-any-user` | any user's userinfo runs on past a `://` | `another_url_after_a_list_byte_stays_another_url` |
+| `redact-url-scheme-colon-split` | a colon-joined scheme after a list byte is read in parts (scoped round M1) | `another_url_after_a_list_byte_stays_another_url` |
+| `redact-url-chain-blocks-next-url` | a chain that ends keeps the next URL from opening its own (scoped round M2) | `url_passwords_may_hold_a_scheme_separator` |
+
+**Revised by its D-31 scoped round** (same day, before merge):
+- **M1. Two shapes the `url-glued` family could not see** gave new false positives.
+  - A `host:port` with no path, glued to another URL with a user (`localhost:8080\nssh://git@…`).
+    A port is now 1 to 5 digits and then any byte that is neither a letter nor a digit.
+  - A colon-joined scheme after a list byte (`,jdbc:mysql://`). `runs_on_past` now reads
+    colon-joined runs as one scheme.
+  - The family now draws both shapes, and the generator mirrors both rules.
+- **M2. Two shapes stated as covered were missed.**
+  - A placeholder in the user, before a password starting with `//`: a password starting with
+    `//` after a plain user now always opens, without the list-byte test.
+  - A chain ending at an anchor whose own URL needed one: a chain that ends now lets its anchor
+    open its own.
+  - Both are tested and seeded.
+- **Lows:** the counts of seeded cases, the §3 table row, the 512-byte limit, and §1's credit to
+  Amendment 2.
+- **Cost:** re-measured on 2026-10-21 against the base detector on the same machine, twice
+  each, with the base built from `ceadeb0`'s `uaos-redact`. The p50s agree within about 1% on
+  all four rows of the cost table:
+  - redacting the prose body: 5.24 and 5.26 ms against 5.22 and 5.26 ms;
+  - its final scan: 5.27 ms against 5.28 and 5.29 ms;
+  - redacting the nested body: 9.59 and 9.62 ms against 9.62 and 9.68 ms;
+  - its final scan: 8.31 ms against 8.30 and 8.35 ms.
+
+  The p99s varied between runs on both builds by up to twice, under the load of other work on
+  the machine. The table's figures stand: the rule adds no measurable cost.

@@ -255,8 +255,9 @@ pub(crate) fn embed(rng: &mut Prng, text: &str) -> String {
 ///   `://` (or since the user's `:`), which reads as another URL starting there;
 /// - a `://` in a password that starts with a port and `/`, `?` or `#` (`host:port/…`).
 ///
-/// It mirrors the detector's `runs_on_past` and `starts_with_port`, read on `:` and the password
-/// as the detector reads them after the user; the bytes are its `LIST_BYTES`.
+/// It mirrors the detector's `runs_on_past` (colon-joined runs included) and `starts_with_port`
+/// (read up to the password's first `://`), on `:` and the password as the detector reads them
+/// after a plain user; the bytes are its `LIST_BYTES`.
 fn reads_as_another_url(password: &str) -> bool {
     let text = format!(":{password}");
     let bytes = text.as_bytes();
@@ -265,21 +266,33 @@ fn reads_as_another_url(password: &str) -> bool {
         .filter(|&i| bytes.get(i..).is_some_and(|rest| rest.starts_with(b"://")))
         .collect();
     // A cut at 0 is the user's own `:` before a password starting with `//`.
-    if cuts.iter().any(|&cut| cut > 0) {
-        let pass = password.as_bytes();
-        let digits = pass.iter().take_while(|b| b.is_ascii_digit()).count();
-        if (1..=5).contains(&digits) && matches!(pass.get(digits), Some(b'/' | b'?' | b'#')) {
+    if let Some(&first) = cuts.iter().find(|&&cut| cut > 0) {
+        let so_far = bytes.get(1..first).unwrap_or_default();
+        let digits = so_far.iter().take_while(|b| b.is_ascii_digit()).count();
+        if (1..=5).contains(&digits) && so_far.get(digits).is_some_and(|b| !b.is_ascii_alphanumeric()) {
             return true;
         }
     }
+    // Whether another URL starts at the end of `before`, as the detector's `runs_on_past` reads it.
+    let another = |before: &[u8]| {
+        let mut end = before.len();
+        loop {
+            let head = before.get(..end).unwrap_or_default();
+            let start = head.iter().rposition(|&b| !scheme(b)).map_or(0, |i| i + 1);
+            if start == end || start == 0 {
+                return false;
+            }
+            let glue = before.get(start - 1).copied();
+            if glue == Some(b':') && before.get(start.wrapping_sub(2)).copied().is_some_and(scheme) {
+                end = start - 1;
+                continue;
+            }
+            return glue.is_some_and(|b| b",;|=&?/([{']".contains(&b));
+        }
+    };
     let mut from = 0;
     for &cut in &cuts {
-        let before = bytes.get(from..cut).unwrap_or_default();
-        let list = match before.iter().rposition(|&b| !scheme(b)) {
-            Some(i) if i + 1 < before.len() => before.get(i).is_some_and(|b| b",;|=&?/([{']".contains(b)),
-            _ => false,
-        };
-        if cut > 0 && list {
+        if cut > 0 && another(bytes.get(from..cut).unwrap_or_default()) {
             return true;
         }
         from = cut + 3;
@@ -892,8 +905,10 @@ pub(crate) fn negative(rng: &mut Prng) -> (&'static str, String) {
                 "http://web:8080/x",
                 "http://localhost:8000/",
                 "https://ci.example.com:8443/job",
+                "http://localhost:8080",
+                "http://web:8080",
             ]);
-            let glue = rng.pick(&["\\n", "#", ")", "%0A", "!", "\u{2192}"]);
+            let glue = rng.pick(&["\\n", "#", ")", "%0A", "!", "\u{2192}", ","]);
             let second = rng.pick(&[
                 "ssh://git@github.com/org/repo.git",
                 "https://git@github.com/org/repo",

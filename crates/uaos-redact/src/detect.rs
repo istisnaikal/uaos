@@ -370,7 +370,13 @@ impl DetectorSet {
             None
         };
         let chained = if let Some(open) = open {
-            continue_userinfo(text, open, after, end, cut, memo)
+            let chained = continue_userinfo(text, open, after, end, cut, memo);
+            // A chain that ends here leaves this anchor's own URL free to open its own (scoped
+            // round M2).
+            if memo.url_open.is_none() && has_scheme {
+                open_userinfo(text, after, end, cut, memo);
+            }
+            chained
         } else {
             open_userinfo(text, after, end, cut, memo);
             None
@@ -418,7 +424,8 @@ fn last_host_at(text: &[u8], from: usize, end: usize) -> Option<usize> {
 /// * the user is plain ([`plain_user`]), and ends before the cut or at the cut's own `:` (a
 ///   password starting with `//`);
 /// * the text after the user's `:` does not start with a port and a path ([`starts_with_port`]);
-/// * another URL does not start at the cut ([`runs_on_past`]);
+/// * another URL does not start at the cut ([`runs_on_past`]), unless the cut is the user's own
+///   `:`, where the plain user is all there is;
 /// * the userinfo so far is at most [`USERINFO_MAX`] bytes.
 fn open_userinfo(text: &[u8], after: usize, end: usize, cut: Option<usize>, memo: &mut Memo) {
     let Some(cut) = cut else {
@@ -437,10 +444,11 @@ fn open_userinfo(text: &[u8], after: usize, end: usize, cut: Option<usize>, memo
     let user = after..after + user_len;
     let pass_from = user.end + 1;
     let so_far = text.get(pass_from.min(cut)..cut).unwrap_or_default();
+    let separator = user.end == cut;
     let opens = text.get(user.clone()).is_some_and(plain_user)
         && !starts_with_port(so_far)
         && cut - user.start <= USERINFO_MAX
-        && runs_on_past(text, after, cut);
+        && (separator || runs_on_past(text, after, cut));
     if opens {
         let at = last_host_at(text, pass_from, end);
         memo.url_open = Some(OpenUserinfo {
@@ -496,12 +504,13 @@ fn plain_user(user: &[u8]) -> bool {
     true
 }
 
-/// Whether the text after a user's `:` starts with a port and `/`, `?` or `#`: the URL is
-/// `host:port/…`, which holds no userinfo, so no `://` after it continues one (V1 review of
-/// Amendment 2, H1: `http://localhost:8080/?url=jdbc:mysql://root:pw@db`).
+/// Whether the text after a user's `:` starts with a port, 1 to 5 digits and then a byte that is
+/// neither a letter nor a digit: the URL is `host:port…`, which holds no userinfo, so no `://`
+/// after it continues one (V1 review of Amendment 2, H1: `localhost:8080/?url=jdbc:mysql://…`;
+/// its scoped round M1: `localhost:8080\nssh://git@…`, `localhost:8080,jdbc:mysql://…`).
 fn starts_with_port(bytes: &[u8]) -> bool {
     let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
-    (1..=5).contains(&digits) && matches!(bytes.get(digits), Some(b'/' | b'?' | b'#'))
+    (1..=5).contains(&digits) && bytes.get(digits).is_some_and(|b| !b.is_ascii_alphanumeric())
 }
 
 /// Longest window we inspect after an anchor. A userinfo runs on past a `://` only while it is
@@ -524,8 +533,9 @@ fn scheme_byte(b: u8) -> bool {
 
 /// Whether the userinfo in `from..cut` runs on past the `://` at `cut` rather than ending where
 /// another URL starts. Another URL needs a scheme, a non-empty run of [`scheme_byte`]s, after a
-/// list or nesting byte ([`LIST_BYTES`]: `a://h,b://`, `?next=https://`). A run from `from` is
-/// the user or the start of the password (`https://u://pw@h`); no run is no scheme
+/// list or nesting byte ([`LIST_BYTES`]: `a://h,b://`, `?next=https://`). Colon-joined runs are
+/// one scheme (`,jdbc:mysql://`): the byte before the first decides (scoped round M1). A run from
+/// `from` is the user or the start of the password (`https://u://pw@h`); no run is no scheme
 /// (`u:a#://b@h`); a run after any other byte is the password's (`u:ab://cd@h`, `u:p@ss://x@h`).
 /// Two URLs glued without a list byte can therefore read as one: over-redaction. Each anchor
 /// still reads its own URL, so a chain never hides a password that URL holds alone.
@@ -533,10 +543,20 @@ fn runs_on_past(text: &[u8], from: usize, cut: usize) -> bool {
     let Some(before) = text.get(from..cut) else {
         return false;
     };
-    match before.iter().rposition(|&b| !scheme_byte(b)) {
-        None => true,
-        Some(i) if i + 1 == before.len() => true,
-        Some(i) => !before.get(i).is_some_and(|b| LIST_BYTES.contains(b)),
+    let mut end = before.len();
+    loop {
+        let head = before.get(..end).unwrap_or_default();
+        let start = head.iter().rposition(|&b| !scheme_byte(b)).map_or(0, |i| i + 1);
+        if start == end || start == 0 {
+            // No run is no scheme; a run from `from` is the user or the password's start.
+            return true;
+        }
+        let glue = before.get(start - 1).copied();
+        if glue == Some(b':') && before.get(start.wrapping_sub(2)).copied().is_some_and(scheme_byte) {
+            end = start - 1;
+            continue;
+        }
+        return !glue.is_some_and(|b| LIST_BYTES.contains(&b));
     }
 }
 
@@ -982,6 +1002,12 @@ mod tests {
             ("postgres://app:p@ss://x@db".to_owned(), "p@ss://x"),
             ("x://u:a://b://c@h".to_owned(), "a://b://c"),
             ("https://u://ab://cd@h".to_owned(), "//ab://cd"),
+            // Scoped round M2: a placeholder in the user; a chain that ends lets the next URL open.
+            (format!("https://{user}bot://pw0rd@db.example.com"), "//pw0rd"),
+            (
+                format!("x://u:{}!https://v://pw0rd@db.example.com", "a".repeat(501)),
+                "//pw0rd",
+            ),
         ] {
             assert!(
                 url(&text) == [expected],
@@ -1027,6 +1053,12 @@ mod tests {
             ["p1", "p2"],
             "two listed URLs read as one"
         );
+        // Scoped round M1: a colon-joined scheme after a list byte starts another URL.
+        assert_eq!(
+            url("a://u:p1@h,jdbc:mysql://v:p2@k"),
+            ["p1", "p2"],
+            "two listed URLs read as one"
+        );
         for text in [
             "mirrors=http://a.example.com,https://git@github.com",
             "http://web:8000/?next=https://git@github.com",
@@ -1054,6 +1086,11 @@ mod tests {
             "http://mirror.example.com!jdbc:mysql://db:3306/app?user=bob@corp.com",
             "http://mirror.example.com%0Ajdbc:mysql://db:3306/app?user=bob@corp.com",
             "http://mirror.example.com\\njdbc:mysql://db:3306/app?user=bob@corp.com",
+            // Scoped round M1: a `host:port` with no path.
+            "http://localhost:8080\\nssh://git@github.com/org/repo.git",
+            "http://localhost:8080%0Assh://git@github.com/org/repo.git",
+            "http://localhost:8080)https://git@github.com/org/repo",
+            "http://localhost:8080,jdbc:mysql://db:3306/app?user=bob@corp.com",
         ] {
             assert!(
                 url(text).is_empty(),

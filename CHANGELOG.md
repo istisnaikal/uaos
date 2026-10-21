@@ -935,14 +935,16 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **Fix:** each anchor still reads its own URL, and a userinfo may also run on past a `://`
     unless another URL starts there. A chain only adds to what each anchor finds; the scan
     stays linear.
-  - **Remaining stated limits:** the shapes still missed are stated in ADR-0009, and the corpus
-    generator mirrors the detector to leave exactly those out.
+  - **Remaining stated limits:** the shapes the URL rule still misses are stated in ADR-0009.
+    The corpus generator mirrors the detector to leave those out. It can still draw the older
+    port-then-lowercase-path miss stated since Amendment 1.
   - **Corpus:** a new negative family, `url-glued`.
   - **Tests:** the CI seed is a fixed case, with unit tests for each shape, for `host:port`
     URLs before another URL, and for URL lists and glued URLs.
-  - **Negatives:** four seeded violations, `redact-url-separator-ends-userinfo`,
-    `redact-url-chain-past-list-byte`, `redact-url-chain-from-host-port` and
-    `redact-url-chain-any-user`.
+  - **Negatives:** six seeded violations, `redact-url-separator-ends-userinfo`,
+    `redact-url-chain-past-list-byte`, `redact-url-chain-from-host-port`,
+    `redact-url-chain-any-user`, `redact-url-scheme-colon-split` and
+    `redact-url-chain-blocks-next-url`.
 
 - **`WallTime::from_unix_nanos` no longer panics on far out-of-range values.**
   - For nanoseconds far outside jiff's range (for example `u64::MAX` milliseconds as nanoseconds),
