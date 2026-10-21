@@ -140,4 +140,35 @@ The property in §5 proves convergence over crashes at every append.
 
 ## 7. Measured, seeded
 
-Recorded by the commits that add the bench and the seeds.
+**Bench** (`cargo bench -p uaos-runtime --bench boot`, 2026-10-21):
+- **Machine:** the reference machine, Windows 10, environment label `reference-win10-local` (D-33).
+- **Method:** 3 rounds per size, each on a fresh copy of a journal that a crash left. Every
+  Operation reserved, journaled its intent, settled and committed, except one in a hundred,
+  which the crash left open. The journal was written under the default flush policy.
+- **Results:** medians, with the maximum in brackets, in ms:
+
+| Records | Open Operations | Journal open | Read of the records | `boot` | Total |
+|---:|---:|---:|---:|---:|---:|
+| 997 | 2 | 34.5 (38.0) | 28.0 (29.8) | 1.3 (1.4) | 63.9 (69.2) |
+| 4,977 | 12 | 126.1 (137.2) | 107.4 (111.6) | 7.7 (8.4) | 240.9 (257.2) |
+| 9,951 | 25 | 174.4 (177.9) | 151.2 (153.7) | 17.5 (19.2) | 343.8 (345.4) |
+| 49,751 | 125 | 458.0 (464.8) | 311.7 (340.0) | 90.5 (93.3) | 867.0 (889.4) |
+
+- **Where the time goes:** `boot` itself (drift, stop, ledger replay and recovery, intents, the
+  record) is about a tenth of the total at every size. The rest is the journal's own open and
+  the read of its verified records.
+- **Against ADR-0018's figure:** ADR-0018's appendix measured 10.8 s on Windows CI for about
+  5,000 records, inside the kill harness. This bench reproduces neither that machine nor
+  that harness's directories, so it does not explain the gap. The CI runners are measured
+  once the bench joins the nightly lane (WP3.8).
+
+**Seeded violations** (`cargo xtask negative`, gate `test`):
+
+| id | Seed | Caught by |
+|---|---|---|
+| `boot-config-drift-unchecked` | an older configuration boots | `an_older_configuration_is_refused_before_anything_is_written` |
+| `boot-recovery-skipped` | open reservations are left open | `an_open_reservation_settles_in_full_and_is_never_released` |
+| `boot-indeterminate-twice` | an Operation already `Indeterminate` is made so again | `open_intents_become_indeterminate_once` |
+| `boot-intents-follow-ledger` | intents are closed only when the ledger had something to close, which only a crash shows | `a_crash_during_boot_converges` |
+| `boot-ignores-journaled-stop` | a journaled stop boots running | `a_journaled_stop_boots_stopped_and_recovery_still_runs` |
+| `boot-unexplained` | no `kernel.booted` record | `every_boot_is_explained_once` |

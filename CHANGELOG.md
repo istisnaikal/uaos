@@ -161,17 +161,29 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Added
 
-- P3 Move 1, PR-6b (spec first): the runtime's boot recovery
-  (`docs/adr/appendix/0013-runtime-boot-recovery.md`, WP3.A6b). After the journal opens, boot
-  refuses a configuration older than the journal's (`CONFIG_DRIFT`), restores the stop, replays
-  and recovers the ledger, makes every open intent `Indeterminate` once, and explains the boot in
-  one `kernel.booted` record. A crash at any point during boot converges on the next. The state
-  actor is PR-6c's; the bus, CPU pool and DST are PR-6d's.
+- P3 Move 1, PR-6b (WP3.A6b): the runtime's boot recovery, `uaos_runtime::boot`. Contract:
+  `docs/adr/appendix/0013-runtime-boot-recovery.md`, written before the code. The state actor
+  is PR-6c's; the bus, CPU pool and DST are PR-6d's.
+  - **The procedure:** after the journal opens, boot does four things, then explains itself:
+    - it refuses a configuration older than the journal's (`CONFIG_DRIFT`), before anything
+      is written;
+    - it restores the stop;
+    - it replays and recovers the ledger, settling open reservations as estimated and never
+      releasing them;
+    - it makes every open intent `Indeterminate` once (`crash_recovery`).
+
+    The explanation is one critical `kernel.booted` record with the counts.
+  - **Contract:** the event type `kernel.booted` (`types::ALL` grows from 15 to 16).
+  - **Tests:** drift, the stop, the ledger, intents, the boot record, and a convergence
+    property: a boot cut after its n-th append, for every n, converges on the next boot.
+  - **Bench (§7):** 49,751 records after a crash boot in 867 ms median on the reference
+    machine, about a tenth of it in `boot` itself.
+  - **Negatives:** six seeded violations.
 - P3 Move 1, PR-6a (WP3.A6a): the crate `uaos-runtime`, first half of the runtime spine: the
   kernel stop, admission, the pinned configuration snapshot, declared pricing, the metered relay
   and the supervisor. Contract: `docs/adr/appendix/0013-runtime-relay-and-stop.md`, written before
-  the code. The relay core comes forward from PR-7; the state actor, bus and boot recovery are
-  PR-6b's.
+  the code. The relay core comes forward from PR-7; boot recovery is PR-6b's, the state actor
+  PR-6c's, and the bus PR-6d's.
   - **The stop, the kill switch:**
     - an atomic flag, set before any watcher wakes;
     - admission checks it first (`RUNTIME_STOPPED`, `retry-after` 120 s);
