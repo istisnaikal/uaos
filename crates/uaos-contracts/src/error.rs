@@ -262,6 +262,9 @@ registry! {
     RUNTIME_STOPPED = Runtime 3, Internal, S2, retryable: true, leak: false,
         "error-runtime-stopped", "The kernel is stopped: nothing new is admitted, and live streams were cut.",
         "Run `uaos status` for the reason; a human resumes the kernel with `uaos resume`.";
+    RUNTIME_BOOT_RECORDS_STALE = Runtime 4, Internal, S2, retryable: false, leak: false,
+        "error-runtime-boot-records-stale", "Boot was given journal records that do not end where the journal does; nothing was written.",
+        "Restart UAOS so boot reads the journal afresh; report the trace if it repeats.";
     INGRESS_UNAUTHENTICATED = Ingress 1, User, Info, retryable: false, leak: false,
         "error-ingress-unauthenticated", "The request did not carry a valid UAOS credential.",
         "Use the key printed by `uaos init`, or run the agent under `uaos run --`.";

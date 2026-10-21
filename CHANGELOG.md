@@ -173,12 +173,15 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - it makes every open intent `Indeterminate` once (`crash_recovery`).
 
     The explanation is one critical `kernel.booted` record with the counts.
-  - **Contract:** the event type `kernel.booted` (`types::ALL` grows from 15 to 16).
+  - **Contract:** the event type `kernel.booted` (`types::ALL` grows from 15 to 16), and the
+    error code `RUNTIME_BOOT_RECORDS_STALE` (Runtime 4).
   - **Tests:** drift, the stop, the ledger, intents, the boot record, and a convergence
     property: a boot cut after its n-th append, for every n, converges on the next boot.
   - **Bench (§7):** 49,751 records after a crash boot in 867 ms median on the reference
     machine, about a tenth of it in `boot` itself.
-  - **Negatives:** six seeded violations.
+  - **Negatives:** eleven seeded violations.
+  - **Review:** the V1 review (0 High, 7 Medium, 9 Low) is filed in
+    `docs/reviews/WP3.A6b-boot-recovery.md`.
 - P3 Move 1, PR-6a (WP3.A6a): the crate `uaos-runtime`, first half of the runtime spine: the
   kernel stop, admission, the pinned configuration snapshot, declared pricing, the metered relay
   and the supervisor. Contract: `docs/adr/appendix/0013-runtime-relay-and-stop.md`, written before
