@@ -495,7 +495,7 @@ impl<B> RelayBody<B> {
         self.ready.clear();
         self.upstream = None;
         if reason.engages_stop() {
-            // The state actor journals the record through `Stop::unrecorded` (PR-6b).
+            // The state actor journals the record through `Stop::unrecorded` (PR-6c).
             let _engaged = self.stop.engage(StopReason::BudgetOverrun);
         }
         self.phase = Phase::Ending(RelayEnd::Cut(reason));
