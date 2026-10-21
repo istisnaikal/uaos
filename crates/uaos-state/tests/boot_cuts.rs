@@ -195,6 +195,7 @@ fn draft(n: u64, chunk: Option<uaos_contracts::digest::ChunkRef>) -> EventDraft 
         pocket_id: chunk.map(|_| pocket()),
         operation_id: None,
         request_id: None,
+        agent_id: None,
         correlation_id: CorrelationId::from_parts(n, random),
         parent_id: None,
         actor: Actor::System,
