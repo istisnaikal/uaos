@@ -3166,7 +3166,7 @@ The journal is tamper-proof.
             gate: "test",
             tool: None,
             // Review M2: usage is read from every event, whatever its kind.
-            seed: replace("crates/uaos-runtime/src/relay.rs", "        match self.read(&data)? {\n", "        match if kind == FrameKind::Usage { self.read(&data)? } else { None } {\n"),
+            seed: replace("crates/uaos-runtime/src/relay.rs", "            self.read(&data)?\n", "            if kind == FrameKind::Usage { self.read(&data)? } else { None }\n"),
             runner: Runner::Program {
                 program: "cargo",
                 args: &["test", "-p", "uaos-runtime", "--test", "relay", "usage_on_an_end_frame_is_metered"],
@@ -3222,18 +3222,6 @@ The journal is tamper-proof.
             expect: "a report after the dialect's end counted as final",
         },
         Case {
-            id: "relay-reads-content-frames",
-            gate: "test",
-            tool: None,
-            // Final review M2: a content frame is forwarded unread.
-            seed: replace("crates/uaos-runtime/src/relay.rs", "        if matches!(kind, FrameKind::Ping | FrameKind::Content | FrameKind::Other) {\n", "        if matches!(kind, FrameKind::Ping) {\n"),
-            runner: Runner::Program {
-                program: "cargo",
-                args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_content_frame_is_forwarded_unread"],
-            },
-            expect: "a content frame was cut for its JSON",
-        },
-        Case {
             id: "admission-tells-a-misfit-to-retry",
             gate: "test",
             tool: None,
@@ -3244,6 +3232,54 @@ The journal is tamper-proof.
                 args: &["test", "-p", "uaos-runtime", "--test", "stop", "a_request_that_can_never_fit_is_not_told_to_retry"],
             },
             expect: "a request that can never fit was told to retry",
+        },
+        Case {
+            id: "relay-content-json-cuts",
+            gate: "test",
+            tool: None,
+            // Round 4 M-1: a content frame's JSON never cuts a stream.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "            self.read(&data).unwrap_or(None)\n", "            self.read(&data)?\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_content_frame_never_cuts_for_its_json"],
+            },
+            expect: "a content frame was cut for its JSON",
+        },
+        Case {
+            id: "relay-skips-content-frames",
+            gate: "test",
+            tool: None,
+            // Round 4 M-1: a usage report on a frame the codec mislabels is still metered.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "            self.read(&data).unwrap_or(None)\n", "            None\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "usage_on_a_mislabelled_frame_is_still_metered"],
+            },
+            expect: "usage on a mislabelled frame went unmetered",
+        },
+        Case {
+            id: "relay-node-bound-too-tight",
+            gate: "test",
+            tool: None,
+            // Round 4 L-3: a frame read for usage may hold the request's own 2^20 nodes.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "const MAX_EVENT_NODES: u32 = 1 << 20;\n", "const MAX_EVENT_NODES: u32 = 65_536;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_large_end_frame_within_the_bounds_is_metered"],
+            },
+            expect: "a large end frame within the bounds was cut",
+        },
+        Case {
+            id: "relay-idle-timeout-uncapped",
+            gate: "test",
+            tool: None,
+            // Final review L1: a timeout over a year arms no timer.
+            seed: replace("crates/uaos-runtime/src/relay.rs", "        if self.limits.idle_timeout > MAX_IDLE_TIMEOUT {\n", "        if self.limits.idle_timeout > Duration::MAX {\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-runtime", "--test", "relay", "a_huge_idle_timeout_disables_the_cut_without_a_panic"],
+            },
+            expect: "a huge idle timeout panicked",
         },
     ]
 }

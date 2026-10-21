@@ -262,7 +262,7 @@ splices.
 |---|---|---|
 | `endpoints()` | `&[EndpointDecl]` | method, path pattern (path only, never the query; a final `*` matches whole segments), class `governed`, `metadata` or `denied` (D-28). A path that is not canonical (percent-encoding, a backslash, an empty or dot segment) matches no pattern. `classify` gives a request its class: `denied` when the path is not canonical or no endpoint matches, and the most restrictive class (`denied`, then `governed`, then `metadata`) when several match |
 | `roles(&StructuralView, &mut RoleMap)` | `Result<(), CodecError>` | assigns the roles of ADR-0014 through selectors only; a codec never computes a byte offset |
-| `frame(&SseEvent)` | `FrameKind` | classifies a stream frame: content, usage, ping, error, end |
+| `frame(&SseEvent)` | `FrameKind` | classifies a stream frame: content, usage, ping, error, end. A frame whose data holds the dialect's usage object, even beside content, is usage, end or error: the runtime reads those strictly and content only best effort (runtime contract `0013-runtime-relay-and-stop.md` §7.3) |
 | `dimensions()` | `&[Code]` | the billing dimensions its usage reports may name: a fixed set, never read from a response |
 | `usage(&StructuralView)` | `Option<UsageReport>` | the billing dimensions the response reports (ADR-0016, M2), each declared and named once; the host refuses a report naming another (`UsageReport::check`) |
 

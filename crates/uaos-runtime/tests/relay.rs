@@ -42,6 +42,10 @@ const CEILING: i64 = 105_000;
 /// A test codec: the Anthropic and `OpenAI` frame names, usage under `usage`, `message.usage` or
 /// `response.usage`. It records every event it is shown.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "test codec: each flag is one independent misbehaviour a test injects"
+)]
 struct Dialect {
     dims: Vec<Code>,
     seen: Mutex<Vec<(Option<String>, Vec<u8>)>>,
@@ -52,6 +56,9 @@ struct Dialect {
     /// Return a report even when it names no dimension, as a codec that adds only the fields it
     /// finds would (scoped round M-a).
     empty_reports: bool,
+    /// Classify `message_start`, which carries the input tokens, as other: the mislabel round 4
+    /// M-1 found would fail open.
+    start_as_other: bool,
 }
 
 impl Dialect {
@@ -62,6 +69,7 @@ impl Dialect {
             rogue: false,
             content_only: false,
             empty_reports: false,
+            start_as_other: false,
         }
     }
 
@@ -116,13 +124,16 @@ impl DialectCodec for Dialect {
         if self.content_only {
             return FrameKind::Content;
         }
+        if self.start_as_other && event.event == Some("message_start") {
+            return FrameKind::Other;
+        }
         match event.event {
             Some("message_start" | "message_delta") => FrameKind::Usage,
             Some("ping") => FrameKind::Ping,
             Some("message_stop" | "response.completed") => FrameKind::End,
             Some("error") => FrameKind::Error,
             None if event.data == b"[DONE]" => FrameKind::End,
-            None if event.data.windows(7).any(|w| w == b"\"usage\"") => FrameKind::Usage,
+            None if event.data.windows(9).any(|w| w == b"\"usage\":{") => FrameKind::Usage,
             Some(_) | None => FrameKind::Content,
         }
     }
@@ -299,7 +310,8 @@ async fn openai_shaped_streams_are_relayed_and_metered() {
         b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"usage\":{\"input_tokens\":50,\"output_tokens\":100}}}\n\n",
     ];
     let chat: [&[u8]; 3] = [
-        "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"Stra\u{df}e\"}}]}\n\n".as_bytes(),
+        // Round 4 L-4: with `include_usage`, every chunk carries `"usage":null`.
+        "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"Stra\u{df}e\"}}],\"usage\":null}\n\n".as_bytes(),
         b"data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"input_tokens\":50,\"output_tokens\":100}}\n\n",
         b"data: [DONE]\n\n",
     ];
@@ -370,43 +382,75 @@ async fn one_nano_usd_over_the_ceiling_is_never_forwarded() {
 async fn usage_on_an_end_frame_is_metered() {
     // Review M2: usage is read from an end frame, not only from a usage frame.
     let completed: &[u8] = b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"usage\":{\"input_tokens\":50,\"output_tokens\":101}}}\n\n";
-    for over in [completed] {
-        let codec = Arc::new(Dialect::new());
-        let (up, _, _) = upstream(&[START, over], false);
-        let (mut body, _rx) = relay(&codec, &Stop::running(), RelayLimits::default())
-            .sse(up, &HeaderMap::new())
-            .unwrap();
-        let (out, error) = drain(&mut body).await;
-        assert_eq!(
-            (out, error),
-            (START.to_vec(), Some(RelayError::Cut(CutReason::BudgetOverrun))),
-            "usage on an end frame went unmetered"
-        );
-    }
+    let codec = Arc::new(Dialect::new());
+    let (up, _, _) = upstream(&[START, completed], false);
+    let (mut body, _rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let (out, error) = drain(&mut body).await;
+    assert_eq!(
+        (out, error),
+        (START.to_vec(), Some(RelayError::Cut(CutReason::BudgetOverrun))),
+        "usage on an end frame went unmetered"
+    );
 }
 
 #[tokio::test]
-async fn a_content_frame_is_forwarded_unread() {
-    // Final review M2: a content frame is the model's output, and its JSON never cuts a stream.
+async fn usage_on_a_mislabelled_frame_is_still_metered() {
+    // Round 4 M-1: a content or other frame is read best effort, so the input tokens of a
+    // `message_start` the codec calls other are still metered, and settle as final.
+    let codec = Arc::new(Dialect {
+        start_as_other: true,
+        ..Dialect::new()
+    });
+    let (up, _, _) = upstream(&[START, DELTA, DELTA_100, STOP], false);
+    let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    assert_eq!(drain(&mut body).await.1, None);
+    let report = report(rx).await;
+    assert_eq!(
+        (report.cost, report.settlement()),
+        (Some(NanoUsd::new(CEILING)), Usage::Reported(NanoUsd::new(CEILING))),
+        "usage on a mislabelled frame went unmetered"
+    );
+}
+
+#[tokio::test]
+async fn a_large_end_frame_within_the_bounds_is_metered() {
+    // Round 4 L-3: an end frame that echoes a long output (200,000 values, every GA locale)
+    // stays inside the read bounds, so it is metered and not cut.
+    let values = vec!["0"; 200_000].join(",");
+    let text = "\u{130}stanbul \u{df} \u{e9}t\u{e9} \u{f1} \u{e8} \u{645}\u{64e}\u{631}\u{652}\u{62d}\u{64e}\u{628}\u{64b}\u{627}";
+    let completed = format!(
+        "event: response.completed\ndata: {{\"type\":\"response.completed\",\"response\":{{\"usage\":{{\"input_tokens\":50,\"output_tokens\":100}},\"text\":\"{text}\",\"logprobs\":[{values}]}}}}\n\n"
+    );
+    let codec = Arc::new(Dialect::new());
+    let (up, _, _) = upstream(&[completed.as_bytes()], false);
+    let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    let (out, error) = drain(&mut body).await;
+    assert_eq!(
+        (error, out.len(), report(rx).await.cost),
+        (None, completed.len(), Some(NanoUsd::new(CEILING))),
+        "a large end frame within the bounds was cut"
+    );
+}
+
+#[tokio::test]
+async fn a_content_frame_never_cuts_for_its_json() {
+    // Final review M2: a content frame is the model's output, and its JSON never cuts a stream;
+    // it is read best effort (round 4 M-1).
     // A lone surrogate escape: an emoji split across two text deltas, which `uaos-json` refuses.
     let lone = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"~ud83d\"}}\n\n"
         .replace("~u", "\\u");
-    // Usage on a frame the codec calls content is the codec's defect, not metered here.
-    let usage_on_content: &[u8] =
-        b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"usage\":{\"output_tokens\":999}}\n\n";
     // A server tool's result arrives whole in one event: 2 MiB, past the old 1 MiB bound.
     let document = "A".repeat(2 * 1024 * 1024);
     let tool_result = format!(
         "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{{\"type\":\"web_fetch_tool_result\",\"content\":{{\"type\":\"document\",\"source\":{{\"data\":\"{document}\"}}}}}}}}\n\n"
     );
-    let parts: [&[u8]; 6] = [
-        START,
-        lone.as_bytes(),
-        usage_on_content,
-        tool_result.as_bytes(),
-        DELTA_100,
-        STOP,
-    ];
+    let parts: [&[u8]; 5] = [START, lone.as_bytes(), tool_result.as_bytes(), DELTA_100, STOP];
     let codec = Arc::new(Dialect::new());
     let (up, _, _) = upstream(&parts, false);
     let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
@@ -855,24 +899,53 @@ async fn a_slow_client_never_causes_an_idle_cut() {
 
 #[tokio::test(start_paused = true)]
 async fn a_huge_idle_timeout_disables_the_cut_without_a_panic() {
-    // Final review L1: tokio's timer adds to a deadline itself, so a timeout near the clock's
-    // end must not arm one.
+    // Final review L1, round 4 L-1: tokio's timer adds to a deadline itself. The largest
+    // timeout the clock can still add makes that addition overflow, so it must not arm a timer.
+    let now = tokio::time::Instant::now();
+    let mut secs = 0_u64;
+    for bit in (0..64).rev() {
+        let more = secs | (1 << bit);
+        if now.checked_add(Duration::from_secs(more)).is_some() {
+            secs = more;
+        }
+    }
+    let mut nanos = 0_u32;
+    for bit in (0..30).rev() {
+        let more = nanos | (1 << bit);
+        if more < 1_000_000_000 && now.checked_add(Duration::new(secs, more)).is_some() {
+            nanos = more;
+        }
+    }
     let limits = RelayLimits {
-        idle_timeout: Duration::MAX,
+        idle_timeout: Duration::new(secs, nanos),
         ..RelayLimits::default()
     };
     let codec = Arc::new(Dialect::new());
     let (up, _, keep) = upstream(&[], true);
     let tx = keep.unwrap();
-    let (mut body, _rx) = relay(&codec, &Stop::running(), limits)
+    let (body, _rx) = relay(&codec, &Stop::running(), limits)
         .sse(up, &HeaderMap::new())
         .unwrap();
-    let feeder = async move {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        tx.send(Ok(Bytes::from_static(PING))).await.unwrap();
-    };
-    let ((out, error), ()) = tokio::join!(drain(&mut body), feeder);
-    assert_eq!((out, error), (PING.to_vec(), None));
+    // Its own task, so a panic inside the body is caught here rather than failing the test.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a test task, so a panic in the body is observed"
+    )]
+    let relayed = tokio::spawn(async move {
+        let mut body = body;
+        drain(&mut body).await
+    });
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    // Fails only if the body is gone, which the assertion below explains.
+    let _sent = tx.send(Ok(Bytes::from_static(PING))).await;
+    drop(tx);
+    let relayed = relayed.await;
+    assert!(
+        relayed
+            .as_ref()
+            .is_ok_and(|(out, error)| out == PING && error.is_none()),
+        "a huge idle timeout panicked"
+    );
 }
 
 #[tokio::test]
