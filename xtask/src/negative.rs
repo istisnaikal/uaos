@@ -2317,6 +2317,40 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "recall below",
         },
         Case {
+            id: "redact-url-separator-ends-userinfo",
+            gate: "redaction-corpus",
+            tool: None,
+            // ADR-0009 Amendment 2 (CI seed 4814893562051029426): the user is looked for only before
+            // the cut again, so `https://u://pw@h` loses its password.
+            seed: replace(
+                "crates/uaos-redact/src/detect.rs",
+                "user_end(text.get(after..cut.map_or(end, |cut| cut + 1))?)?",
+                "user_end(text.get(after..end)?)?",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-redact", "--lib", "url_passwords_may_hold_a_scheme_separator"],
+            },
+            expect: "a password holding `://` survived",
+        },
+        Case {
+            id: "redact-url-chain-past-list-byte",
+            gate: "redaction-corpus",
+            tool: None,
+            // ADR-0009 Amendment 2: a userinfo runs on past a `://` that another URL starts after a
+            // list byte, so a URL list reads as one password.
+            seed: replace(
+                "crates/uaos-redact/src/detect.rs",
+                "        Some(i) => !before.get(i).is_some_and(|b| LIST_BYTES.contains(b)),\n",
+                "        Some(_) => true,\n",
+            ),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-redact", "--lib", "another_url_after_a_list_byte_stays_another_url"],
+            },
+            expect: "two listed URLs read as one",
+        },
+        Case {
             id: "redact-url-password-stops-at-slash",
             gate: "redaction-corpus",
             tool: None,

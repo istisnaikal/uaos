@@ -929,6 +929,17 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Fixed
 
+- Redaction (ADR-0009 Amendment 2): a URL password that starts with `//`
+  (`https://u://pw@host`) or holds `://` was missed by detection and by the final scan. CI found
+  it on PR #41's Windows run (seed 4814893562051029426).
+  - **Fix:** the userinfo now runs on past a `://` unless another URL starts there after a list
+    or nesting byte. The scan stays linear.
+  - **Remaining stated limit:** the one shape still missed is stated in ADR-0009, and the
+    corpus generator leaves it out.
+  - **Tests:** the CI seed is a fixed case, with unit tests for each shape and for URL lists.
+  - **Negatives:** two seeded violations, `redact-url-separator-ends-userinfo` and
+    `redact-url-chain-past-list-byte`.
+
 - **`WallTime::from_unix_nanos` no longer panics on far out-of-range values.**
   - For nanoseconds far outside jiff's range (for example `u64::MAX` milliseconds as nanoseconds),
     jiff 0.2.38 reached an internal assertion instead of returning its error.

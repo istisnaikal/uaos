@@ -250,6 +250,23 @@ pub(crate) fn embed(rng: &mut Prng, text: &str) -> String {
     rng.pick(CONTEXTS).replace("%S%", text)
 }
 
+/// Whether `password` holds the URL rule's stated miss (ADR-0009, limits): a `://` whose
+/// scheme-like run follows a list or nesting byte, which reads as another URL starting there.
+/// The bytes are the detector's `LIST_BYTES`.
+fn reads_as_another_url(password: &str) -> bool {
+    let bytes = password.as_bytes();
+    let scheme = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-');
+    (0..bytes.len())
+        .filter(|&i| bytes.get(i..).is_some_and(|rest| rest.starts_with(b"://")))
+        .any(|cut| {
+            let before = bytes.get(..cut).unwrap_or_default();
+            match before.iter().rposition(|&b| !scheme(b)) {
+                Some(i) if i + 1 < before.len() => before.get(i).is_some_and(|b| b",;|=&?/([{'".contains(b)),
+                _ => false,
+            }
+        })
+}
+
 /// A secret of `class`.
 #[allow(clippy::too_many_lines, reason = "one generator per class, side by side")]
 pub(crate) fn secret(rng: &mut Prng, class: DataClass) -> Sample {
@@ -389,11 +406,16 @@ pub(crate) fn secret(rng: &mut Prng, class: DataClass) -> Sample {
                     rng.chars_in(DIGITS, 0, 2)
                 )
             };
-            let mut password = rng.chars_in(PASSWORD, 8, 32);
-            if rng.chance(10) {
-                let at = rng.range(1, password.len() - 1);
-                password.insert(at, '@');
-            }
+            let password = loop {
+                let mut password = rng.chars_in(PASSWORD, 8, 32);
+                if rng.chance(10) {
+                    let at = rng.range(1, password.len() - 1);
+                    password.insert(at, '@');
+                }
+                if !reads_as_another_url(&password) {
+                    break password;
+                }
+            };
             let host = rng.pick(&[
                 "db.example.com",
                 "localhost",
