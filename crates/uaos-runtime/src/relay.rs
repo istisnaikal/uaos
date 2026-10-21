@@ -31,7 +31,7 @@ use tokio::time::{Instant, Sleep};
 use uaos_contracts::error::{ErrorCode, codes};
 use uaos_contracts::money::NanoUsd;
 use uaos_ledger::{InFlight, Reservation, Usage};
-use uaos_module_api::{Code, DialectCodec, FrameKind, Mask, SseEvent, StructuralView, UsageReport};
+use uaos_module_api::{Code, DialectCodec, FrameKind, Mask, SseEvent, UsageReport};
 
 use crate::price::{Price, PriceError};
 use crate::sse::{self, PushError, Splitter};
@@ -398,13 +398,13 @@ impl Meter {
             return Ok(None);
         }
         let tape = uaos_json::parse(data, &self.parse).map_err(|_| CutReason::UnreadableUsage)?;
-        let mut mask = Mask::new();
-        mask.seal(&tape).map_err(|_| CutReason::UnreadableUsage)?;
+        let mask = Mask::new();
+        let sealed = mask.seal(&tape).map_err(|_| CutReason::UnreadableUsage)?;
         // A report naming no dimension says nothing; on a usage frame it cuts, and it can never
         // settle as a final cost of zero (scoped round M-a).
         Ok(self
             .codec
-            .usage(&StructuralView::new(&tape, &mask))
+            .usage(&sealed.view())
             .filter(|report| !report.dims().is_empty()))
     }
 
