@@ -330,11 +330,12 @@ impl DetectorSet {
     /// The password of `scheme://user:password@host` (review H2; V1 review of hardening II).
     ///
     /// * The userinfo window runs from the anchor to the first hard stop (whitespace, control,
-    ///   `"`, `<`, `>`, backtick), at most [`USERINFO_MAX`] bytes, and to the next `://`. The
-    ///   userinfo runs on past that `://` unless another URL starts there ([`runs_on_past`]):
-    ///   the anchor at it continues this one ([`OpenUserinfo`]), so a password may hold `://`
-    ///   or start with `//` (CI seed 4814893562051029426: `https://u://pw@h` was missed), and
-    ///   two URLs a list byte separates stay two passwords.
+    ///   `"`, `<`, `>`, backtick), at most [`USERINFO_MAX`] bytes, and to the next `://`. Each
+    ///   anchor reads its own URL in that window ([`own_password`]).
+    /// * A userinfo may also run on past that `://` ([`open_userinfo`]): the anchor there
+    ///   continues it ([`OpenUserinfo`]), so a password may hold `://` or start with `//` (CI
+    ///   seed 4814893562051029426: `https://u://pw@h` was missed). A chain only ever adds to
+    ///   what each anchor finds alone (V1 review of Amendment 2, H1).
     /// * An authority that starts with an IPv6 literal has no userinfo.
     /// * The user ends at the first `:`, skipping over placeholders (a user redacted in an
     ///   earlier round still has its password found); a `/`, `?` or `#` before it means there is
@@ -361,57 +362,155 @@ impl DetectorSet {
             .and_then(|window| self.url_scheme.find(window))
             .map(|next| after + next);
         let end = cut.unwrap_or(stop);
-        let window = text.get(after..end)?;
-        memo.charge(window.len());
-        let (user, pass_from, carried) = if let Some(open) = open {
-            (open.user, open.pass_from, open.at)
+        memo.charge(end - after);
+        // This anchor's own URL, read alone: a chain only ever adds to it.
+        let own = if has_scheme {
+            own_password(text, after, end)
         } else {
-            if starts_with_ipv6_literal(window) {
-                return None;
-            }
-            // Up to and including the cut's `:`, which may be the user's own (`u://pw@h`).
-            let user_end = after + user_end(text.get(after..cut.map_or(end, |cut| cut + 1))?)?;
-            (after..user_end, user_end + 1, None)
+            None
         };
-        // The last `@` a host follows ends the password.
-        let from = pass_from.max(after);
-        let at = text
-            .get(from..end)
-            .and_then(|rest| {
-                memchr::memrchr_iter(b'@', rest)
-                    .map(|i| from + i)
-                    .find(|&at| at + 1 < end && text.get(at + 1).copied().is_some_and(host_start))
-            })
-            .or(carried);
-        if let Some(cut) = cut
-            && cut - user.start <= USERINFO_MAX
-            && runs_on_past(text, after, cut)
-        {
-            memo.url_open = Some(OpenUserinfo {
-                user,
-                pass_from,
-                at,
-                cut,
-            });
-            return None;
-        }
-        let at = at?;
-        let candidate = text.get(pass_from..at)?;
-        let user = text.get(user)?;
-        let not_a_password = candidate.is_empty()
-            || is_placeholder(candidate)
-            || port_then_path(user, candidate)
-            || scp_path(user, candidate)
-            || is_template(candidate);
-        (!not_a_password).then_some(pass_from..at)
+        let chained = if let Some(open) = open {
+            continue_userinfo(text, open, after, end, cut, memo)
+        } else {
+            open_userinfo(text, after, end, cut, memo);
+            None
+        };
+        chained.or(own)
     }
 }
 
-/// Longest userinfo we inspect.
+/// The password of the URL whose authority starts at `after`, read alone in its window
+/// `after..end` (see [`DetectorSet::url_password`]).
+fn own_password(text: &[u8], after: usize, end: usize) -> Option<Range<usize>> {
+    let window = text.get(after..end)?;
+    if starts_with_ipv6_literal(window) {
+        return None;
+    }
+    let user = after..after + user_end(window)?;
+    let pass_from = user.end + 1;
+    let at = last_host_at(text, pass_from, end)?;
+    password(text, user, pass_from, at)
+}
+
+/// `pass_from..at`, unless for `user` it reads as something else (see
+/// [`DetectorSet::url_password`]).
+fn password(text: &[u8], user: Range<usize>, pass_from: usize, at: usize) -> Option<Range<usize>> {
+    let candidate = text.get(pass_from..at)?;
+    let user = text.get(user)?;
+    let not_a_password = candidate.is_empty()
+        || is_placeholder(candidate)
+        || port_then_path(user, candidate)
+        || scp_path(user, candidate)
+        || is_template(candidate);
+    (!not_a_password).then_some(pass_from..at)
+}
+
+/// The last `@` in `from..end` that a host byte follows before `end`: where a password ends.
+fn last_host_at(text: &[u8], from: usize, end: usize) -> Option<usize> {
+    let rest = text.get(from..end)?;
+    memchr::memrchr_iter(b'@', rest)
+        .map(|i| from + i)
+        .find(|&at| at + 1 < end && text.get(at + 1).copied().is_some_and(host_start))
+}
+
+/// Opens the userinfo of the URL whose authority starts at `after` past the `://` at `cut`,
+/// for the anchor there to continue, when it may run on (ADR-0009 Amendment 2):
+/// * the user is plain ([`plain_user`]), and ends before the cut or at the cut's own `:` (a
+///   password starting with `//`);
+/// * the text after the user's `:` does not start with a port and a path ([`starts_with_port`]);
+/// * another URL does not start at the cut ([`runs_on_past`]);
+/// * the userinfo so far is at most [`USERINFO_MAX`] bytes.
+fn open_userinfo(text: &[u8], after: usize, end: usize, cut: Option<usize>, memo: &mut Memo) {
+    let Some(cut) = cut else {
+        return;
+    };
+    // Up to and including the cut's `:`, which may be the user's own (`u://pw@h`).
+    let Some(window) = text.get(after..=cut) else {
+        return;
+    };
+    if starts_with_ipv6_literal(window) {
+        return;
+    }
+    let Some(user_len) = user_end(window) else {
+        return;
+    };
+    let user = after..after + user_len;
+    let pass_from = user.end + 1;
+    let so_far = text.get(pass_from.min(cut)..cut).unwrap_or_default();
+    let opens = text.get(user.clone()).is_some_and(plain_user)
+        && !starts_with_port(so_far)
+        && cut - user.start <= USERINFO_MAX
+        && runs_on_past(text, after, cut);
+    if opens {
+        let at = last_host_at(text, pass_from, end);
+        memo.url_open = Some(OpenUserinfo {
+            user,
+            pass_from,
+            at,
+            cut,
+        });
+    }
+}
+
+/// Continues an open userinfo at the anchor after its cut, in the window `after..end`: it runs on
+/// past this window's `://` too, or ends at the last `@` a host follows.
+fn continue_userinfo(
+    text: &[u8],
+    open: OpenUserinfo,
+    after: usize,
+    end: usize,
+    cut: Option<usize>,
+    memo: &mut Memo,
+) -> Option<Range<usize>> {
+    let at = last_host_at(text, after, end).or(open.at);
+    if let Some(cut) = cut
+        && cut - open.user.start <= USERINFO_MAX
+        && runs_on_past(text, after, cut)
+    {
+        memo.url_open = Some(OpenUserinfo { at, cut, ..open });
+        return None;
+    }
+    password(text, open.user, open.pass_from, at?)
+}
+
+/// A user whose userinfo may run on past a `://`: empty, or scheme bytes and `_`, with whole
+/// placeholders from an earlier round. Any other byte (`\`, `)`, `!`, `%`, `@`, a list byte,
+/// non-ASCII) is more likely glue between two URLs, before a password starting with `//`
+/// (`http://mirror.example.com\nssh://git@…`, V1 review of Amendment 2, M1) or before a
+/// scheme's own `:` (`http://mirror.example.com!jdbc:mysql://db/app?user=bob@corp.com`, which
+/// the corpus's `url-glued` family found).
+fn plain_user(user: &[u8]) -> bool {
+    let mut i = 0;
+    while let Some(&b) = user.get(i) {
+        if b == b'[' {
+            let Some(n) = user.get(i..).and_then(placeholder_len) else {
+                return false;
+            };
+            i += n;
+        } else if scheme_byte(b) || b == b'_' {
+            i += 1;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether the text after a user's `:` starts with a port and `/`, `?` or `#`: the URL is
+/// `host:port/…`, which holds no userinfo, so no `://` after it continues one (V1 review of
+/// Amendment 2, H1: `http://localhost:8080/?url=jdbc:mysql://root:pw@db`).
+fn starts_with_port(bytes: &[u8]) -> bool {
+    let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+    (1..=5).contains(&digits) && matches!(bytes.get(digits), Some(b'/' | b'?' | b'#'))
+}
+
+/// Longest window we inspect after an anchor. A userinfo runs on past a `://` only while it is
+/// at most this long, so with the window after its last `://` it spans at most twice this and
+/// three bytes (Amendment 2).
 const USERINFO_MAX: usize = 512;
 
 /// Bytes that end a list element or open a nested value: another URL can start after one.
-const LIST_BYTES: &[u8] = b",;|=&?/([{'";
+const LIST_BYTES: &[u8] = b",;|=&?/([{']";
 
 /// A byte a host can start with.
 fn host_start(b: u8) -> bool {
@@ -428,7 +527,8 @@ fn scheme_byte(b: u8) -> bool {
 /// list or nesting byte ([`LIST_BYTES`]: `a://h,b://`, `?next=https://`). A run from `from` is
 /// the user or the start of the password (`https://u://pw@h`); no run is no scheme
 /// (`u:a#://b@h`); a run after any other byte is the password's (`u:ab://cd@h`, `u:p@ss://x@h`).
-/// Two URLs glued without a list byte are therefore read as one: over-redaction, never a leak.
+/// Two URLs glued without a list byte can therefore read as one: over-redaction. Each anchor
+/// still reads its own URL, so a chain never hides a password that URL holds alone.
 fn runs_on_past(text: &[u8], from: usize, cut: usize) -> bool {
     let Some(before) = text.get(from..cut) else {
         return false;
@@ -881,10 +981,41 @@ mod tests {
             ("postgres://app:a#://cd@db".to_owned(), "a#://cd"),
             ("postgres://app:p@ss://x@db".to_owned(), "p@ss://x"),
             ("x://u:a://b://c@h".to_owned(), "a://b://c"),
+            ("https://u://ab://cd@h".to_owned(), "//ab://cd"),
         ] {
             assert!(
                 url(&text) == [expected],
                 "a password holding `://` survived: case {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_and_port_never_hide_the_next_urls_password() {
+        // V1 review of Amendment 2, H1: a chain from `host:port/…` swallowed the next URL, whose
+        // password was then dropped as `host:port/path`.
+        for (text, expected) in [
+            (
+                "http://localhost:8080/connect?url=jdbc:mysql://root:s3cretpw@db.internal:3306/app",
+                "s3cretpw",
+            ),
+            (
+                "https://metabase.example.com:3000/setup#jdbc:postgresql://admin:Hunter2pw@pg.internal:5432/app",
+                "Hunter2pw",
+            ),
+            (
+                "http://localhost:8081/#mongodb://admin:secretpw@mongo:27017",
+                "secretpw",
+            ),
+            (
+                "ssh://git@gitea.example.com:2222/org/repo.git#scm:git:https://bot:ghTokenValue1@github.com/org/repo",
+                "ghTokenValue1",
+            ),
+            ("http://10.0.0.5:8080/x!https://admin:secretpw@db", "secretpw"),
+        ] {
+            assert!(
+                url(text) == [expected],
+                "a host and port hid the next URL's password: {expected:?}"
             );
         }
     }
@@ -906,6 +1037,27 @@ mod tests {
             assert!(
                 url(text).is_empty(),
                 "another URL after a list byte read as a password: {text}"
+            );
+        }
+        // V1 review of Amendment 2, M1: glue that is no list byte, between a URL with no userinfo
+        // and one with a user and no password.
+        for text in [
+            "http://mirror.example.com\\nssh://git@github.com/org/repo.git",
+            "https://pypi.org\\ngit+ssh://git@github.com/org/lib.git",
+            "http://example.com)https://git@github.com/org/repo",
+            "http://example.com%0Ahttps://git@github.com/org/repo",
+            "http://web%0Ahttps://git@github.com/org/repo",
+            "http://example.com\u{2192}https://git@github.com/org/repo",
+            "http://gitea:3000/org/repo.git\\nssh://git@github.com/org/repo.git",
+            "http://web:8080/x#https://git@github.com/org/repo",
+            "http://web:8000/?next=jdbc:mysql://db:3306/app?user=bob@corp.com",
+            "http://mirror.example.com!jdbc:mysql://db:3306/app?user=bob@corp.com",
+            "http://mirror.example.com%0Ajdbc:mysql://db:3306/app?user=bob@corp.com",
+            "http://mirror.example.com\\njdbc:mysql://db:3306/app?user=bob@corp.com",
+        ] {
+            assert!(
+                url(text).is_empty(),
+                "a URL glued to another read as a password: {text}"
             );
         }
     }

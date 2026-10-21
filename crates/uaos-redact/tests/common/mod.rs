@@ -250,21 +250,41 @@ pub(crate) fn embed(rng: &mut Prng, text: &str) -> String {
     rng.pick(CONTEXTS).replace("%S%", text)
 }
 
-/// Whether `password` holds the URL rule's stated miss (ADR-0009, limits): a `://` whose
-/// scheme-like run follows a list or nesting byte, which reads as another URL starting there.
-/// The bytes are the detector's `LIST_BYTES`.
+/// Whether `password` holds the URL rule's stated miss (ADR-0009, limits), for a plain user:
+/// - a `://` in it whose scheme-like run follows a list or nesting byte since the previous
+///   `://` (or since the user's `:`), which reads as another URL starting there;
+/// - a `://` in a password that starts with a port and `/`, `?` or `#` (`host:port/…`).
+///
+/// It mirrors the detector's `runs_on_past` and `starts_with_port`, read on `:` and the password
+/// as the detector reads them after the user; the bytes are its `LIST_BYTES`.
 fn reads_as_another_url(password: &str) -> bool {
-    let bytes = password.as_bytes();
+    let text = format!(":{password}");
+    let bytes = text.as_bytes();
     let scheme = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-');
-    (0..bytes.len())
+    let cuts: Vec<usize> = (0..bytes.len())
         .filter(|&i| bytes.get(i..).is_some_and(|rest| rest.starts_with(b"://")))
-        .any(|cut| {
-            let before = bytes.get(..cut).unwrap_or_default();
-            match before.iter().rposition(|&b| !scheme(b)) {
-                Some(i) if i + 1 < before.len() => before.get(i).is_some_and(|b| b",;|=&?/([{'".contains(b)),
-                _ => false,
-            }
-        })
+        .collect();
+    // A cut at 0 is the user's own `:` before a password starting with `//`.
+    if cuts.iter().any(|&cut| cut > 0) {
+        let pass = password.as_bytes();
+        let digits = pass.iter().take_while(|b| b.is_ascii_digit()).count();
+        if (1..=5).contains(&digits) && matches!(pass.get(digits), Some(b'/' | b'?' | b'#')) {
+            return true;
+        }
+    }
+    let mut from = 0;
+    for &cut in &cuts {
+        let before = bytes.get(from..cut).unwrap_or_default();
+        let list = match before.iter().rposition(|&b| !scheme(b)) {
+            Some(i) if i + 1 < before.len() => before.get(i).is_some_and(|b| b",;|=&?/([{']".contains(b)),
+            _ => false,
+        };
+        if cut > 0 && list {
+            return true;
+        }
+        from = cut + 3;
+    }
+    false
 }
 
 /// A secret of `class`.
@@ -669,7 +689,7 @@ pub(crate) fn leaks(text: &str, secret: &str) -> bool {
 /// possible, and the name of its family (false positives are counted per family).
 #[allow(clippy::too_many_lines, reason = "one near-miss family per arm")]
 pub(crate) fn negative(rng: &mut Prng) -> (&'static str, String) {
-    let (family, core) = match rng.below(46) {
+    let (family, core) = match rng.below(47) {
         0..=5 => return ("prose", prose(rng)),
         6..=7 => ("code", code_line(rng)),
         8 => ("anthropic-short", format!("sk-ant-{}", rng.chars_in(TOKEN, 5, 31))),
@@ -861,6 +881,26 @@ pub(crate) fn negative(rng: &mut Prng) -> (&'static str, String) {
                 "url-template-password",
                 format!("{scheme}://app:{password}@db:5432/app"),
             )
+        }
+        // Two URLs glued by a byte that is no list byte, the second with a user and no password:
+        // no userinfo runs from one into the other (ADR-0009 Amendment 2, its V1 review M1).
+        45 => {
+            let first = rng.pick(&[
+                "http://mirror.example.com",
+                "https://pypi.org/simple",
+                "http://gitea:3000/org/repo.git",
+                "http://web:8080/x",
+                "http://localhost:8000/",
+                "https://ci.example.com:8443/job",
+            ]);
+            let glue = rng.pick(&["\\n", "#", ")", "%0A", "!", "\u{2192}"]);
+            let second = rng.pick(&[
+                "ssh://git@github.com/org/repo.git",
+                "https://git@github.com/org/repo",
+                "git+ssh://git@gitlab.example.com/group/project.git",
+                "jdbc:mysql://db:3306/app?user=bob@corp.com",
+            ]);
+            ("url-glued", format!("{first}{glue}{second}"))
         }
         // Already redacted: an exact placeholder is never a finding.
         _ => (

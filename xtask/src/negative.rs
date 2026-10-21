@@ -2324,8 +2324,8 @@ pub(crate) fn cases() -> Vec<Case> {
             // the cut again, so `https://u://pw@h` loses its password.
             seed: replace(
                 "crates/uaos-redact/src/detect.rs",
-                "user_end(text.get(after..cut.map_or(end, |cut| cut + 1))?)?",
-                "user_end(text.get(after..end)?)?",
+                "    let Some(window) = text.get(after..=cut) else {\n",
+                "    let Some(window) = text.get(after..cut) else {\n",
             ),
             runner: Runner::Program {
                 program: "cargo",
@@ -2349,6 +2349,30 @@ pub(crate) fn cases() -> Vec<Case> {
                 args: &["test", "-p", "uaos-redact", "--lib", "another_url_after_a_list_byte_stays_another_url"],
             },
             expect: "two listed URLs read as one",
+        },
+        Case {
+            id: "redact-url-chain-from-host-port",
+            gate: "redaction-corpus",
+            tool: None,
+            // ADR-0009 Amendment 2, its V1 review H1 and M1: a userinfo opens after `host:port/`.
+            seed: replace("crates/uaos-redact/src/detect.rs", "        && !starts_with_port(so_far)\n", "        && !so_far.is_empty() | true\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-redact", "--lib", "another_url_after_a_list_byte_stays_another_url"],
+            },
+            expect: "a URL glued to another read as a password",
+        },
+        Case {
+            id: "redact-url-chain-any-user",
+            gate: "redaction-corpus",
+            tool: None,
+            // ADR-0009 Amendment 2, its V1 review M1: any user's userinfo runs on past a `://`.
+            seed: replace("crates/uaos-redact/src/detect.rs", "    let opens = text.get(user.clone()).is_some_and(plain_user)\n", "    let opens = text.get(user.clone()).is_some()\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-redact", "--lib", "another_url_after_a_list_byte_stays_another_url"],
+            },
+            expect: "a URL glued to another read as a password",
         },
         Case {
             id: "redact-url-password-stops-at-slash",
