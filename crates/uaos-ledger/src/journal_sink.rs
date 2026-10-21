@@ -11,7 +11,7 @@ use uaos_contracts::event::{Durability, InlinePayload, Metadata, types};
 use uaos_contracts::id::{CorrelationId, OperationId};
 use uaos_contracts::operation::{RiskTier, SideEffectClass};
 use uaos_contracts::wire::ConfigVersion;
-use uaos_state::journal::{EventDraft, Journal, VerifiedRecord};
+use uaos_state::journal::{EventDraft, Journal, JournalError, VerifiedRecord};
 
 use crate::ledger::LedgerSink;
 
@@ -23,6 +23,8 @@ pub struct JournalSink<'a> {
     correlation: CorrelationId,
     operation: Option<OperationId>,
     config_version: ConfigVersion,
+    /// The journal's own error from the last append it refused, kept with its code.
+    refused: Option<JournalError>,
 }
 
 impl<'a> JournalSink<'a> {
@@ -38,7 +40,14 @@ impl<'a> JournalSink<'a> {
             correlation,
             operation,
             config_version,
+            refused: None,
         }
+    }
+
+    /// The journal's error from the last append it refused. The ledger sees only its text
+    /// (`LedgerError::Sink`); a caller that must report the journal's own code takes it here.
+    pub const fn take_refusal(&mut self) -> Option<JournalError> {
+        self.refused.take()
     }
 }
 
@@ -71,7 +80,11 @@ impl LedgerSink for JournalSink<'_> {
             config_version: self.config_version,
             metadata: Metadata::default(),
         };
-        self.journal.append(draft).map(|_| ()).map_err(|e| e.to_string())
+        self.journal.append(draft).map(|_| ()).map_err(|e| {
+            let text = e.to_string();
+            self.refused = Some(e);
+            text
+        })
     }
 }
 

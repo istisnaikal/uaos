@@ -54,11 +54,13 @@ review (D-31).
 first), the configuration snapshot the process starts with, and the correlation id its records
 carry. It runs these steps in this order:
 
-0. **The records are the journal's, before anything is written.** Their last record must be the
-   journal's last: the next sequence number after it is the journal's next. Otherwise boot
-   refuses with `RUNTIME_BOOT_RECORDS_STALE`. A retry with the records of an earlier attempt
-   would repeat its writes (V1 review L2). An empty slice is not checked: a journal whose
-   verified records are all shredded can be empty while its sequence goes on.
+0. **The records are the whole journal, before anything is written.** They start at its genesis
+   (sequence 0) and end at its head: the next sequence number after the last is the journal's
+   next, and the last record's chain hash is the journal's head. A journal never drops a
+   verified record (a shred adds `chunk.shredded`), so an empty slice must mean an empty
+   journal. Otherwise boot refuses with `RUNTIME_BOOT_RECORDS_STALE`. A retry with the records
+   of an earlier attempt, a suffix, or another journal's records would repeat writes, boot a
+   journaled stop running, or rebuild the wrong ledger (V1 review L2, scoped round M1).
 1. **Configuration drift, before anything is written.**
    - The highest `config_version` any record carries is the last configuration the kernel used.
    - A configured version below it means the configuration went back without a record of it, so
@@ -81,10 +83,16 @@ carry. It runs these steps in this order:
    - a half-recorded transfer is completed.
 
    What it cannot close is stuck, an S2 condition for the operator. The boot record counts the
-   stuck items, the report keeps why each stayed open (in memory only), and the ledger refuses
-   new work with `BUDGET_RECOVERY_REQUIRED` until a later recovery closes them. A journal
-   failure while recovering keeps its own code (`JOURNAL_WRITE_FAILED`), not
-   `BUDGET_LEDGER_INCONSISTENT` (V1 review M1).
+   stuck items, and the report keeps why each stayed open (in memory only). The ledger refuses
+   new work with `BUDGET_RECOVERY_REQUIRED`. That code is registered S3, retryable, "wait for
+   startup recovery", but a stuck item is deterministic: no later recovery closes it without a
+   repair. `[CONSCIOUS ASSUMPTION]` The repair, and surfacing stuck items to the operator, are
+   PR-6c's state actor's. Until then the boot record's count is the signal (scoped round L3).
+
+   A journal failure while the ledger recovers keeps the journal's own code: the ledger's
+   `JournalSink` keeps the journal's error (`take_refusal`), so a full disk reads
+   `JOURNAL_DISK_FULL` here as at boot's own records. Anything else the ledger reports, at
+   replay or recovery, is `BUDGET_LEDGER_INCONSISTENT` (V1 review M1, scoped round M2 and L1).
 4. **Open intents.**
    - An Operation whose last journaled state is `Reserved` has an intent and no outcome.
    - Boot moves it to `Indeterminate` (`Transition::CrashRecovered`) and journals
@@ -105,10 +113,12 @@ carry. It runs these steps in this order:
    - the transfers completed;
    - the items left stuck;
    - whether the kernel booted stopped;
-   - whether a stop may have been lost (`stop_may_be_lost`). The kernel boots running, and work
-     left open shows a crash, so a stop engaged just before it may not have been journaled
-     (runtime contract §3 rule 3). A crash with nothing open looks like a clean exit until
-     PR-6c journals one;
+   - whether a stop may have been lost (`stop_may_be_lost`). This is when the kernel boots
+     running and a crash shows: work left open, or an interrupted boot's `op.indeterminate` with
+     no `kernel.booted` after it. A stop engaged just before the crash may not have been
+     journaled (runtime contract §3 rule 3). A stuck item is no evidence: it stays from boot to
+     boot. A crash with nothing open looks like a clean exit until PR-6c journals one, and so
+     does a boot interrupted after closing only a reservation that no intent named;
    - the configuration version.
 
    Every complete boot is explained.
@@ -137,11 +147,12 @@ The property in §5 proves convergence over crashes at every append.
 ## 5. Proof obligations
 
 **Tests:**
-- **The records:** records that are not the journal's are refused with
-  `RUNTIME_BOOT_RECORDS_STALE`, and nothing is appended.
+- **The records:** a retry's records, an empty slice, a suffix and another journal's records are
+  refused with `RUNTIME_BOOT_RECORDS_STALE`, and nothing is appended.
 - **Drift:** a configured version below the journal's is refused with `CONFIG_DRIFT`, and
   nothing is appended. An equal or higher one boots.
-- **Error codes:** a journal failure during the ledger's recovery is `JOURNAL_WRITE_FAILED`.
+- **Error codes:** a full disk reads `JOURNAL_DISK_FULL` during the ledger's recovery and at an
+  open intent alike.
 - **The stop:** a journaled stop boots stopped, and recovery still closes the ledger and the
   intents. A boot after a crash with work open says a stop may have been lost; one with
   nothing open does not.
@@ -162,8 +173,12 @@ The property in §5 proves convergence over crashes at every append.
 
   The random journals hold open, committed, failed, denied and already indeterminate
   Operations. Partial settles, transfers and a stop are tested by the ledger's and the stop's
-  own suites, not cut at boot level. PR-6d's DST owns that. The cut journal holds exactly the first n records a real boot appended, which is what a crash
+  own suites, not cut at boot level. PR-6d's DST owns that.
+
+  The cut journal holds exactly the first n records a real boot appended, which is what a crash
   between two appends leaves: an acknowledged append survives a crash, and open cuts a torn one.
+  For every cut before `kernel.booted`, the next complete boot says `stop_may_be_lost` as an
+  uncut boot does.
 
 **Seeded violations:** recorded in §7 by the commit that adds them, each with its catching test.
 
@@ -187,7 +202,8 @@ measures them (V1 review M5).
 
 ## 7. Measured, seeded
 
-**Bench** (`cargo bench -p uaos-runtime --bench boot`, 2026-10-21):
+**Bench** (`cargo bench -p uaos-runtime --bench boot`, 2026-10-21, at `d503a43`; the boot
+procedure has changed since only in checks that read no more than the records already held):
 - **Machine:** the reference machine, Windows 10, environment label `reference-win10-local` (D-33).
 - **Method:** 3 rounds per size, each on a fresh copy of a journal that a crash left. Every
   Operation reserved, journaled its intent, settled and committed, except one in a hundred,
@@ -223,7 +239,9 @@ measures them (V1 review M5).
 | `boot-ignores-journaled-stop` | a journaled stop boots running | `a_journaled_stop_boots_stopped_and_recovery_still_runs` |
 | `boot-unexplained` | no `kernel.booted` record | `every_boot_is_explained_once` |
 | `boot-denied-reopened` | a denied Operation is made `Indeterminate` (V1 review M2) | `open_intents_become_indeterminate_once` |
-| `boot-ledger-error-erased` | a journal failure in recovery reads as an inconsistent ledger (M1) | `a_journal_failure_during_recovery_keeps_its_code` |
+| `boot-ledger-error-erased` | a journal failure in recovery loses the journal's code (M1, scoped round M2) | `a_full_disk_reads_the_same_wherever_boot_meets_it` |
 | `boot-intent-effect-dropped` | the record says the Operation had no external effect (M7) | `open_intents_become_indeterminate_once` |
 | `boot-stop-loss-unexplained` | a boot after a crash does not say a stop may be lost (M6) | `a_boot_after_a_crash_says_a_stop_may_be_lost` |
 | `boot-stale-records-accepted` | records that are not the journal's are booted from (L2) | `records_that_are_not_the_journals_are_refused_before_anything_is_written` |
+| `boot-partial-records-accepted` | a slice that does not start at the genesis is booted from (scoped round M1) | `records_that_are_not_the_journals_are_refused_before_anything_is_written` |
+| `boot-interrupted-boot-unseen` | an interrupted boot is no evidence of a crash (scoped round L2) | `a_crash_during_boot_converges` |

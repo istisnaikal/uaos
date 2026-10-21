@@ -430,27 +430,59 @@ fn records_that_are_not_the_journals_are_refused_before_anything_is_written() {
         retried.err().unwrap().code(),
         uaos_contracts::error::codes::RUNTIME_BOOT_RECORDS_STALE
     );
+    // Scoped round M1: no records, a suffix of them, or another journal's are not this one's.
+    let records = world.records();
+    let other = World::new();
+    build(&other, &[Fate::Open, Fate::Committed], 1);
+    let foreign = other.records();
+    for (case, slice) in [
+        ("empty", &records[..0]),
+        ("a suffix", &records[1..]),
+        ("another journal's", &foreign[..records.len().min(foreign.len())]),
+    ] {
+        assert!(
+            matches!(
+                boot(&mut journal, slice, &config(1), correlation()),
+                Err(BootError::StaleRecords { .. })
+            ),
+            "boot accepted records that are not the journal's: {case}"
+        );
+    }
     assert_eq!(world.records().len(), after, "a refused boot wrote");
 }
 
 #[test]
-fn a_journal_failure_during_recovery_keeps_its_code() {
-    // V1 review M1: a full disk while the ledger recovers is a journal failure, not an
-    // inconsistent ledger.
+fn a_full_disk_reads_the_same_wherever_boot_meets_it() {
+    // V1 review M1, scoped round M2: a full disk is the journal's failure, with the journal's own
+    // code, during the ledger's recovery as at boot's own records.
+    let disk_full = |world: &World| {
+        let mut journal = world.open();
+        let records = world.records();
+        world.fs.set_capacity(Some(0));
+        boot(&mut journal, &records, &config(1), correlation()).err().unwrap()
+    };
+    // During the ledger's recovery: an open reservation is its first write.
     let world = World::new();
     build(&world, &[Fate::Open], 1);
-    let mut journal = world.open();
-    let records = world.records();
-    world.fs.set_capacity(Some(0));
-    let error = boot(&mut journal, &records, &config(1), correlation()).err().unwrap();
+    let during_recovery = disk_full(&world);
     assert!(
-        matches!(error, BootError::Ledger(_)),
-        "the failure did not come from the ledger's recovery: {error}"
+        matches!(during_recovery, BootError::Journal(_))
+            && during_recovery.code() == uaos_contracts::error::codes::JOURNAL_DISK_FULL,
+        "a journal failure during recovery lost its code: {during_recovery}"
     );
+    // At an open intent, with nothing for the ledger to recover.
+    let world = World::new();
+    build(&world, &[Fate::Committed], 1);
+    {
+        let mut journal = world.open();
+        journal.append(op_event(op(9), types::OP_RESERVED_INTENT, 1)).unwrap();
+    }
+    world.fs.crash();
+    let at_intent = disk_full(&world);
     assert_eq!(
-        error.code(),
-        uaos_contracts::error::codes::JOURNAL_WRITE_FAILED,
-        "a journal failure during recovery was reported as a ledger inconsistency"
+        at_intent.code(),
+        during_recovery.code(),
+        "one full disk read as two codes"
     );
 }
 
@@ -530,7 +562,9 @@ proptest! {
         let reference = World::new();
         build(&reference, &fates, 1);
         let before = reference.records().len();
-        prop_assert!(reference.boot(&config(1)).is_ok());
+        let first = reference.boot(&config(1));
+        prop_assert!(first.is_ok());
+        let says_lost = first.unwrap().report.stop_may_be_lost;
         reference.fs.crash();
         let expected = outcome(&reference);
         prop_assert!(
@@ -556,9 +590,15 @@ proptest! {
             world.fs.crash();
             let booted = world.boot(&config(1));
             prop_assert!(booted.is_ok(), "the boot after a crash at append {} failed", n);
-            prop_assert!(booted.unwrap().report.stuck.is_empty(), "recovery left an item stuck");
+            let report = booted.unwrap().report;
+            prop_assert!(report.stuck.is_empty(), "recovery left an item stuck");
             world.fs.crash();
             prop_assert_eq!(outcome(&world), expected.clone(), "a crash during boot did not converge");
+            // Scoped round L2: the first complete boot after a crash says what an uncut boot
+            // says, even when the interrupted boot closed everything.
+            if n < appended.len() {
+                prop_assert_eq!(report.stop_may_be_lost, says_lost, "an interrupted boot hid a lost stop");
+            }
         }
     }
 }

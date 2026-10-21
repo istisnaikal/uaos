@@ -19,9 +19,11 @@
 //!   codec finds is priced against the Operation's reservation, and the first one past it cuts
 //!   the stream, drops the upstream and engages the stop.
 //! - [`Supervisor`] is the runtime's only spawner.
-//! - [`boot`] recovers the kernel from its journal: it refuses a configuration older than the
-//!   journal's, restores the stop, recovers the ledger, makes every open intent `Indeterminate`
-//!   once, and explains the boot (contract `0013-runtime-boot-recovery.md`).
+//! - [`boot`] recovers the kernel from its journal: it refuses records that are not the whole
+//!   journal and a configuration older than the journal's, restores the stop, recovers the
+//!   ledger, makes every open intent `Indeterminate` once with the effect it declared, and
+//!   explains the boot, saying when a stop may have been lost (contract
+//!   `0013-runtime-boot-recovery.md`).
 //!
 //! **Honest limits.** The hard cap is the reservation taken before the request. The relay sees
 //! token counts only when the provider reports them, so content between reports is forwarded
