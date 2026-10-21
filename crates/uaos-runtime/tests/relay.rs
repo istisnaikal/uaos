@@ -49,6 +49,9 @@ struct Dialect {
     rogue: bool,
     /// Classify every event as content (no metering).
     content_only: bool,
+    /// Return a report even when it names no dimension, as a codec that adds only the fields it
+    /// finds would (scoped round M-a).
+    empty_reports: bool,
 }
 
 impl Dialect {
@@ -58,6 +61,7 @@ impl Dialect {
             seen: Mutex::new(Vec::new()),
             rogue: false,
             content_only: false,
+            empty_reports: false,
         }
     }
 
@@ -134,7 +138,7 @@ impl DialectCodec for Dialect {
         if self.rogue {
             report = report.dim(code("cache_tokens"), 1).ok()?;
         }
-        (!report.dims().is_empty()).then_some(report)
+        (self.empty_reports || !report.dims().is_empty()).then_some(report)
     }
 }
 
@@ -429,8 +433,84 @@ async fn a_stream_that_does_not_finish_settles_the_full_reservation() {
         .unwrap();
     let _first = body.frame().await.unwrap().unwrap();
     let _engaged = stop.engage(StopReason::Operator);
-    assert!(drain(&mut body).await.1.is_some());
+    let cut = tokio::time::timeout(Duration::from_secs(5), drain(&mut body))
+        .await
+        .unwrap();
+    assert_eq!(cut.1, Some(RelayError::Cut(CutReason::Stopped(StopReason::Operator))));
     assert_eq!(report(rx).await.settlement(), Usage::Unknown);
+}
+
+#[tokio::test]
+async fn a_report_after_the_end_is_not_final() {
+    // Scoped round L-a: the dialect's end must come at or after the last report.
+    let codec = Arc::new(Dialect::new());
+    let (up, _, _) = upstream(&[START, STOP, DELTA_100], false);
+    let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    assert_eq!(drain(&mut body).await.1, None);
+    let report = report(rx).await;
+    assert_eq!(
+        (report.end, report.usage_final, report.settlement()),
+        (RelayEnd::Completed, false, Usage::Unknown),
+        "a report after the dialect's end counted as final"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_usage_report_is_no_report() {
+    // Scoped round M-a: a report naming no dimension never settles as a final cost of zero.
+    let empty: &[u8] = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{}}\n\n";
+    let renamed: &[u8] =
+        b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"renamed_tokens\":5}}\n\n";
+    for frame in [empty, renamed] {
+        let codec = Arc::new(Dialect {
+            empty_reports: true,
+            ..Dialect::new()
+        });
+        let (up, _, _) = upstream(&[frame, STOP], false);
+        let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+            .sse(up, &HeaderMap::new())
+            .unwrap();
+        assert_eq!(
+            drain(&mut body).await,
+            (Vec::new(), Some(RelayError::Cut(CutReason::UnreadableUsage))),
+            "an empty usage report counted as a report"
+        );
+        assert_eq!(report(rx).await.settlement(), Usage::Unknown);
+    }
+    // On an end frame it is no report either: the stream completes, unmetered, and settles the
+    // full reservation.
+    let completed: &[u8] =
+        b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n";
+    let codec = Arc::new(Dialect {
+        empty_reports: true,
+        ..Dialect::new()
+    });
+    let (up, _, _) = upstream(&[completed], false);
+    let (mut body, rx) = relay(&codec, &Stop::running(), RelayLimits::default())
+        .sse(up, &HeaderMap::new())
+        .unwrap();
+    assert_eq!(drain(&mut body).await.1, None);
+    let report = report(rx).await;
+    assert_eq!(
+        (report.cost, report.settlement()),
+        (None, Usage::Unknown),
+        "an empty usage report counted as a report"
+    );
+}
+
+#[tokio::test]
+async fn an_event_past_the_node_bound_cuts() {
+    // Scoped round L-d: reading an event for usage is bounded in nodes, not only in bytes.
+    let zeros = vec!["0"; 70_000].join(",");
+    let wide = format!("event: content_block_delta\ndata: {{\"a\":[{zeros}]}}\n\n");
+    assert!(wide.len() < RelayLimits::default().max_event_bytes);
+    assert_eq!(
+        cut_reason(&[wide.as_bytes()], Dialect::new(), RelayLimits::default()).await,
+        Some(RelayError::Cut(CutReason::UnreadableUsage)),
+        "an event past its node bound was parsed"
+    );
 }
 
 #[tokio::test]
@@ -467,6 +547,11 @@ async fn a_cost_out_of_range_cuts_and_stops_the_kernel() {
         report.cost,
         Some(NanoUsd::new(6_000)),
         "the report keeps the last cost in range"
+    );
+    assert_eq!(
+        report.usage,
+        vec![(code("input_tokens"), 50), (code("output_tokens"), 1)],
+        "the report's usage and cost disagree"
     );
     assert_eq!(report.settlement(), Usage::Unknown);
     assert_eq!(CutReason::CostOutOfRange.error_code(), codes::BUDGET_STREAM_OVERRUN);
@@ -640,7 +725,8 @@ async fn an_idle_upstream_cuts() {
     let (mut body, _rx) = relay(&codec, &Stop::running(), RelayLimits::default())
         .sse(up, &HeaderMap::new())
         .unwrap();
-    let (out, error) = drain(&mut body).await;
+    let drained = tokio::time::timeout(Duration::from_secs(3_600), drain(&mut body)).await;
+    let (out, error) = drained.expect("the idle cut never fired");
     assert_eq!(out, PING.to_vec());
     assert_eq!(error, Some(RelayError::Cut(CutReason::Idle)));
     assert!(dropped.load(Ordering::SeqCst));
@@ -761,7 +847,7 @@ async fn an_unpriced_dimension_cuts() {
     let codec: Arc<dyn DialectCodec> = Arc::new(Dialect::new());
     let only_output = Arc::new(DeclaredPrice::new([(code("output_tokens"), NanoUsd::new(1_000))]).unwrap());
     let (up, _, _) = upstream(&[START], false);
-    let (mut body, _rx) = Relay::new(
+    let (mut body, rx) = Relay::new(
         codec,
         only_output,
         &reservation(CEILING),
@@ -771,6 +857,12 @@ async fn an_unpriced_dimension_cuts() {
     .sse(up, &HeaderMap::new())
     .unwrap();
     assert_eq!(drain(&mut body).await.1, Some(RelayError::Cut(CutReason::Unpriced)));
+    let report = report(rx).await;
+    assert_eq!(
+        (report.usage.is_empty(), report.cost),
+        (true, None),
+        "the report's usage and cost disagree"
+    );
     assert_eq!(
         CutReason::Unpriced.error_code(),
         uaos_contracts::error::codes::BUDGET_UNKNOWN_PRICING
@@ -871,9 +963,14 @@ const CORPUS: [&str; 9] = [
 
 const ENDINGS: [&str; 3] = ["\n", "\r\n", "\r"];
 
+/// One JSON document, read for usage under any chunking: content in every GA locale, no usage.
+const JSON_EVENT: &str = "{\"type\":\"content_block_delta\",\"delta\":{\"text\":\"\u{130}stanbul \u{df} \u{e9}t\u{e9} e\u{301} \u{f1} \u{e8} \u{645}\u{64e}\u{631}\u{652}\u{62d}\u{64e}\u{628}\u{64b}\u{627} \u{1f600}\"}}";
+
 #[derive(Debug, Clone)]
 struct GenEvent {
     comment: bool,
+    /// Data is one JSON object, on one line, instead of corpus lines.
+    json: bool,
     name: Option<&'static str>,
     data: Vec<usize>,
     id: bool,
@@ -882,12 +979,14 @@ struct GenEvent {
 fn gen_event() -> impl Strategy<Value = GenEvent> {
     (
         any::<bool>(),
+        any::<bool>(),
         prop::option::of(prop::sample::select(vec!["content_block_delta", "ping", "x", ""])),
         prop::collection::vec(0..CORPUS.len(), 0..3),
         any::<bool>(),
     )
-        .prop_map(|(comment, name, data, id)| GenEvent {
+        .prop_map(|(comment, json, name, data, id)| GenEvent {
             comment,
+            json,
             name,
             data,
             id,
@@ -903,8 +1002,15 @@ fn serialize(events: &[GenEvent], endings: &[usize], bom: bool, open_tail: bool)
     }
     let mut n = 0;
     let mut line = |out: &mut Vec<u8>, text: &str| {
+        let mut ending = ENDINGS[endings[n % endings.len()]];
+        // A blank line ended by LF right after a CR would read as one CRLF, so the event would not
+        // end and would run into the next one. A merged JSON event is then not one document, and
+        // the relay rightly cuts it, so the blank line takes CRLF here.
+        if text.is_empty() && ending == "\n" && out.last() == Some(&b'\r') {
+            ending = "\r\n";
+        }
         out.extend_from_slice(text.as_bytes());
-        out.extend_from_slice(ENDINGS[endings[n % endings.len()]].as_bytes());
+        out.extend_from_slice(ending.as_bytes());
         n += 1;
     };
     for (i, event) in events.iter().enumerate() {
@@ -914,8 +1020,12 @@ fn serialize(events: &[GenEvent], endings: &[usize], bom: bool, open_tail: bool)
         if let Some(name) = event.name {
             line(&mut out, &format!("event: {name}"));
         }
-        for d in &event.data {
-            line(&mut out, &format!("data: {}", CORPUS[*d]));
+        if event.json {
+            line(&mut out, &format!("data: {JSON_EVENT}"));
+        } else {
+            for d in &event.data {
+                line(&mut out, &format!("data: {}", CORPUS[*d]));
+            }
         }
         if event.id {
             line(&mut out, "id: 7");

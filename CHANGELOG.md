@@ -181,8 +181,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - at most one incomplete event held;
     - each event's exact bytes forwarded, zero-copy inside one upstream frame;
     - every event but a ping read for usage, whatever its kind: parsed by `uaos-json`
-      (duplicate keys refused, object-shaped data must parse), read by the codec, checked
-      against its dimensions and priced against the Operation's reservation.
+      (duplicate keys refused, object-shaped data must parse, at most 65,536 nodes), read by
+      the codec, checked against its dimensions and priced against the Operation's
+      reservation. A report naming no dimension is no report.
   - **Settlement:** `RelayReport::settlement`.
     - A cost settles as reported only when it is final: the stream completed, and the
       dialect's end came at or after its last report.
@@ -221,7 +222,7 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - error codes `RUNTIME_STOPPED` and `BUDGET_STREAM_OVERRUN`.
 
     No schema change: types and codes are strings.
-  - **Tests:** 49.
+  - **Tests:** 52.
     - A property over random events, line endings and chunking (CRLF and the byte-order mark
       split across chunks, the seven-locale corpus): the bytes received are the bytes sent, and
       the events the codec sees are the ones a whole-body event-stream parser reads. 256 cases
@@ -229,9 +230,11 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     - A journaled stop survives a restart on a real journal.
   - **Measured:** per event on the reference machine, with every event parsed for usage: p95
     0.7 µs for content and 0.8 µs for a usage report (the budget is 1 ms). About 230 MB/s.
-  - **V1 review** (`docs/reviews/WP3.A6a-runtime-relay.md`): 1 High, 2 Medium and 13 Low.
-    All are resolved, apart from one Low owed to PR-9.
-  - **Negatives:** 18 seeded violations.
+  - **Reviews** (`docs/reviews/WP3.A6a-runtime-relay.md`):
+    - V1: 1 High, 2 Medium and 13 Low, all resolved apart from one Low owed to PR-9;
+    - the D-31 scoped round: 0 High, 2 Medium and 8 Low, all resolved. An empty usage report
+      is no report, and the stop's restart window is stated.
+  - **Negatives:** 20 seeded violations.
 - P3 Move 1, PR-4 (spec first): the module socket's contract,
   `docs/adr/appendix/0010-module-socket.md`, before any code.
   - **`uaos.module/1` (draft):** a manifest built through a builder, with `requires`, a closed set

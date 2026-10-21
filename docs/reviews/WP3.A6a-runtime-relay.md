@@ -44,3 +44,30 @@ review, fixes, one scoped round, then a final fresh full review before the PR le
 | L11 | `Relay` was `Clone`, so several relays could each meter one reservation's full ceiling. | Not `Clone`; one relay per reservation, and PR-7 owes the typestate. |
 | L12 | `boot_state` honoured a `kernel.resumed` from any actor; `unrecorded` handed the record out once, so a failed write lost it. | Only a human's resume counts. The record is offered until `Stop::recorded`. Negatives `boot-honours-any-resume` and `stop-record-handed-out-once`. |
 | L13 | A codec panic unwinds through the body, and the report says `client_gone`. | **Owed to PR-9** (D-8, the panic boundary), recorded in §12. The client still sees a reset, not a clean end. |
+
+## Scoped round (D-31)
+
+**Reviewed:** `7a84931..9ae2206`, plus the invariants and callers it touches, by a
+fresh-context agent reading only, 2026-10-21.
+**Result:** 0 High · 2 Medium · 8 Low.
+**Verified:**
+- **H1:** `usage_final` holds in all three orders: a report on the end, a report after it, an
+  end with no report. `settlement` is right for every end and cost.
+- **M1:** no caller of the removed `StopReason::error_code` is left.
+- **M2:** only pings are skipped.
+- **L4:** no lost wake, the deadline cannot be skipped, and a slow client cannot run it.
+- **L8:** nothing uses `std::sync::mpsc`.
+- **Seeds:** all eight new or retargeted ones are caught with their message.
+
+| | Finding | Fix |
+|---|---|---|
+| M-a | A report naming no dimension counted as a report. A codec that adds only the fields it finds, facing `"usage":{}` or a renamed field, would settle every completed stream at a final cost of zero (T6). | `read` treats it as no report: on a usage frame the stream cuts, and on any other frame it reports nothing. Test `an_empty_usage_report_is_no_report`; negative `relay-empty-usage-report-counts`. |
+| M-b | "A restart never boots running for want of a record" overclaimed; rule 3 accepts a window by acting before the record. | §3 and `Stop::unrecorded` state the window, a restart before the record is durable boots running, and say PR-6b's DST bounds it. |
+| L-a | No test sent a report after the end, so the "at or after" half of H1 was untested. | `a_report_after_the_end_is_not_final`; negative `relay-report-after-end-final`. |
+| L-b | An overrun settles as non-estimated in the ledger though the cost is a lower bound. | §7.5 says so: PR-7's explanation carries the lower bound, and a ledger form for it needs an ADR. |
+| L-c | On an `unpriced` or `cost_out_of_range` cut, the report's usage held a count that cost did not price. | The merge is kept only once priced; §7.5 says `cost_out_of_range` settles the reservation, with its overrun in the reason and the stop. Tests assert usage and cost agree. |
+| L-d | Reading every event under `Limits::DEFAULT` let a 1 MiB event build about 12 MiB of tape. | At most 128 levels and 65,536 nodes (about 1.5 MiB), within `max_event_bytes`; stated in §7.1 and T11. Test `an_event_past_the_node_bound_cuts`. |
+| L-e | The strict parse now gates content frames with no recorded assumption. | A conscious assumption in §7.3, for WP3.0d to count. |
+| L-f | The property no longer read object-shaped events. | A one-line JSON event in all seven locales under any chunking, nothing cut. The serializer keeps a blank line after a CR a blank line, so events never merge into one that is not a document. 20,000 cases pass. |
+| L-g | Two tests could stall instead of failing on a regression. | `tokio::time::timeout` on both, with the exact cut reason. |
+| L-h | Doc drift in `lib.rs`, §2 and §8. | Corrected. |

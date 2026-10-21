@@ -15,9 +15,9 @@
 //! - [`DeclaredPrice`] prices usage in nano-USD per unit, the user-declared form ADR-0016
 //!   permits.
 //! - [`Relay`] streams a provider's response to the client. The client's connection pulls it,
-//!   it holds at most one event, and it forwards exact bytes. Every usage report is priced
-//!   against the Operation's reservation, and the first one past it cuts the stream, drops the
-//!   upstream and engages the stop.
+//!   it holds at most one incomplete event, and it forwards exact bytes. Every usage report is
+//!   priced against the Operation's reservation, and the first one past it cuts the stream,
+//!   drops the upstream and engages the stop.
 //! - [`Supervisor`] is the runtime's only spawner.
 //!
 //! **Honest limits.** The hard cap is the reservation taken before the request. The relay sees
