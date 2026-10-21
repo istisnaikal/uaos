@@ -60,9 +60,12 @@ reorders inside Train A.
    relay cuts at its next poll, and from then on no further upstream byte is read or forwarded.
 3. **It restricts, so it acts before its record.** The stop is not a side effect: it takes effect
    before its record is written, and it never waits on the state actor. The record is
-   `kernel.stopped`: critical durability, an inline payload `{"reason": <code>}`. PR-6b
-   journals it; this PR builds the record and reads it at boot. A record that fails to write
-   leaves the stop engaged, so it fails closed.
+   `kernel.stopped`: critical durability, an inline payload `{"reason": <code>}`.
+   - Whoever engages the stop need not journal it: a relay has no journal. `Stop::unrecorded`
+     hands the record out exactly once per engagement, and PR-6b's state actor takes it and
+     journals `Engaged::draft`.
+   - This PR builds the record and the hand-off, and reads the record at boot.
+   - A record that fails to write leaves the stop engaged, so it fails closed.
 4. **Persisted.** At boot, the last `kernel.stopped` or `kernel.resumed` decides. A stop whose
    reason the reader does not know still boots stopped.
 5. **The first reason wins.** Engaging again changes nothing and says so (`Engaged::first`).
@@ -183,7 +186,11 @@ forwarded, because a lenient client may act on it.
 | `idle`, `upstream_failed` | `EGRESS_INTERRUPTED` | — |
 
 On every cut:
-1. the event that caused it, and everything after it, is never forwarded;
+1. nothing more of the upstream is forwarded: not the event that caused it, nothing after it,
+   and not the segments still queued from the same upstream frame. The same holds once the
+   kernel stop is engaged, for every relay, the one that engaged it included. A stream that
+   completed but still had segments queued when the stop engaged becomes a cut, never a clean
+   end;
 2. the upstream body is dropped before the client's body yields again, so hyper closes the
    connection;
 3. with a terminal frame from the caller (the dialect's error event, PR-7), the body yields it
@@ -192,7 +199,8 @@ On every cut:
 4. the report says what was forwarded (bytes and events), the last priced usage and the reason.
 
 When the client goes away and its body is dropped, the upstream is dropped with it, and the
-report says `client_gone`.
+report says `client_gone`, also when the upstream had completed but segments were still
+queued for the client.
 
 ### 7.5 Report and settlement
 
@@ -267,6 +275,7 @@ PR-6b exports these through the bus as metrics, with the ids of CLAUDE.md §4.
 - **The stop:**
   - a stopped kernel admits nothing;
   - the first reason wins;
+  - the record is handed out once;
   - a stop reaches every live permit;
   - a journaled stop survives a restart (a real journal), and an unknown reason boots
     stopped;
@@ -296,6 +305,11 @@ PR-6b exports these through the bus as metrics, with the ids of CLAUDE.md §4.
   - an event past its bound, a body past its bound, an idle upstream, a compressed body, a
     duplicate usage key, an undeclared dimension and an unknown price each cut;
   - a dropped client body drops the upstream;
+  - a failed upstream cuts;
+  - a stop engaged before the relay starts forwards nothing;
+  - bytes mode relays untouched, does not meter, and obeys the stop;
+  - streams shaped like the Anthropic Messages stream and the `OpenAI` Responses and chat
+    streams are relayed byte for byte and metered;
   - the report counts what was forwarded.
 - **Supervisor:**
   - it refuses past its bound;
@@ -323,7 +337,21 @@ usage events, with the environment label. The numbers go into §13 once measured
 
 ## 13. Measured, and open decisions
 
-- **Measured:** recorded here by the commit that adds the bench.
+- **Measured** (`cargo bench -p uaos-runtime --bench relay`, reference machine, Windows x86-64,
+  2026-10-21; 2,000 events per round, 20 rounds after 5 warm-up rounds; every 20th event a
+  usage report; chunks of one to three events, one in four ending mid-event). Timer
+  resolution here is about 100 ns.
+
+  | Events | n | p50 | p95 | p99 | max |
+  |---|---|---|---|---|---|
+  | content | 38,000 | 0.1 µs | 0.3 µs | 0.9 µs | 14.2 µs |
+  | usage (parse, read, price, compare) | 2,000 | 0.8 µs | 1.1 µs | 1.4 µs | 19.0 µs |
+
+  About 650 MB/s through the relay. The per-event budget of p95 ≤ 1 ms holds on this
+  machine. This is the kernel's own work over an always-ready upstream; network time is the
+  provider's. The CI runners are reported once the bench joins the nightly lane (WP3.8).
+- **Property strength:** `any_chunking_relays_the_same_bytes_and_events` runs 256 cases per
+  merge; it passed 20,000 cases once locally (2026-10-21).
 - **D-37 (E, open):** the ADR-0010 amendment for §3 rule 3. The stop restricts, takes effect
   before its record, and never waits on the state actor, so I-02 holds. Recommendation: accept.
   It is needed before PR-6b journals the record.

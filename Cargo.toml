@@ -28,6 +28,7 @@ uaos-module-api = { path = "crates/uaos-module-api" }
 uaos-platform = { path = "crates/uaos-platform" }
 uaos-policy = { path = "crates/uaos-policy" }
 uaos-redact = { path = "crates/uaos-redact" }
+uaos-runtime = { path = "crates/uaos-runtime" }
 uaos-state = { path = "crates/uaos-state" }
 uaos-egress = { path = "crates/uaos-egress" }
 

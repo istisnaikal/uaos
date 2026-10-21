@@ -2865,6 +2865,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "uaos-runtime"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "memchr",
+ "proptest",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uaos-contracts",
+ "uaos-json",
+ "uaos-ledger",
+ "uaos-module-api",
+ "uaos-platform",
+ "uaos-state",
+]
+
+[[package]]
 name = "uaos-state"
 version = "0.0.0"
 dependencies = [

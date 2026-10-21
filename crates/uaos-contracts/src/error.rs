@@ -241,6 +241,9 @@ registry! {
     BUDGET_RECOVERY_REQUIRED = Budget 7, Internal, S3, retryable: true, leak: false,
         "error-budget-recovery-required", "The budget ledger was rebuilt and must close what the previous run left open before it accepts new work.",
         "Wait for startup recovery to finish; if it persists, run `uaos doctor`.";
+    BUDGET_STREAM_OVERRUN = Budget 8, Internal, S1, retryable: false, leak: false,
+        "error-budget-stream-overrun", "A response's reported usage passed its reservation mid-stream; UAOS cut the stream and stopped the kernel. The provider may have billed tokens it generated before the cut.",
+        "Run `uaos budget explain` and correct the price or the clamp, then resume the kernel with `uaos resume`.";
     REDACT_BLOCKED = Redact 1, Security, Info, retryable: false, leak: true,
         "error-redact-blocked", "A high-risk secret was detected in outbound content and the request was blocked.",
         "Run `uaos redact test` on the content; remove the secret or start a fresh session.";
@@ -256,6 +259,9 @@ registry! {
     RUNTIME_DEADLINE = Runtime 2, Internal, S3, retryable: true, leak: false,
         "error-runtime-deadline", "The operation exceeded its deadline and was cancelled.",
         "Retry; check `uaos trace` for the slow stage.";
+    RUNTIME_STOPPED = Runtime 3, Internal, S2, retryable: true, leak: false,
+        "error-runtime-stopped", "The kernel is stopped: nothing new is admitted, and live streams were cut.",
+        "Run `uaos status` for the reason; a human resumes the kernel with `uaos resume`.";
     INGRESS_UNAUTHENTICATED = Ingress 1, User, Info, retryable: false, leak: false,
         "error-ingress-unauthenticated", "The request did not carry a valid UAOS credential.",
         "Use the key printed by `uaos init`, or run the agent under `uaos run --`.";

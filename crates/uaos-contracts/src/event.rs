@@ -198,9 +198,15 @@ pub mod types {
     pub const BUDGET_ENTRY: EventType = EventType::from_static("budget.entry");
     /// One identity entry (`uaos.credential/1` in the inline payload).
     pub const IDENTITY_ENTRY: EventType = EventType::from_static("identity.entry");
+    /// The kernel stop engaged: nothing new is admitted and live streams are cut. The inline
+    /// payload names the reason (`{"reason": <code>}`). It took effect before this record, and
+    /// boot honours it (runtime contract §3).
+    pub const KERNEL_STOPPED: EventType = EventType::from_static("kernel.stopped");
+    /// A human resumed a stopped kernel through a user-present channel (M3, ADR-0012).
+    pub const KERNEL_RESUMED: EventType = EventType::from_static("kernel.resumed");
 
     /// All kernel event types, for validation and generated documentation.
-    pub const ALL: [&EventType; 13] = [
+    pub const ALL: [&EventType; 15] = [
         &OP_RESERVED_INTENT,
         &OP_COMMITTED,
         &OP_FAILED,
@@ -214,6 +220,8 @@ pub mod types {
         &CHUNK_LOST,
         &BUDGET_ENTRY,
         &IDENTITY_ENTRY,
+        &KERNEL_STOPPED,
+        &KERNEL_RESUMED,
     ];
 }
 

@@ -396,6 +396,12 @@ mod canaries {
     }
 
     #[expect(clippy::disallowed_methods, reason = "canary")]
+    fn unbounded_channel() {
+        // canary: `tokio::sync::mpsc::unbounded_channel`
+        let _canary = tokio::sync::mpsc::unbounded_channel::<()>();
+    }
+
+    #[expect(clippy::disallowed_methods, reason = "canary")]
     fn task_spawn_blocking() {
         // canary: `tokio::task::spawn_blocking`
         let _canary = tokio::task::spawn_blocking(|| ());
