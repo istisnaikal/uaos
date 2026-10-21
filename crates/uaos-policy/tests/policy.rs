@@ -1246,9 +1246,14 @@ fn a_grant_id_twice_is_refused() {
 }
 
 /// A grant valid by construction: every principal, every action with its own resource kind,
-/// names up to 128 bytes, up to 8 classes and asks, a live expiry.
+/// names up to 128 bytes and with `/` everywhere but a provider (§3), up to 8 classes and asks,
+/// a live expiry.
 fn any_valid_grant() -> impl Strategy<Value = Grant> {
-    let name = || prop_oneof!["[A-Za-z0-9._:-]{1,12}", "[a-z]{128}"].prop_map(|s| Name::new(s).unwrap());
+    let provider = || prop_oneof!["[A-Za-z0-9._:-]{1,12}", "[a-z]{128}"].prop_map(|s| Name::new(s).unwrap());
+    let name = || {
+        prop_oneof!["[A-Za-z0-9._:-]{1,12}", "[a-z0-9]{1,6}/[a-z0-9]{1,6}", "[a-z]{128}"]
+            .prop_map(|s| Name::new(s).unwrap())
+    };
     let principal = prop_oneof![
         any::<u8>().prop_map(|n| Principal::Agent(CredentialId::from_parts(u64::from(n), [n; 10]))),
         Just(Principal::Human),
@@ -1258,7 +1263,7 @@ fn any_valid_grant() -> impl Strategy<Value = Grant> {
     let target = prop_oneof![
         (
             prop::sample::select(vec![Action::ModelCall, Action::CountTokens]),
-            name(),
+            provider(),
             name()
         )
             .prop_map(|(a, provider, model)| (a, Resource::Model { provider, model })),
@@ -1308,6 +1313,6 @@ proptest! {
         let issued_at = WallTime::from_unix_nanos(i128::from(NOW) * 1_000_000).unwrap();
         let record = grant_record(&grant, ApprovalId::from_parts(1, [3; 10]), issued_at, injection);
         prop_assert!(record.is_ok(), "a valid grant could not be journaled: {:?}", record);
-        prop_assert_eq!(Grant::try_from(&record.unwrap()).unwrap(), grant);
+        prop_assert_eq!(Grant::try_from(&record.unwrap()).unwrap(), grant, "a grant changed through the wire");
     }
 }

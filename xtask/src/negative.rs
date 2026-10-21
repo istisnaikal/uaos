@@ -2912,11 +2912,12 @@ The journal is tamper-proof.
             id: "grant-wire-drops-provider",
             gate: "test",
             tool: None,
-            // ADR-0008 appendix §3 (M5): every engine grant goes to the wire and back unchanged.
+            // ADR-0008 appendix §3 (M5): every grant goes to the wire and back unchanged. The
+            // valid-by-construction property catches it: a fifth of its grants are model grants.
             seed: replace("crates/uaos-policy/src/wire.rs", "provider: wire_name(provider)?,", "provider: wire_name(model)?,"),
             runner: Runner::Program {
                 program: "cargo",
-                args: &["test", "-p", "uaos-policy", "--test", "policy", "every_engine_grant_round_trips_through_the_wire"],
+                args: &["test", "-p", "uaos-policy", "--test", "policy", "every_valid_grant_loads_and_round_trips"],
             },
             expect: "a grant changed through the wire",
         },
@@ -2967,6 +2968,18 @@ The journal is tamper-proof.
                 args: &["test", "-p", "uaos-policy", "--test", "policy", "a_grant_id_twice_is_refused"],
             },
             expect: "a grant id was loaded twice",
+        },
+        Case {
+            id: "grant-principal-ignores-fields",
+            gate: "test",
+            tool: None,
+            // PR-4b's final review L1: a principal with no fields refuses any field.
+            seed: replace("crates/uaos-contracts/src/grant.rs", "    Human {},\n", "    Human,\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-contracts", "--lib", "humans_and_the_kernel_can_hold_grants"],
+            },
+            expect: "a principal took a field it does not have",
         },
     ]
 }

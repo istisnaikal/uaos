@@ -61,6 +61,10 @@ holds an id twice (a retried append, say) is the runtime's to resolve at boot: i
 first entry, raises an alarm, and never lets one duplicate refuse every grant. That is a
 PR-6/PR-8 obligation.
 
+`GrantRecord.action` holds one of the engine's Cedar action names. A record naming any other
+action does not reload (`WireError::UnknownAction`); boot skips it and raises an alarm, the
+same PR-6/PR-8 obligation. A principal with no fields (`human`, `system`) refuses any field.
+
 The field-by-field mapping:
 
 
@@ -100,7 +104,8 @@ the caller's.
   - only the named grant can allow;
   - the decision cites it;
   - a cross-pocket read naming no grant is never allowed;
-  - a property over random grants, policies and named grants compares the engine with the rule;
+  - a property over random grants and named grants, under no policy or a blanket permit,
+    compares the engine with the rule;
 - §3:
   - a property over every principal, resource and action, 128-byte names, providers with `/`,
     sets past 8 and expiries past 9999 shows two things: the engine loads exactly what
@@ -108,8 +113,10 @@ the caller's.
   - the two crates' name grammars accept the same strings;
   - policy identifiers match the engine's `@id`s;
   - every grant valid by construction (every principal, action and its resource kind,
-    own-pocket reads, names up to 128 bytes, up to 8 classes and asks) loads, journals and
-    reloads unchanged, so `check_grant` refuses nothing it should accept;
+    own-pocket reads, names up to 128 bytes and with `/` everywhere but a provider, up to 8
+    classes and asks) loads, journals and reloads unchanged, so `check_grant` refuses nothing
+    it should accept;
+  - a principal with no fields refuses a field;
   - a finer expiry floors;
   - a grant id twice is refused;
 - rule 3: an own-pocket read behind an ask is approved by a grant that the wire journals;
@@ -124,11 +131,12 @@ the caller's.
 | `cedar-cross-pocket-without-grant` | a permit allows a cross-pocket read without a grant | `a_permit_alone_only_asks_for_a_cross_pocket_read` |
 | `cedar-own-pocket-read-asks` | an own-pocket read is treated as cross-pocket | `a_permit_alone_only_asks_for_a_cross_pocket_read` |
 | `grant-carried-ignored` | the engine ignores the grant a request names | `only_the_carried_grant_allows_a_cross_pocket_read` |
-| `grant-wire-drops-provider` | the conversion drops a model's provider | `every_engine_grant_round_trips_through_the_wire` |
+| `grant-wire-drops-provider` | the conversion drops a model's provider | `every_valid_grant_loads_and_round_trips` |
 | `grant-unnamed-cross-pocket-allowed` | a cross-pocket read naming no grant keeps every grant | `only_the_carried_grant_allows_a_cross_pocket_read` |
 | `grant-own-pocket-unjournalable` | own-pocket grants must carry an injection policy | `an_own_pocket_read_grant_carries_no_injection_policy` |
 | `engine-loads-unjournalable-grant` | the engine loads grants the wire refuses | `every_engine_grant_round_trips_through_the_wire` |
 | `grant-id-twice-loaded` | the engine loads a grant id twice | `a_grant_id_twice_is_refused` |
+| `grant-principal-ignores-fields` | a field-less principal ignores fields | `humans_and_the_kernel_can_hold_grants` |
 
 `schema-compat` checks `grant.v1.json` like every schema; its own seeded violation lives on
 another schema.

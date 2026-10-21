@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capability grants, `uaos.grant/1` (ADR-0008 Amendment 1, ADR-0010 Decision 6; cells C-09,
-//! C-44, C-48; the module socket's contract, `docs/adr/appendix/0010-module-socket.md` §6, §8).
+//! Capability grants, `uaos.grant/1` (ADR-0008 Amendment 1 and its appendix
+//! `0008-grants-on-the-wire-and-cross-pocket-consent.md`, ADR-0010 Decision 6; cells C-09, C-44,
+//! C-48; the module socket's contract, §6 and §8, is PR-4's, #32).
 //!
 //! A grant is a time-bounded permission a human issued through an approval. It satisfies the ask
 //! policies it lists and never overrides a forbid (ADR-0008 Amendment 1). A module carries one
@@ -197,10 +198,10 @@ pub enum GrantPrincipal {
         /// The module's name.
         name: ModuleName,
     },
-    /// A human, through a user-present channel.
-    Human,
-    /// The kernel itself.
-    System,
+    /// A human, through a user-present channel. It has no other field, and one is refused.
+    Human {},
+    /// The kernel itself. It has no other field, and one is refused.
+    System {},
 }
 
 /// What a grant allows its action on.
@@ -257,7 +258,8 @@ pub struct GrantRecord {
     pub id: GrantId,
     /// Who holds it.
     pub principal: GrantPrincipal,
-    /// What it allows: a kernel action such as `memory.read`, or a module action.
+    /// What it allows: one of the engine's Cedar action names, such as `memory.read`. A record
+    /// naming another action does not reload, and boot skips it with an alarm (appendix §3).
     pub action: ActionName,
     /// On what.
     pub resource: GrantResource,
@@ -435,7 +437,7 @@ mod tests {
 
     #[test]
     fn humans_and_the_kernel_can_hold_grants() {
-        for principal in [GrantPrincipal::Human, GrantPrincipal::System] {
+        for principal in [GrantPrincipal::Human {}, GrantPrincipal::System {}] {
             let json = serde_json::to_string(&principal).unwrap();
             assert_eq!(
                 serde_json::from_str::<GrantPrincipal>(&json).unwrap(),
@@ -444,9 +446,18 @@ mod tests {
             );
         }
         assert_eq!(
-            serde_json::to_string(&GrantPrincipal::Human).unwrap(),
+            serde_json::to_string(&GrantPrincipal::Human {}).unwrap(),
             r#"{"kind":"human"}"#
         );
+        for extra in [
+            r#"{"kind":"human","credential":"crd_x"}"#,
+            r#"{"kind":"system","name":"mod-x"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<GrantPrincipal>(extra).is_err(),
+                "a principal took a field it does not have: {extra}"
+            );
+        }
     }
 
     #[test]

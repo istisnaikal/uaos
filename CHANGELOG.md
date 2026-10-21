@@ -255,9 +255,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     ways.
   - **Built (moved from PR-4 unchanged):**
     - `uaos.grant/1` (`schemas/grant.v1.json`): a grant entry, issued or revoked. Its record
-      validates its expiry and its bounds. It also checks that an injection policy appears
-      exactly on `memory.read` grants on a pocket, and that such a grant never names its own
-      pocket.
+      validates its expiry and its bounds, and that `memory.read` and a pocket resource go
+      together. As amended under M5, an injection policy appears exactly on the cross-pocket
+      ones, and a grant on the reading pocket itself carries none.
     - The Cedar schema gains `entity Pocket` and the action `memory.read`; the model gains
       `Action::MemoryRead` and `Resource::Pocket`.
     - A read of another pocket is allowed only by a grant. A permit alone only asks, a read of
@@ -281,8 +281,11 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
       and that the name and policy-identifier grammars agree.
     - A `memory.read` grant on the requesting pocket itself is valid, carrying no injection
       policy, so an ask on an own-pocket read can be approved and journaled.
-    - V1 review (`docs/reviews/WP3.A4b-grant-path.md`): 0 High, 2 Medium, 5 Low, all
-      resolved. 8 seeded violations.
+    - Reviews (`docs/reviews/WP3.A4b-grant-path.md`), all findings resolved:
+      - V1: 0 High, 2 Medium, 5 Low;
+      - the D-31 scoped round: 0 High, 1 Medium, 5 Low;
+      - the final full review: 0 High, 1 Medium, 4 Low.
+    - 10 seeded violations.
     - `schemas/grant.v1.json` follows; the contract is new on main, so no reader is broken.
 - P3 Move 1, PR-2 (WP3.A2): `uaos-json`, the one structural tokenizer (ADR-0014). Nothing calls
   it yet; `uaos-redact` and its final scan are untouched.
