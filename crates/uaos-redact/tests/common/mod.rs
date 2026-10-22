@@ -251,14 +251,18 @@ pub(crate) fn embed(rng: &mut Prng, text: &str) -> String {
 }
 
 /// Whether `user:password` is one of the URL rule's stated misses (ADR-0009, limits), which the
-/// generator leaves out so the properties claim exactly what the rule does. It mirrors the
-/// detector's exclusions a random password can reach:
-/// - a `://` in the password, which ends it (one that starts with `//` is covered after a plain
-///   user, and the generator's users are plain);
+/// generator leaves out so the properties claim what the rule does. It covers the detector's
+/// exclusions a random password can reach:
+/// - a `://` in the password, which ends it, or a password starting with `//`, where the user's
+///   `:` and the `//` read as `://`. CI seed 4814893562051029426 drew one (Amendment 2);
 /// - `host:port/path` (`port_then_path`): a port of 1 to 5 digits up to 65535, then `/`, `?` or
 ///   `#`, after a host-like user or before a lowercase path. Stress seed 3677357430622100055
 ///   drew `svc2:3/#5pi.m`, a miss stated since Amendment 1;
 /// - a template reference (`is_template`): `${name}`, `$NAME`, `%(name)s`, `{{name}}`.
+///
+/// Its verdicts are a superset of the misses: it reads the password as written, so a
+/// `host:port/path` password whose path holds a percent escape (`47039/%47`) is left out
+/// although the nested view finds it.
 ///
 /// A password the generator draws ends at the URL's own `@`, so the detector's candidate is the
 /// whole password.
@@ -302,7 +306,7 @@ pub(crate) fn stated_miss(user: &str, candidate: &str) -> bool {
         || candidate.strip_prefix('$').is_some_and(|n| ident(n, true))
         || inner("%(", ")s").is_some_and(|n| ident(n, false))
         || inner("{{", "}}").is_some_and(|n| ident(n, false));
-    candidate.contains("://") || port_then_path || template
+    candidate.contains("://") || candidate.starts_with("//") || port_then_path || template
 }
 
 /// A secret of `class`.

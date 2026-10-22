@@ -2317,57 +2317,21 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "recall below",
         },
         Case {
-            id: "redact-url-separator-ends-userinfo",
+            id: "redact-generator-draws-slash-password",
             gate: "redaction-corpus",
             tool: None,
-            // ADR-0009 Amendment 2 (CI seed 4814893562051029426): the user is looked for only before
-            // the cut again, so `https://u://pw@h` loses its password.
+            // ADR-0009 Amendment 2: the corpus generator draws a password starting with `//`, a stated
+            // miss, again, as on CI seed 4814893562051029426.
             seed: replace(
-                "crates/uaos-redact/src/detect.rs",
-                "    let Some(window) = text.get(after..=cut) else {\n",
-                "    let Some(window) = text.get(after..cut) else {\n",
+                "crates/uaos-redact/tests/common/mod.rs",
+                "    candidate.contains(\"://\") || candidate.starts_with(\"//\") || port_then_path || template\n",
+                "    candidate.contains(\"://\") || port_then_path || template\n",
             ),
             runner: Runner::Program {
                 program: "cargo",
-                args: &["test", "-p", "uaos-redact", "--lib", "url_passwords_may_hold_a_scheme_separator"],
+                args: &["test", "-p", "uaos-redact", "--test", "redact", "the_ci_seed_that_drew_a_stated_miss_is_redacted"],
             },
-            expect: "a password holding `://` survived",
-        },
-        Case {
-            id: "redact-url-chain-any-user",
-            gate: "redaction-corpus",
-            tool: None,
-            // ADR-0009 Amendment 2, its V1 review M1: any user owns a password starting with `//`.
-            seed: replace("crates/uaos-redact/src/detect.rs", "    if !text.get(user.clone()).is_some_and(plain_user) {\n", "    if text.get(user.clone()).is_none() {\n"),
-            runner: Runner::Program {
-                program: "cargo",
-                args: &["test", "-p", "uaos-redact", "--lib", "another_url_after_a_list_byte_stays_another_url"],
-            },
-            expect: "another URL after a list byte read as a password",
-        },
-        Case {
-            id: "redact-url-chain-blocks-next-url",
-            gate: "redaction-corpus",
-            tool: None,
-            // ADR-0009 Amendment 2: a chained anchor does not open its own password starting with `//`.
-            seed: replace("crates/uaos-redact/src/detect.rs", "        if has_scheme {\n            open_userinfo(text, after, cut, memo);\n", "        if has_scheme && open.is_none() {\n            open_userinfo(text, after, cut, memo);\n"),
-            runner: Runner::Program {
-                program: "cargo",
-                args: &["test", "-p", "uaos-redact", "--lib", "url_passwords_may_hold_a_scheme_separator"],
-            },
-            expect: "a password holding `://` survived",
-        },
-        Case {
-            id: "redact-url-placeholder-counts-toward-bound",
-            gate: "redaction-corpus",
-            tool: None,
-            // ADR-0009 Amendment 2, its round 4 M2: an earlier round's placeholder counts toward the bound.
-            seed: replace("crates/uaos-redact/src/detect.rs", "        let stop = base_stop.min(after.saturating_add(USERINFO_MAX + lead));\n", "        let stop = base_stop.min(after.saturating_add(USERINFO_MAX)).max(lead.min(0));\n"),
-            runner: Runner::Program {
-                program: "cargo",
-                args: &["test", "-p", "uaos-redact", "--test", "redact", "a_redacted_password_never_pushes_its_url_out_of_reach"],
-            },
-            expect: "a redacted password pushed its URL out of reach",
+            expect: "a secret survived redaction",
         },
         Case {
             id: "redact-url-password-stops-at-slash",

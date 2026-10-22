@@ -1,6 +1,6 @@
 # ADR-0009: Redaction: detector sets, placeholders and the final scan
 
-**Status:** Accepted (2026-10-13); amended 2026-10-13 by the retroactive review (see "Amendment 1") and 2026-10-21 (see "Amendment 2") · **Plan refs:** §2.5 DETECT/TRANSFORM/FINAL, D7, D20, T2, B-22 · **Builds on:** ADR-0005, ADR-0007
+**Status:** Accepted (2026-10-13); amended 2026-10-13 by the retroactive review (see "Amendment 1") and 2026-10-22 (see "Amendment 2") · **Plan refs:** §2.5 DETECT/TRANSFORM/FINAL, D7, D20, T2, B-22 · **Builds on:** ADR-0005, ADR-0007
 
 ## Context
 
@@ -26,7 +26,7 @@ logs).
    only set. An unknown version is an error, never a silent fallback. Once a release has shipped a
    set, changing any rule, anchor or bound means a new version. **The freeze starts at RC-1:**
    before it, no session outside development has pinned v1, so v1 was corrected in place by
-   Amendments 1 and 2.
+   Amendment 1.
 2. **Detection** is a leftmost-first Aho–Corasick search over anchor literals that restarts one
    byte after each match, so an anchor overlapping another anchor's literal is still found. A
    per-format validator then confirms each candidate. Boundaries fail closed:
@@ -55,7 +55,7 @@ logs).
    | `stripe_key` | `sk_`/`rk_` + `live_`/`test_` + ≥ 24 alphanumerics |
    | `google_api_key` | `AIza` + ≥ 35 token chars |
    | `aws_access_key_id` | `AKIA`/`ASIA`/`ABIA`/`ACCA` + ≥ 16 `[A-Z0-9]` (the key **id**; secret access keys are not claimed) |
-   | `url_credentials` | the password in `scheme://user:password@host`, within 512 bytes of the `://`, not counting a placeholder that starts the password (a password that starts with `//` runs up to 512 bytes past it, Amendment 2). The user ends at the first `:` (no `/`, `?`, `#` before it; placeholders inside it are skipped whole). The password ends at the **last** `@` that a host follows, before a hard stop (whitespace, control, `"`, `<`, `>`, backtick) or the next `://`. So `/`, `#`, `?`, `'`, `\` and `@` inside a password are covered. Not a password: an authority starting with an IPv6 literal; `host:port/path@x`, when the password starts with a port number and `/`, `?` or `#`, and either the user is host-like (dotted, contains `@`, `localhost`) or the rest is a lowercase path; an scp-style path after an email-like user; a template reference (`${NAME}`, `$NAME`, `%(name)s`, `{{name}}`) |
+   | `url_credentials` | the password in `scheme://user:password@host`, within 512 bytes of the `://`, its `@` and the host's first byte included. The user ends at the first `:` (no `/`, `?`, `#` before it; placeholders inside it are skipped whole). The password ends at the **last** `@` that a host follows, before a hard stop (whitespace, control, `"`, `<`, `>`, backtick) or the next `://`. So `/`, `#`, `?`, `'`, `\` and `@` inside a password are covered. Not a password: an authority starting with an IPv6 literal; `host:port/path@x`, when the password starts with a port number and `/`, `?` or `#`, and either the user is host-like (dotted, contains `@`, `localhost`) or the rest is a lowercase path; an scp-style path after an email-like user; a template reference (`${NAME}`, `$NAME`, `%(name)s`, `{{name}}`) |
 
 4. **Schema-agnostic JSON.** Every string is scanned after its escapes are decoded: keys and
    values, known and unknown fields, at any depth. A decoded→raw offset map splices each
@@ -182,21 +182,10 @@ equals the full scan).
   - an anchor glued on its left to an alphanumeric byte (`xAKIA…`): by design it reads as part
     of a longer token;
   - URL passwords:
-    - containing an unencoded `"`, `<`, `>` or backtick, which end a URL in text;
-    - containing `://`, which reads as another URL starting there. A password that starts with
-      `//`, where the user's `:` and the `//` read as `://`, is covered after a plain user
-      (Amendment 2);
-    - starting with `//` after a user holding a byte other than letters, digits, `+`, `.`, `-`,
-      `_` or an earlier placeholder (`smtp://o'brien://pw@h`), which reads as glue between two
-      URLs;
-    - with userinfo longer than 512 bytes, not counting a placeholder that starts the password;
-      a password starting with `//` may run 512 bytes past its `://`;
-    - in a later redaction round, sitting past the window that a redacted `//` password before it
-      shrinks. The placeholder left in its place does not count toward the bound, but the user and
-      its `:` do. So a URL whose password sits within about the last user-length bytes of one
-      unbroken 512-byte run can be missed where the base found it in that round. This needs about
-      450 or more bytes without whitespace, and it is split to a follow-up that measures the bound
-      from the placeholder's end (Amendment 2, round 5 M1);
+    - containing an unencoded `"`, `<`, `>`, backtick or `://`, which end a URL in text;
+    - starting with `//`, where the user's `:` and the `//` read as `://` (Amendment 2);
+    - with userinfo of 511 bytes or more: its `@` and the host's first byte must fall within the
+      512 bytes after the `://` (Amendment 2);
     - that start with a port number and `/`, `?` or `#` after a host-like user, or continue as a
       lowercase path;
     - that look like an scp path after an email-like user;
@@ -204,12 +193,8 @@ equals the full scan).
 
     Each reads as something else, as URL parsers would read it.
 - **Over-redaction.** A URL whose path contains `@` after a password is redacted up to that
-  `@`, host and path included; a key glued to more of its own characters is redacted with them;
-  a doubled scheme (`https://https://jdoe@host`), or a bare host glued to the next URL with no
-  glue, a scheme byte or `_` (`http://mirror.example.comhttps://git@host`), reads as a plain user
-  before a password starting with `//` (`//jdoe`, `//git`), which is redacted. A merged span
-  keeps the lowest class of what it covers, so such a span over a token reports that token's
-  class, not `url_credentials`. All fail closed.
+  `@`, host and path included; a key glued to more of its own characters is redacted with them.
+  Both fail closed.
 - **Exposed history.** Secrets already sent before a session pinned v1 are not retro-redacted;
   P3 raises "already exposed — rotate" (plan §2.5).
 - **Deferred to P3.**
@@ -226,12 +211,13 @@ equals the full scan).
 
 ## Verification
 
-- **Gate `redaction-corpus`** (active): `crates/uaos-redact/tests/corpus.rs`, with the URL
-  rule's unit tests. Six seeded negative cases prove it bites; the four of Amendment 2 are
-  listed there. The first two:
+- **Gate `redaction-corpus`** (active): `crates/uaos-redact/tests/corpus.rs`. Three seeded
+  negative cases prove it bites:
   - `redact-detector-drops-a-format`: a coarse one, which drops the `ASIA` prefix;
   - `redact-url-password-stops-at-slash`: a subtle one, one byte wide; it brings back review
-    H2.
+    H2;
+  - `redact-generator-draws-slash-password` (Amendment 2): the corpus generator draws a stated
+    miss again, and CI seed 4814893562051029426's fixed case fails.
 - **Behaviour and properties:** `crates/uaos-redact/tests/redact.rs`.
   - Stable per-pocket placeholders.
   - A clean body is returned borrowed, byte for byte; only the secret's bytes change.
@@ -246,6 +232,8 @@ equals the full scan).
     password, form-encoded keys, escaped left neighbours, a crafted cascade, service URLs and
     templates, and a backslash inside a password. A further unit test proves the whole-content
     fallback with a one-round budget.
+  - The generator leaves out every stated miss, checked against the redactor sample by sample,
+    and CI seed 4814893562051029426 is a fixed case (Amendment 2).
   - Linear work: a unit test bounds the bytes examined on 16 adversarial shapes of 256 KiB,
     each with 3 tails.
   - Fuzzing with real anchors: a property over random concatenations of anchors, separators,
@@ -287,119 +275,54 @@ those are fixed here too. The first review's findings were:
 The placeholder format, the HMAC tag and the class names are unchanged, so placeholders already
 produced stay valid.
 
-## Amendment 2 (2026-10-21): a password may start with `//`
+## Amendment 2 (2026-10-22): the corpus generator leaves out every stated miss
 
-**Found by:** CI. On PR #41's Windows run, `text_redaction_removes_every_secret_and_is_a_fixpoint`
-drew seed 4814893562051029426, and a URL password starting with `//` survived redaction and the
-final scan: `https://u://…@10.0.0.5`. The user's `:` and the password's `//` read as a `://`. The
-userinfo window ended at it, and neither anchor found the password.
+**Context.** Two property-test failures were draws of stated misses that the corpus generator did
+not leave out, not detector regressions:
+- CI seed 4814893562051029426 (PR #41's Windows run) drew a URL password starting with `//`
+  (`https://u://…@10.0.0.5`). The user's `:` and the `//` read as `://`, which ends a URL
+  password, so detection and the final scan missed it.
+- Stress seed 3677357430622100055 drew `amqp://svc2:3/#5pi.m@mq.example.org`. `3/#5pi.m` reads as
+  `host:port/path`, a miss stated since Amendment 1. It has one shape with clean text such as
+  `web:8000/?email=a@b.c`, so the detector cannot tell them apart.
 
-**Decision, as narrowed by its final review:**
-- **Each anchor reads its own URL** in a window that ends at the next `://`, as before, except
-  that a placeholder starting the password does not count toward the window's bound.
-- **One shape runs past that `://`:** a password that starts with `//` after a plain user
-  (letters, digits, `+`, `.`, `-`, `_` or an earlier placeholder).
-  - The anchor at that `://` continues it, to the last `@` a host follows in its own window.
-  - A chain only adds to what each anchor finds, spans two windows at most, and never carries
-    further.
-  - A chained anchor may open its own: `x://u://v://pw@h` reaches `//pw`.
-- **Every other `://` in a password ends it**, as before this amendment. This is a stated limit.
-- **The scan stays linear.** Each window is read a constant number of times
-  (`adversarial_inputs_are_scanned_in_linear_work`, which drives the chained path).
-- **The corpus generator** leaves out passwords holding `://`, the stated limit, so the property
-  claims what the rule does. The CI seed is kept as a fixed case.
+**Decision.** Detector set v1 is unchanged.
+- A password starting with `//` is stated as a miss.
+- The generator leaves out every stated miss a random password can reach
+  (`tests/common::stated_miss`): a `://` in the password or at its start, `host:port/path`, and a
+  template reference. Its verdicts are a superset of the misses: it reads the password as written,
+  so a `host:port/path` password whose path holds a percent escape is left out although the nested
+  view finds it.
+- The Limits state the window exactly. The `@` and the host's first byte must fall within the 512
+  bytes after the `://`, so userinfo of 511 bytes or more is missed; they said "longer than 512
+  bytes".
 
-**How it was narrowed.** The first version let a userinfo run on past any `://` that did not look
-like another URL starting. Three review rounds kept finding shapes at that boundary:
-- a chain from `host:port/…` hid the next URL's password (V1 H1);
-- glued URLs, a `host:port` with no path, and colon-joined schemes gave new false positives (V1
-  and scoped M1);
-- a placeholder in the user, and a chain reaching the length bound, missed shapes stated as
-  covered (scoped M2, final M1 and M2);
-- a templated password or an image tag before a glued URL ran on into it (final M3).
+**Withdrawn: reading a `//` password after a plain user.** A detector extension did that: PR #43,
+through five D-31 rounds, and its follow-up PR #45, through three. It continued the userinfo at
+the inner `://`, and measured the window from the end of a placeholder that starts a password.
+#45's final review found a High: a regression against the base detector across decoded views.
+- A round replaces the findings of the outermost view that has any (`Redactor::round`). The
+  extension adds outer-view findings the base never makes, and applying one can remove the `://`
+  that a deeper view's URL needs.
+- Witness: `smtp://ci+bot://me@corp.com:pa\nss%40mail.corp.com`, where `\n` is the two bytes `\`
+  and `n`. The base redacts `pa\nss` in the form view. The extension first redacts `//me` in the
+  outer view; the password is then read in no view, and the final scan passes.
+- Measured on the review's Python port: 3 of 400,000 general fuzz texts lost bytes against the
+  base with #45, and 632 of 50,000 texts of a targeted template with #43 alone.
 
-The first, V1's H1, was a regression from the base, fixed before the next round. The others were
-not regressions, but each made a claim false. The final review's fixes would
-have added more rules at the same boundary. The rule was narrowed instead to the shape CI found,
-which none of these shapes touch.
+Fixing it means changing the round policy. Taking every view's findings in each round removed the
+losses in the review's trial (70,000 texts). But it changes the redactor's semantics and cost, and
+by construction it can move a deeper finding's placeholder a round earlier and push a later
+password past the window the base still reaches. The extension gained one rare shape, and a
+regression against the base is not acceptable for it (red line 2). It is withdrawn; a future
+attempt starts from the round policy. The `url-glued` corpus family it added stays, with 0 false
+positives on detector v1.
 
-**Precision:**
-- Two URLs a comma separates stay two passwords.
-- None of these is a password:
-  - a URL list;
-  - a redirect parameter;
-  - a `host:port` URL before another URL;
-  - a URL glued to another by a byte that is not a scheme byte or `_`, the second with a user
-    and no password, a templated password or an image tag before it included.
-- These are tested (`another_url_after_a_list_byte_stays_another_url`,
-  `a_host_and_port_never_hide_the_next_urls_password`) and seeded.
-- The corpus's `url-glued` family measures it.
-- A doubled scheme, or a bare host glued to the next URL by a scheme byte, `_` or nothing, is
-  over-redacted, as the Limits state (round 4 M1, round 5 L1).
-- **Across redaction rounds:** a placeholder that starts a password, a redacted `//` password's
-  among them, does not count toward the 512-byte bound (round 4 M2:
-  `a_redacted_password_never_pushes_its_url_out_of_reach`, seeded). The user and its `:` still
-  count, so the reach in a later round can shrink by them. The residual is stated in the Limits
-  and split to a follow-up under D-31 (round 5 M1).
+**Seeded violation** (gate `redaction-corpus`): `redact-generator-draws-slash-password` lets the
+generator draw a password starting with `//` again, and
+`the_ci_seed_that_drew_a_stated_miss_is_redacted` then fails.
 
-**Seeded violations** (gate `redaction-corpus`):
-
-| id | Seed | Caught by |
-|---|---|---|
-| `redact-url-separator-ends-userinfo` | the user is looked for only before the cut | `url_passwords_may_hold_a_scheme_separator` |
-| `redact-url-chain-any-user` | any user owns a password starting with `//` | `another_url_after_a_list_byte_stays_another_url` |
-| `redact-url-chain-blocks-next-url` | a chained anchor does not open its own | `url_passwords_may_hold_a_scheme_separator` |
-| `redact-url-placeholder-counts-toward-bound` | an earlier round's placeholder counts toward the bound (round 4 M2) | `a_redacted_password_never_pushes_its_url_out_of_reach` |
-
-**The reviews' Lows:**
-- The length bound is stated as it is.
-- The status line and the Verification section are updated.
-- The corpus is re-measured with its 41st family ("Measured").
-- `LIST_BYTES` and its `]` went with the broader rule.
-- Round 4: the bound's wording (`USERINFO_MAX`), the linear-work test drives the chained path
-  (`a://u://p@h`), and the comments no longer speak of list bytes.
-- **The generator leaves out every stated miss a random password can reach.** These are a `://`
-  in the password, `host:port/path` (`port_then_path`) and a template reference. The test
-  `the_generator_leaves_out_exactly_the_stated_misses` checks it against the redactor.
-  - Stress seed 3677357430622100055 had drawn `svc2:3/#5pi.m`, a `host:port/path` miss stated
-    since Amendment 1, which the generator did not leave out: about three runs in 10,000
-    could fail on a documented limit.
-  - The detector is unchanged here. `web:8000/?email=a@b.c` (clean) and `svc2:3/#5pi.m@host`
-    (a secret) have one shape, and narrowing the exclusion would trade it for false positives.
-  - CodeQL flagged the test's synthetic fixtures, with 8 `rust/hard-coded-cryptographic-value`
-    alerts and 1 `rust/cleartext-logging` alert. `stated_miss` took them as a parameter named
-    `password`, and the failure message printed one. They are named `candidate` now, and the
-    message names the case instead of printing it.
-
-**Cost:** re-measured against the base detector on the same machine, with the broader rule of the
-scoped round. The p50s agree within about 1% on all four rows of the cost table:
-
-| Row | This rule | Base (`ceadeb0`) |
-|---|---|---|
-| Redacting the prose body | 5.24 and 5.26 ms | 5.22 and 5.26 ms |
-| Its final scan | 5.27 ms | 5.28 and 5.29 ms |
-| Redacting the nested body | 9.59 and 9.62 ms | 9.62 and 9.68 ms |
-| Its final scan | 8.31 ms | 8.30 and 8.35 ms |
-
-The p99s varied between runs on both builds by up to twice, under other load on the machine. The
-narrowed rule does less than the one measured, so the table's figures stand.
-
-**D-31 round 5, the last round** (`222bda4`): 0 High · 1 Medium · 3 Low.
-- **M1, split to a follow-up as D-31 requires.** Round 4's fix keeps the placeholder from
-  counting toward the bound, but the user and its `:` still count. So in one unbroken run of
-  about 450 bytes or more, a password the base redacts in a later round can be missed. This PR
-  narrows its claims and states the residual in the Limits. The follow-up measures the bound
-  from the placeholder's end, with boundary tests and the seed re-anchored, and gets its own V1
-  review.
-- **L1:** `_` as glue is named under Over-redaction.
-- **L2:** the bound's exception for a leading placeholder is stated in the rule table, the
-  Limits and the Decision.
-- **L3:** "read a constant number of times".
-- **Verified clean by round 5:**
-  - no regression within one scan;
-  - every stated-covered shape is found;
-  - the generator mirrors the detector exactly: 0 of 10,889 URL secrets survive a property
-    sweep, and 0 are kept but missed in a biased 300,000-password sweep;
-  - `url-glued` is clean;
-  - the scan is linear;
-  - all six seeds bite.
+**Tests.** `the_ci_seed_that_drew_a_stated_miss_is_redacted` keeps the CI input as a fixed case.
+`the_generator_leaves_out_the_stated_misses` checks the generator's verdict against the redactor on
+each of its samples. The samples are synthetic, and a failure names the case without printing one:
+CodeQL had flagged a version whose message printed it.

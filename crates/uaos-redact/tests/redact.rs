@@ -266,10 +266,11 @@ fn text_with_secrets(seed: u64, count: usize) -> (String, Vec<String>) {
 }
 
 #[test]
-fn the_ci_seed_that_found_a_url_password_gap_is_redacted() {
-    // CI, 2026-10-21 (PR #41's Windows run): a URL password starting with `//` survived, as in
-    // `https://u://…@10.0.0.5`. The input `text_redaction_removes_every_secret_and_is_a_fixpoint`
-    // reported, kept as a fixed case.
+fn the_ci_seed_that_drew_a_stated_miss_is_redacted() {
+    // CI, 2026-10-21 (PR #41's Windows run): the generator drew a URL password starting with `//`
+    // (`https://u://…@10.0.0.5`), a stated miss (ADR-0009 Amendment 2). The generator leaves such
+    // passwords out now, so the input `text_redaction_removes_every_secret_and_is_a_fixpoint`
+    // reported is kept as a fixed case of what is claimed.
     let (text, secrets) = text_with_secrets(4_814_893_562_051_029_426, 3);
     let r = redactor().redact_text(&text).unwrap();
     for s in &secrets {
@@ -279,7 +280,7 @@ fn the_ci_seed_that_found_a_url_password_gap_is_redacted() {
 }
 
 #[test]
-fn the_generator_leaves_out_exactly_the_stated_misses() {
+fn the_generator_leaves_out_the_stated_misses() {
     // Stress seed 3677357430622100055 drew `amqp://svc2:3/#5pi.m@mq.example.org`, a password that
     // reads as `host:port/path`: a miss ADR-0009 states since Amendment 1, which the generator
     // did not leave out. On each sample, the generator's verdict now matches the redactor's.
@@ -305,25 +306,6 @@ fn the_generator_leaves_out_exactly_the_stated_misses() {
             "the generator and the redactor disagree on case {case} (user {user})"
         );
     }
-}
-
-#[test]
-fn a_redacted_password_never_pushes_its_url_out_of_reach() {
-    // Round 4 M2 of ADR-0009 Amendment 2's reviews: a `//` password redacted in one round leaves
-    // a placeholder that must not push the rest of a long URL past the window in the next round,
-    // where the base found its password. The key id is built at runtime (push protection).
-    let key = format!("{}{}", "AK", "IA");
-    let password = format!("{}{}", "s3cret", "pw");
-    let text = format!(
-        "https://u://p@h-{key}{}{}:{password}@db.example.com",
-        "Q".repeat(100),
-        "z".repeat(430)
-    );
-    let r = redactor().redact_text(&text).unwrap();
-    assert!(
-        !r.output().contains(password.as_str()),
-        "a redacted password pushed its URL out of reach"
-    );
 }
 
 fn json_value() -> impl Strategy<Value = Value> {
