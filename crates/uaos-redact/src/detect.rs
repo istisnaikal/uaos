@@ -359,8 +359,9 @@ impl DetectorSet {
             return None;
         }
         // A password an earlier round redacted starts with its placeholder, which does not count
-        // toward the bound: redacting a password never pushes the rest of its URL out of reach in
-        // a later round (round 4 M2). One placeholder at most, so the window stays bounded.
+        // toward the bound (round 4 M2). The user and its `:` still do, so the URL's reach in a
+        // later round can still shrink by them (round 5 M1, a stated limit split to a follow-up).
+        // One placeholder at most, so the window stays bounded.
         let base_stop = memo.stop(text, after);
         let lead = text
             .get(after..base_stop.min(after.saturating_add(USERINFO_MAX)))
