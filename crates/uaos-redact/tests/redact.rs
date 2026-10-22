@@ -314,16 +314,20 @@ fn a_redacted_password_never_pushes_its_url_out_of_reach() {
     // where the base found its password. The key id is built at runtime (push protection).
     let key = format!("{}{}", "AK", "IA");
     let password = format!("{}{}", "s3cret", "pw");
-    let text = format!(
-        "https://u://p@h-{key}{}{}:{password}@db.example.com",
-        "Q".repeat(100),
-        "z".repeat(430)
-    );
-    let r = redactor().redact_text(&text).unwrap();
-    assert!(
-        !r.output().contains(password.as_str()),
-        "a redacted password pushed its URL out of reach"
-    );
+    // Round 5 M1: the user and its `:` do not count either; 452 is past where they used to.
+    for (user, tail) in [(1, 430), (1, 452), (300, 452)] {
+        let text = format!(
+            "https://{}://p@h-{key}{}{}:{password}@db.example.com",
+            "u".repeat(user),
+            "Q".repeat(100),
+            "z".repeat(tail)
+        );
+        let r = redactor().redact_text(&text).unwrap();
+        assert!(
+            !r.output().contains(password.as_str()),
+            "a redacted password pushed its URL out of reach: user {user}, tail {tail}"
+        );
+    }
 }
 
 fn json_value() -> impl Strategy<Value = Value> {

@@ -2370,6 +2370,20 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "a redacted password pushed its URL out of reach",
         },
         Case {
+            id: "redact-url-bound-counts-the-user",
+            gate: "redaction-corpus",
+            tool: None,
+            // ADR-0009 Amendment 2, #43 round 5 M1 (its follow-up): the bound is measured from the placeholder's end.
+            seed: replace("crates/uaos-redact/src/detect.rs", "                Some(colon + 1 + placeholder)
+", "                Some(placeholder + colon * 0)
+"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-redact", "--test", "redact", "a_redacted_password_never_pushes_its_url_out_of_reach"],
+            },
+            expect: "a redacted password pushed its URL out of reach",
+        },
+        Case {
             id: "redact-url-password-stops-at-slash",
             gate: "redaction-corpus",
             tool: None,

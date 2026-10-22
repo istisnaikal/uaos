@@ -358,16 +358,18 @@ impl DetectorSet {
         if open.is_none() && !has_scheme {
             return None;
         }
-        // A password an earlier round redacted starts with its placeholder, which does not count
-        // toward the bound (round 4 M2). The user and its `:` still do, so the URL's reach in a
-        // later round can still shrink by them (round 5 M1, a stated limit split to a follow-up).
-        // One placeholder at most, so the window stays bounded.
+        // A password an earlier round redacted starts with its placeholder. The bound is measured
+        // from the placeholder's end, so redacting a password never pushes the rest of its URL out
+        // of reach in a later round: neither the placeholder nor the user and its `:` count (round
+        // 4 M2, round 5 M1). One user and one placeholder at most, so the window stays bounded.
         let base_stop = memo.stop(text, after);
         let lead = text
             .get(after..base_stop.min(after.saturating_add(USERINFO_MAX)))
             .and_then(user_end)
-            .and_then(|colon| text.get(after + colon + 1..))
-            .and_then(placeholder_len)
+            .and_then(|colon| {
+                let placeholder = text.get(after + colon + 1..).and_then(placeholder_len)?;
+                Some(colon + 1 + placeholder)
+            })
             .unwrap_or(0);
         let stop = base_stop.min(after.saturating_add(USERINFO_MAX + lead));
         let cut = text
@@ -473,7 +475,8 @@ fn plain_user(user: &[u8]) -> bool {
     true
 }
 
-/// Longest window we inspect after an anchor, not counting a placeholder that starts the password.
+/// Longest window we inspect after an anchor, measured from the end of a placeholder that starts
+/// the password when there is one.
 /// The userinfo of a password starting with `//` spans the window before its `://` and the one
 /// after, so at most twice this and three bytes (Amendment 2).
 const USERINFO_MAX: usize = 512;

@@ -943,10 +943,9 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **Corpus:** a new negative family, `url-glued`.
   - **Tests:** the CI seed is a fixed case, with unit tests for the shape, for `host:port`
     URLs before another URL, and for URL lists and glued URLs.
-  - **Across rounds:** a placeholder that starts a password does not count toward the window's
-    bound. The user and its `:` still do. That residual, which needs about 450 unbroken bytes,
-    is stated in ADR-0009 and split under D-31 to a follow-up that measures the bound from the
-    placeholder's end.
+  - **Across rounds:** the window's bound is measured from the end of a placeholder that starts
+    a password, so redacting a password never pushes the rest of its URL out of reach in a
+    later round. This is #43's round 5 M1, done in its own follow-up as D-31 requires.
   - **Negatives:** four seeded violations, `redact-url-separator-ends-userinfo`,
     `redact-url-chain-any-user`, `redact-url-chain-blocks-next-url` and
     `redact-url-placeholder-counts-toward-bound`.

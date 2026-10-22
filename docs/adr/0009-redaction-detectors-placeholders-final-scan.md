@@ -55,7 +55,7 @@ logs).
    | `stripe_key` | `sk_`/`rk_` + `live_`/`test_` + ≥ 24 alphanumerics |
    | `google_api_key` | `AIza` + ≥ 35 token chars |
    | `aws_access_key_id` | `AKIA`/`ASIA`/`ABIA`/`ACCA` + ≥ 16 `[A-Z0-9]` (the key **id**; secret access keys are not claimed) |
-   | `url_credentials` | the password in `scheme://user:password@host`, within 512 bytes of the `://`, not counting a placeholder that starts the password (a password that starts with `//` runs up to 512 bytes past it, Amendment 2). The user ends at the first `:` (no `/`, `?`, `#` before it; placeholders inside it are skipped whole). The password ends at the **last** `@` that a host follows, before a hard stop (whitespace, control, `"`, `<`, `>`, backtick) or the next `://`. So `/`, `#`, `?`, `'`, `\` and `@` inside a password are covered. Not a password: an authority starting with an IPv6 literal; `host:port/path@x`, when the password starts with a port number and `/`, `?` or `#`, and either the user is host-like (dotted, contains `@`, `localhost`) or the rest is a lowercase path; an scp-style path after an email-like user; a template reference (`${NAME}`, `$NAME`, `%(name)s`, `{{name}}`) |
+   | `url_credentials` | the password in `scheme://user:password@host`, within 512 bytes of the `://`, measured from the end of a placeholder that starts the password (a password that starts with `//` runs up to 512 bytes past it, Amendment 2). The user ends at the first `:` (no `/`, `?`, `#` before it; placeholders inside it are skipped whole). The password ends at the **last** `@` that a host follows, before a hard stop (whitespace, control, `"`, `<`, `>`, backtick) or the next `://`. So `/`, `#`, `?`, `'`, `\` and `@` inside a password are covered. Not a password: an authority starting with an IPv6 literal; `host:port/path@x`, when the password starts with a port number and `/`, `?` or `#`, and either the user is host-like (dotted, contains `@`, `localhost`) or the rest is a lowercase path; an scp-style path after an email-like user; a template reference (`${NAME}`, `$NAME`, `%(name)s`, `{{name}}`) |
 
 4. **Schema-agnostic JSON.** Every string is scanned after its escapes are decoded: keys and
    values, known and unknown fields, at any depth. A decoded→raw offset map splices each
@@ -189,14 +189,8 @@ equals the full scan).
     - starting with `//` after a user holding a byte other than letters, digits, `+`, `.`, `-`,
       `_` or an earlier placeholder (`smtp://o'brien://pw@h`), which reads as glue between two
       URLs;
-    - with userinfo longer than 512 bytes, not counting a placeholder that starts the password;
-      a password starting with `//` may run 512 bytes past its `://`;
-    - in a later redaction round, sitting past the window that a redacted `//` password before it
-      shrinks. The placeholder left in its place does not count toward the bound, but the user and
-      its `:` do. So a URL whose password sits within about the last user-length bytes of one
-      unbroken 512-byte run can be missed where the base found it in that round. This needs about
-      450 or more bytes without whitespace, and it is split to a follow-up that measures the bound
-      from the placeholder's end (Amendment 2, round 5 M1);
+    - with userinfo longer than 512 bytes, measured from the end of a placeholder that starts the
+      password; a password starting with `//` may run 512 bytes past its `://`;
     - that start with a port number and `/`, `?` or `#` after a host-like user, or continue as a
       lowercase path;
     - that look like an scp path after an email-like user;
@@ -227,7 +221,7 @@ equals the full scan).
 ## Verification
 
 - **Gate `redaction-corpus`** (active): `crates/uaos-redact/tests/corpus.rs`, with the URL
-  rule's unit tests. Six seeded negative cases prove it bites; the four of Amendment 2 are
+  rule's unit tests. Seven seeded negative cases prove it bites; the five of Amendment 2 are
   listed there. The first two:
   - `redact-detector-drops-a-format`: a coarse one, which drops the `ASIA` prefix;
   - `redact-url-password-stops-at-slash`: a subtle one, one byte wide; it brings back review
@@ -296,7 +290,7 @@ userinfo window ended at it, and neither anchor found the password.
 
 **Decision, as narrowed by its final review:**
 - **Each anchor reads its own URL** in a window that ends at the next `://`, as before, except
-  that a placeholder starting the password does not count toward the window's bound.
+  that the window's bound is measured from the end of a placeholder that starts the password.
 - **One shape runs past that `://`:** a password that starts with `//` after a plain user
   (letters, digits, `+`, `.`, `-`, `_` or an earlier placeholder).
   - The anchor at that `://` continues it, to the last `@` a host follows in its own window.
@@ -336,11 +330,12 @@ which none of these shapes touch.
 - The corpus's `url-glued` family measures it.
 - A doubled scheme, or a bare host glued to the next URL by a scheme byte, `_` or nothing, is
   over-redacted, as the Limits state (round 4 M1, round 5 L1).
-- **Across redaction rounds:** a placeholder that starts a password, a redacted `//` password's
-  among them, does not count toward the 512-byte bound (round 4 M2:
-  `a_redacted_password_never_pushes_its_url_out_of_reach`, seeded). The user and its `:` still
-  count, so the reach in a later round can shrink by them. The residual is stated in the Limits
-  and split to a follow-up under D-31 (round 5 M1).
+- **Across redaction rounds:** the bound is measured from the end of a placeholder that starts a
+  password, a redacted `//` password's among them, so neither the placeholder nor the user and
+  its `:` count. Redacting a password therefore never pushes the rest of its URL out of reach in
+  a later round. This is round 4 M2, and the follow-up to round 5 M1:
+  `a_redacted_password_never_pushes_its_url_out_of_reach`, with a 300-byte user at the old
+  boundary, seeded.
 
 **Seeded violations** (gate `redaction-corpus`):
 
@@ -350,6 +345,7 @@ which none of these shapes touch.
 | `redact-url-chain-any-user` | any user owns a password starting with `//` | `another_url_after_a_list_byte_stays_another_url` |
 | `redact-url-chain-blocks-next-url` | a chained anchor does not open its own | `url_passwords_may_hold_a_scheme_separator` |
 | `redact-url-placeholder-counts-toward-bound` | an earlier round's placeholder counts toward the bound (round 4 M2) | `a_redacted_password_never_pushes_its_url_out_of_reach` |
+| `redact-url-bound-counts-the-user` | the bound counts the user and its `:` (#43 round 5 M1, its follow-up) | `a_redacted_password_never_pushes_its_url_out_of_reach` |
 
 **The reviews' Lows:**
 - The length bound is stated as it is.
@@ -403,3 +399,9 @@ narrowed rule does less than the one measured, so the table's figures stand.
   - `url-glued` is clean;
   - the scan is linear;
   - all six seeds bite.
+
+**The follow-up to round 5 M1** (a separate PR, as D-31 requires): the bound is measured from
+the end of a placeholder that starts the password, so the user and its `:` no longer shrink a
+URL's reach in a later round. The test covers the old boundary, a 452-byte tail with a 1-byte
+and a 300-byte user. The window stays bounded, at one user and one placeholder past 512 bytes, so
+the scan stays linear. The Limits' residual is removed.
