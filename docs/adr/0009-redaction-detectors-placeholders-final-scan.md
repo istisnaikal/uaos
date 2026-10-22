@@ -136,8 +136,8 @@ so no secret-shaped string is committed.
   - near-misses of every format, including runs that break before the minimum length;
   - URLs without a password, `host:port/path@…` on dotted and single-label service hosts,
     scp-style git URLs, and templated passwords;
-  - two URLs glued by a byte that is not a scheme byte, the second with a user and no password
-    (`url-glued`, Amendment 2);
+  - two URLs joined by a separator, the second with a user and no password (`url-glued`,
+    Amendment 2);
   - JSON-escaped and percent-encoded text without a secret;
   - exact placeholders;
   - hashes, UUIDs, base64, code, prose and printable noise.
@@ -186,6 +186,10 @@ equals the full scan).
     - starting with `//`, where the user's `:` and the `//` read as `://` (Amendment 2);
     - with userinfo of 511 bytes or more: its `@` and the host's first byte must fall within the
       512 bytes after the `://` (Amendment 2);
+    - holding a percent escape, in text whose URL shows only once JSON escapes are decoded
+      (`amqp:\/\/app:abc%20defgh@…`). View 2 decodes both in one pass, so the password is read
+      decoded: an escaped hard stop (`%20`, `%0A`, `%22`, …) ends it, and a decoded `//`,
+      `host:port/path` or template shape is not a password (Amendment 2, its final review);
     - that start with a port number and `/`, `?` or `#` after a host-like user, or continue as a
       lowercase path;
     - that look like an scp path after an email-like user;
@@ -211,13 +215,13 @@ equals the full scan).
 
 ## Verification
 
-- **Gate `redaction-corpus`** (active): `crates/uaos-redact/tests/corpus.rs`. Three seeded
-  negative cases prove it bites:
+- **Gate `redaction-corpus`** (active): `crates/uaos-redact/tests/corpus.rs`, with the
+  generator's fixed cases in `tests/redact.rs`. Three seeded negative cases prove it bites:
   - `redact-detector-drops-a-format`: a coarse one, which drops the `ASIA` prefix;
   - `redact-url-password-stops-at-slash`: a subtle one, one byte wide; it brings back review
     H2;
   - `redact-generator-draws-slash-password` (Amendment 2): the corpus generator draws a stated
-    miss again, and CI seed 4814893562051029426's fixed case fails.
+    miss again, and CI seed 4814893562051029426's fixed case in `tests/redact.rs` fails.
 - **Behaviour and properties:** `crates/uaos-redact/tests/redact.rs`.
   - Stable per-pocket placeholders.
   - A clean body is returned borrowed, byte for byte; only the secret's bytes change.
@@ -232,8 +236,9 @@ equals the full scan).
     password, form-encoded keys, escaped left neighbours, a crafted cascade, service URLs and
     templates, and a backslash inside a password. A further unit test proves the whole-content
     fallback with a one-round budget.
-  - The generator leaves out every stated miss, checked against the redactor sample by sample,
-    and CI seed 4814893562051029426 is a fixed case (Amendment 2).
+  - The generator leaves out every stated miss, checked against the redactor sample by sample.
+    CI seed 4814893562051029426 and stress seed 3677357430622100055 are fixed cases
+    (Amendment 2).
   - Linear work: a unit test bounds the bytes examined on 16 adversarial shapes of 256 KiB,
     each with 3 tails.
   - Fuzzing with real anchors: a property over random concatenations of anchors, separators,
@@ -277,11 +282,12 @@ produced stay valid.
 
 ## Amendment 2 (2026-10-22): the corpus generator leaves out every stated miss
 
-**Context.** Two property-test failures were draws of stated misses that the corpus generator did
-not leave out, not detector regressions:
+**Context.** Two property-test failures were draws of passwords the detector misses by design,
+which the corpus generator did not leave out. They were not detector regressions:
 - CI seed 4814893562051029426 (PR #41's Windows run) drew a URL password starting with `//`
   (`https://u://…@10.0.0.5`). The user's `:` and the `//` read as `://`, which ends a URL
-  password, so detection and the final scan missed it.
+  password, so detection and the final scan missed it. The Limits did not name this case;
+  this amendment does.
 - Stress seed 3677357430622100055 drew `amqp://svc2:3/#5pi.m@mq.example.org`. `3/#5pi.m` reads as
   `host:port/path`, a miss stated since Amendment 1. It has one shape with clean text such as
   `web:8000/?email=a@b.c`, so the detector cannot tell them apart.
@@ -289,10 +295,11 @@ not leave out, not detector regressions:
 **Decision.** Detector set v1 is unchanged.
 - A password starting with `//` is stated as a miss.
 - The generator leaves out every stated miss a random password can reach
-  (`tests/common::stated_miss`): a `://` in the password or at its start, `host:port/path`, and a
-  template reference. Its verdicts are a superset of the misses: it reads the password as written,
-  so a `host:port/path` password whose path holds a percent escape is left out although the nested
-  view finds it.
+  (`tests/common::stated_miss`): a `://` in the password or `//` at its start, `host:port/path`,
+  and a template reference. For URLs as written, as the property tests present them, its verdicts
+  are a superset of the misses: a `host:port/path` password whose path holds a percent escape is
+  left out although the nested view finds it. In the corpus's slash-escaped form a password
+  holding a percent escape can still be missed (Limits); the corpus keeps measuring it.
 - The Limits state the window exactly. The `@` and the host's first byte must fall within the 512
   bytes after the `://`, so userinfo of 511 bytes or more is missed; they said "longer than 512
   bytes".
@@ -322,7 +329,30 @@ positives on detector v1.
 generator draw a password starting with `//` again, and
 `the_ci_seed_that_drew_a_stated_miss_is_redacted` then fails.
 
-**Tests.** `the_ci_seed_that_drew_a_stated_miss_is_redacted` keeps the CI input as a fixed case.
+**Tests.** `the_ci_seed_that_drew_a_stated_miss_is_redacted` and
+`the_stress_seed_that_drew_a_stated_miss_is_redacted` keep the two inputs as fixed cases.
 `the_generator_leaves_out_the_stated_misses` checks the generator's verdict against the redactor on
 each of its samples. The samples are synthetic, and a failure names the case without printing one:
 CodeQL had flagged a version whose message printed it.
+
+**Final review of the withdrawal** (`106b565`): 0 High · 1 Medium · 4 Low.
+- **Verified clean:**
+  - `crates/uaos-redact/src` is byte-identical to `main`.
+  - On the review's Python port, 200,000 simulated cases of the text property fail 0 times; on
+    `main`'s generator they fail 5 times.
+  - A biased search of 900,000 passwords the generator can draw found none it keeps that v1
+    misses.
+  - Both seeds reproduce on `main`'s generator, and the seed bites.
+  - The corpus gives 3,000 / 3,000 per class and 0 false positives in each of the 41 families.
+  - The 511-byte bound and the withdrawal's witness hold.
+- **M1.** The "superset" sentence did not hold for the corpus's slash-escaped form. There, a
+  password holding a percent escape is read decoded and can be missed: 32 of 300,000 URL positives
+  on the port, none at the corpus seed, within the gate's threshold. This predates the amendment.
+  The miss is now stated in the Limits, and the sentence is scoped to URLs as written. A detector
+  fix (JSON-only and percent-only decoding as separate views) would be its own reviewed change.
+- **L1:** the gate's source line, `docs/claims.md` and the README count 41 families and three seeded
+  negatives.
+- **L2:** the `url-glued` wording no longer uses the withdrawn design's terms.
+- **L3:** the Verification, Context and Decision wording is corrected.
+- **L4:** the generator's table covers all four template forms and two ports the rule does not
+  take, and the stress seed is a fixed case.

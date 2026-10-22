@@ -244,7 +244,7 @@ negative = ["ledger-reserve-beyond-available"]
 
 [[gate]]
 id = "redaction-corpus"
-source = "CLAUDE.md §4 CI merge blocker: redaction corpus (detector set v1 vs synthetic corpus v2: 3,000 positives per class in six evasion forms, 100,000 negatives in 40 named families; recall >= 99.9% per class, FP <= 0.5% per class and per family)"
+source = "CLAUDE.md §4 CI merge blocker: redaction corpus (detector set v1 vs synthetic corpus v2: 3,000 positives per class in six evasion forms, 100,000 negatives in 41 named families; recall >= 99.9% per class, FP <= 0.5% per class and per family)"
 lane = "merge"
 status = "active"
 job = "test"
