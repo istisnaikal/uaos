@@ -929,28 +929,18 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Fixed
 
-- Redaction (ADR-0009 Amendment 2): a URL password that starts with `//`
-  (`https://u://pw@host`) was missed by detection and by the final scan. CI found it on PR
-  #41's Windows run (seed 4814893562051029426).
-  - **Fix:** after a plain user, the anchor at that `://` continues the password. Each anchor
-    still reads its own URL, so a chain only adds. The scan stays linear.
-  - **Narrowed:** a broader first version, any `://` in a password, was narrowed after three
-    review rounds to the shape CI found. Every other `://` in a password stays a stated
-    limit.
-  - **Generator:** the corpus generator now leaves out every stated miss a random password can
-    reach, the older `host:port/path` and template shapes included. A stress run had drawn
-    one (seed 3677357430622100055).
-  - **Corpus:** a new negative family, `url-glued`.
-  - **Tests:** the CI seed is a fixed case, with unit tests for the shape, for `host:port`
-    URLs before another URL, and for URL lists and glued URLs.
-  - **Across rounds:** a placeholder that starts a password does not count toward the window's
-    bound. The user and its `:` still do. That residual, which needs about 450 unbroken bytes,
-    is stated in ADR-0009 and split under D-31 to a follow-up that measures the bound from the
-    placeholder's end.
-  - **Negatives:** four seeded violations, `redact-url-separator-ends-userinfo`,
-    `redact-url-chain-any-user`, `redact-url-chain-blocks-next-url` and
-    `redact-url-placeholder-counts-toward-bound`.
-
+- **The redaction property tests no longer fail on stated misses** (ADR-0009 Amendment 2).
+  - CI seed 4814893562051029426 (PR #41's Windows run) drew a URL password starting with `//`,
+    and stress seed 3677357430622100055 drew `svc2:3/#5pi.m`, which reads as `host:port/path`.
+    Both are stated misses, not detector regressions.
+  - The corpus generator leaves out every stated miss a random password can reach
+    (`tests/common::stated_miss`), and a test checks it against the redactor.
+  - The Limits state a password starting with `//` as a miss, and the 512-byte window exactly:
+    userinfo of 511 bytes or more is missed.
+  - Detector set v1 is unchanged. An extension that read a `//` password after a plain user was
+    withdrawn: its final review found it regressed against the base across decoded views.
+  - New: the negative corpus family `url-glued`, and the seeded violation
+    `redact-generator-draws-slash-password`.
 - **`WallTime::from_unix_nanos` no longer panics on far out-of-range values.**
   - For nanoseconds far outside jiff's range (for example `u64::MAX` milliseconds as nanoseconds),
     jiff 0.2.38 reached an internal assertion instead of returning its error.
