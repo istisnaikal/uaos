@@ -55,7 +55,7 @@ logs).
    | `stripe_key` | `sk_`/`rk_` + `live_`/`test_` + ≥ 24 alphanumerics |
    | `google_api_key` | `AIza` + ≥ 35 token chars |
    | `aws_access_key_id` | `AKIA`/`ASIA`/`ABIA`/`ACCA` + ≥ 16 `[A-Z0-9]` (the key **id**; secret access keys are not claimed) |
-   | `url_credentials` | the password in `scheme://user:password@host`, within 512 bytes of the `://` (a password that starts with `//` runs up to 512 bytes past it, Amendment 2). The user ends at the first `:` (no `/`, `?`, `#` before it; placeholders inside it are skipped whole). The password ends at the **last** `@` that a host follows, before a hard stop (whitespace, control, `"`, `<`, `>`, backtick) or the next `://`. So `/`, `#`, `?`, `'`, `\` and `@` inside a password are covered. Not a password: an authority starting with an IPv6 literal; `host:port/path@x`, when the password starts with a port number and `/`, `?` or `#`, and either the user is host-like (dotted, contains `@`, `localhost`) or the rest is a lowercase path; an scp-style path after an email-like user; a template reference (`${NAME}`, `$NAME`, `%(name)s`, `{{name}}`) |
+   | `url_credentials` | the password in `scheme://user:password@host`, within 512 bytes of the `://`, not counting a placeholder that starts the password (a password that starts with `//` runs up to 512 bytes past it, Amendment 2). The user ends at the first `:` (no `/`, `?`, `#` before it; placeholders inside it are skipped whole). The password ends at the **last** `@` that a host follows, before a hard stop (whitespace, control, `"`, `<`, `>`, backtick) or the next `://`. So `/`, `#`, `?`, `'`, `\` and `@` inside a password are covered. Not a password: an authority starting with an IPv6 literal; `host:port/path@x`, when the password starts with a port number and `/`, `?` or `#`, and either the user is host-like (dotted, contains `@`, `localhost`) or the rest is a lowercase path; an scp-style path after an email-like user; a template reference (`${NAME}`, `$NAME`, `%(name)s`, `{{name}}`) |
 
 4. **Schema-agnostic JSON.** Every string is scanned after its escapes are decoded: keys and
    values, known and unknown fields, at any depth. A decoded→raw offset map splices each
@@ -189,8 +189,14 @@ equals the full scan).
     - starting with `//` after a user holding a byte other than letters, digits, `+`, `.`, `-`,
       `_` or an earlier placeholder (`smtp://o'brien://pw@h`), which reads as glue between two
       URLs;
-    - with userinfo longer than 512 bytes; a password starting with `//` may run 512 bytes past
-      its `://`;
+    - with userinfo longer than 512 bytes, not counting a placeholder that starts the password;
+      a password starting with `//` may run 512 bytes past its `://`;
+    - in a later redaction round, sitting past the window that a redacted `//` password before it
+      shrinks. The placeholder left in its place does not count toward the bound, but the user and
+      its `:` do. So a URL whose password sits within about the last user-length bytes of one
+      unbroken 512-byte run can be missed where the base found it in that round. This needs about
+      450 or more bytes without whitespace, and it is split to a follow-up that measures the bound
+      from the placeholder's end (Amendment 2, round 5 M1);
     - that start with a port number and `/`, `?` or `#` after a host-like user, or continue as a
       lowercase path;
     - that look like an scp path after an email-like user;
@@ -200,7 +206,7 @@ equals the full scan).
 - **Over-redaction.** A URL whose path contains `@` after a password is redacted up to that
   `@`, host and path included; a key glued to more of its own characters is redacted with them;
   a doubled scheme (`https://https://jdoe@host`), or a bare host glued to the next URL with no
-  glue or a scheme byte (`http://mirror.example.comhttps://git@host`), reads as a plain user
+  glue, a scheme byte or `_` (`http://mirror.example.comhttps://git@host`), reads as a plain user
   before a password starting with `//` (`//jdoe`, `//git`), which is redacted. A merged span
   keeps the lowest class of what it covers, so such a span over a token reports that token's
   class, not `url_credentials`. All fail closed.
@@ -289,7 +295,8 @@ final scan: `https://u://…@10.0.0.5`. The user's `:` and the password's `//` r
 userinfo window ended at it, and neither anchor found the password.
 
 **Decision, as narrowed by its final review:**
-- **Each anchor reads its own URL** in a window that ends at the next `://`, exactly as before.
+- **Each anchor reads its own URL** in a window that ends at the next `://`, as before, except
+  that a placeholder starting the password does not count toward the window's bound.
 - **One shape runs past that `://`:** a password that starts with `//` after a plain user
   (letters, digits, `+`, `.`, `-`, `_` or an earlier placeholder).
   - The anchor at that `://` continues it, to the last `@` a host follows in its own window.
@@ -297,8 +304,8 @@ userinfo window ended at it, and neither anchor found the password.
     further.
   - A chained anchor may open its own: `x://u://v://pw@h` reaches `//pw`.
 - **Every other `://` in a password ends it**, as before this amendment. This is a stated limit.
-- **The scan stays linear.** Each window is read at most once more
-  (`adversarial_inputs_are_scanned_in_linear_work`).
+- **The scan stays linear.** Each window is read a constant number of times
+  (`adversarial_inputs_are_scanned_in_linear_work`, which drives the chained path).
 - **The corpus generator** leaves out passwords holding `://`, the stated limit, so the property
   claims what the rule does. The CI seed is kept as a fixed case.
 
@@ -327,11 +334,13 @@ which none of these shapes touch.
 - These are tested (`another_url_after_a_list_byte_stays_another_url`,
   `a_host_and_port_never_hide_the_next_urls_password`) and seeded.
 - The corpus's `url-glued` family measures it.
-- A doubled scheme, or a bare host glued to the next URL by a scheme byte or nothing, is
-  over-redacted, as the Limits state (round 4 M1).
-- **Across redaction rounds:** a redacted `//` password leaves a placeholder that does not count
-  toward the 512-byte bound. So it never pushes the rest of its URL out of reach in a later
-  round (round 4 M2: `a_redacted_password_never_pushes_its_url_out_of_reach`, seeded).
+- A doubled scheme, or a bare host glued to the next URL by a scheme byte, `_` or nothing, is
+  over-redacted, as the Limits state (round 4 M1, round 5 L1).
+- **Across redaction rounds:** a placeholder that starts a password, a redacted `//` password's
+  among them, does not count toward the 512-byte bound (round 4 M2:
+  `a_redacted_password_never_pushes_its_url_out_of_reach`, seeded). The user and its `:` still
+  count, so the reach in a later round can shrink by them. The residual is stated in the Limits
+  and split to a follow-up under D-31 (round 5 M1).
 
 **Seeded violations** (gate `redaction-corpus`):
 
@@ -370,3 +379,23 @@ scoped round. The p50s agree within about 1% on all four rows of the cost table:
 
 The p99s varied between runs on both builds by up to twice, under other load on the machine. The
 narrowed rule does less than the one measured, so the table's figures stand.
+
+**D-31 round 5, the last round** (`222bda4`): 0 High · 1 Medium · 3 Low.
+- **M1, split to a follow-up as D-31 requires.** Round 4's fix keeps the placeholder from
+  counting toward the bound, but the user and its `:` still count. So in one unbroken run of
+  about 450 bytes or more, a password the base redacts in a later round can be missed. This PR
+  narrows its claims and states the residual in the Limits. The follow-up measures the bound
+  from the placeholder's end, with boundary tests and the seed re-anchored, and gets its own V1
+  review.
+- **L1:** `_` as glue is named under Over-redaction.
+- **L2:** the bound's exception for a leading placeholder is stated in the rule table, the
+  Limits and the Decision.
+- **L3:** "read a constant number of times".
+- **Verified clean by round 5:**
+  - no regression within one scan;
+  - every stated-covered shape is found;
+  - the generator mirrors the detector exactly: 0 of 10,889 URL secrets survive a property
+    sweep, and 0 are kept but missed in a biased 300,000-password sweep;
+  - `url-glued` is clean;
+  - the scan is linear;
+  - all six seeds bite.
