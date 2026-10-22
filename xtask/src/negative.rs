@@ -2358,6 +2358,18 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "a password holding `://` survived",
         },
         Case {
+            id: "redact-url-placeholder-counts-toward-bound",
+            gate: "redaction-corpus",
+            tool: None,
+            // ADR-0009 Amendment 2, its round 4 M2: an earlier round's placeholder counts toward the bound.
+            seed: replace("crates/uaos-redact/src/detect.rs", "        let stop = base_stop.min(after.saturating_add(USERINFO_MAX + lead));\n", "        let stop = base_stop.min(after.saturating_add(USERINFO_MAX)).max(lead.min(0));\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-redact", "--test", "redact", "a_redacted_password_never_pushes_its_url_out_of_reach"],
+            },
+            expect: "a redacted password pushed its URL out of reach",
+        },
+        Case {
             id: "redact-url-password-stops-at-slash",
             gate: "redaction-corpus",
             tool: None,

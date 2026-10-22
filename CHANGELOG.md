@@ -934,14 +934,20 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   #41's Windows run (seed 4814893562051029426).
   - **Fix:** after a plain user, the anchor at that `://` continues the password. Each anchor
     still reads its own URL, so a chain only adds. The scan stays linear.
-  - **Narrowed:** a broader first version, any `://` in a password, was narrowed after four
+  - **Narrowed:** a broader first version, any `://` in a password, was narrowed after three
     review rounds to the shape CI found. Every other `://` in a password stays a stated
-    limit, and the corpus generator leaves those out.
+    limit.
+  - **Generator:** the corpus generator now leaves out every stated miss a random password can
+    reach, the older `host:port/path` and template shapes included. A stress run had drawn
+    one (seed 3677357430622100055).
   - **Corpus:** a new negative family, `url-glued`.
   - **Tests:** the CI seed is a fixed case, with unit tests for the shape, for `host:port`
     URLs before another URL, and for URL lists and glued URLs.
-  - **Negatives:** three seeded violations, `redact-url-separator-ends-userinfo`,
-    `redact-url-chain-any-user` and `redact-url-chain-blocks-next-url`.
+  - **Across rounds:** a redacted `//` password's placeholder does not count toward the window's
+    bound, so it never pushes the rest of its URL out of reach.
+  - **Negatives:** four seeded violations, `redact-url-separator-ends-userinfo`,
+    `redact-url-chain-any-user`, `redact-url-chain-blocks-next-url` and
+    `redact-url-placeholder-counts-toward-bound`.
 
 - **`WallTime::from_unix_nanos` no longer panics on far out-of-range values.**
   - For nanoseconds far outside jiff's range (for example `u64::MAX` milliseconds as nanoseconds),

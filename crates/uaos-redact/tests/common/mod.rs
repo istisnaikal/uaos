@@ -250,11 +250,58 @@ pub(crate) fn embed(rng: &mut Prng, text: &str) -> String {
     rng.pick(CONTEXTS).replace("%S%", text)
 }
 
-/// Whether `password` holds the URL rule's stated miss (ADR-0009, limits): a `://` in it, which
-/// ends the password. One that starts with `//` is covered after a plain user, and the
-/// generator's users are plain (Amendment 2, narrowed by its final review).
-fn reads_as_another_url(password: &str) -> bool {
-    password.contains("://")
+/// Whether `user:password` is one of the URL rule's stated misses (ADR-0009, limits), which the
+/// generator leaves out so the properties claim exactly what the rule does. It mirrors the
+/// detector's exclusions a random password can reach:
+/// - a `://` in the password, which ends it (one that starts with `//` is covered after a plain
+///   user, and the generator's users are plain);
+/// - `host:port/path` (`port_then_path`): a port of 1 to 5 digits up to 65535, then `/`, `?` or
+///   `#`, after a host-like user or before a lowercase path. Stress seed 3677357430622100055
+///   drew `svc2:3/#5pi.m`, a miss stated since Amendment 1;
+/// - a template reference (`is_template`): `${name}`, `$NAME`, `%(name)s`, `{{name}}`.
+///
+/// A password the generator draws ends at the URL's own `@`, so the detector's candidate is the
+/// whole password.
+pub(crate) fn stated_miss(user: &str, password: &str) -> bool {
+    let candidate = password.as_bytes();
+    let path_like = |rest: &[u8]| {
+        rest.iter().all(|&b| {
+            b.is_ascii_lowercase()
+                || b.is_ascii_digit()
+                || matches!(
+                    b,
+                    b'/' | b'.' | b'_' | b'~' | b'-' | b'?' | b'=' | b'&' | b'#' | b'%' | b'@'
+                )
+        })
+    };
+    let digits = candidate.iter().take_while(|b| b.is_ascii_digit()).count();
+    let port_ok = (1..=5).contains(&digits)
+        && password
+            .get(..digits)
+            .and_then(|d| d.parse::<u32>().ok())
+            .is_some_and(|port| port <= 65_535);
+    let host_like = user.contains('.') || user.contains('@') || user.eq_ignore_ascii_case("localhost");
+    let port_then_path = port_ok
+        && matches!(candidate.get(digits), Some(b'/' | b'?' | b'#'))
+        && (host_like || candidate.get(digits..).is_some_and(path_like));
+    let ident = |b: &str, upper: bool| {
+        !b.is_empty()
+            && b.bytes().all(|c| {
+                (if upper {
+                    c.is_ascii_uppercase()
+                } else {
+                    c.is_ascii_alphabetic()
+                }) || c.is_ascii_digit()
+                    || c == b'_'
+            })
+            && !b.bytes().next().is_some_and(|c| c.is_ascii_digit())
+    };
+    let inner = |open: &str, close: &str| password.strip_prefix(open).and_then(|r| r.strip_suffix(close));
+    let template = inner("${", "}").is_some_and(|n| ident(n, false))
+        || password.strip_prefix('$').is_some_and(|n| ident(n, true))
+        || inner("%(", ")s").is_some_and(|n| ident(n, false))
+        || inner("{{", "}}").is_some_and(|n| ident(n, false));
+    password.contains("://") || port_then_path || template
 }
 
 /// A secret of `class`.
@@ -402,7 +449,7 @@ pub(crate) fn secret(rng: &mut Prng, class: DataClass) -> Sample {
                     let at = rng.range(1, password.len() - 1);
                     password.insert(at, '@');
                 }
-                if !reads_as_another_url(&password) {
+                if !stated_miss(&user, &password) {
                     break password;
                 }
             };
@@ -852,7 +899,7 @@ pub(crate) fn negative(rng: &mut Prng) -> (&'static str, String) {
                 format!("{scheme}://app:{password}@db:5432/app"),
             )
         }
-        // Two URLs glued by a byte that is no list byte, the second with a user and no password:
+        // Two URLs glued by a byte that is not a scheme byte, the second with a user and no password:
         // no userinfo runs from one into the other (ADR-0009 Amendment 2, its V1 review M1).
         45 => {
             let first = rng.pick(&[

@@ -136,7 +136,7 @@ so no secret-shaped string is committed.
   - near-misses of every format, including runs that break before the minimum length;
   - URLs without a password, `host:port/path@…` on dotted and single-label service hosts,
     scp-style git URLs, and templated passwords;
-  - two URLs glued by a byte that is not a list byte, the second with a user and no password
+  - two URLs glued by a byte that is not a scheme byte, the second with a user and no password
     (`url-glued`, Amendment 2);
   - JSON-escaped and percent-encoded text without a secret;
   - exact placeholders;
@@ -199,8 +199,11 @@ equals the full scan).
     Each reads as something else, as URL parsers would read it.
 - **Over-redaction.** A URL whose path contains `@` after a password is redacted up to that
   `@`, host and path included; a key glued to more of its own characters is redacted with them;
-  a doubled scheme (`https://https://jdoe@host`) reads as the user `https` with a password
-  `//jdoe`, which is redacted. All fail closed.
+  a doubled scheme (`https://https://jdoe@host`), or a bare host glued to the next URL with no
+  glue or a scheme byte (`http://mirror.example.comhttps://git@host`), reads as a plain user
+  before a password starting with `//` (`//jdoe`, `//git`), which is redacted. A merged span
+  keeps the lowest class of what it covers, so such a span over a token reports that token's
+  class, not `url_credentials`. All fail closed.
 - **Exposed history.** Secrets already sent before a session pinned v1 are not retro-redacted;
   P3 raises "already exposed — rotate" (plan §2.5).
 - **Deferred to P3.**
@@ -218,7 +221,7 @@ equals the full scan).
 ## Verification
 
 - **Gate `redaction-corpus`** (active): `crates/uaos-redact/tests/corpus.rs`, with the URL
-  rule's unit tests. Five seeded negative cases prove it bites; the three of Amendment 2 are
+  rule's unit tests. Six seeded negative cases prove it bites; the four of Amendment 2 are
   listed there. The first two:
   - `redact-detector-drops-a-format`: a coarse one, which drops the `ASIA` prefix;
   - `redact-url-password-stops-at-slash`: a subtle one, one byte wide; it brings back review
@@ -300,7 +303,7 @@ userinfo window ended at it, and neither anchor found the password.
   claims what the rule does. The CI seed is kept as a fixed case.
 
 **How it was narrowed.** The first version let a userinfo run on past any `://` that did not look
-like another URL starting. Four review rounds kept finding shapes at that boundary:
+like another URL starting. Three review rounds kept finding shapes at that boundary:
 - a chain from `host:port/…` hid the next URL's password (V1 H1);
 - glued URLs, a `host:port` with no path, and colon-joined schemes gave new false positives (V1
   and scoped M1);
@@ -308,22 +311,27 @@ like another URL starting. Four review rounds kept finding shapes at that bounda
   covered (scoped M2, final M1 and M2);
 - a templated password or an image tag before a glued URL ran on into it (final M3).
 
-None was a regression from the base, but each made a claim false. The final review's fixes would
+The first, V1's H1, was a regression from the base, fixed before the next round. The others were
+not regressions, but each made a claim false. The final review's fixes would
 have added more rules at the same boundary. The rule was narrowed instead to the shape CI found,
 which none of these shapes touch.
 
 **Precision:**
-- Two URLs a list byte separates stay two passwords.
+- Two URLs a comma separates stay two passwords.
 - None of these is a password:
   - a URL list;
   - a redirect parameter;
   - a `host:port` URL before another URL;
-  - a URL glued to another by any byte, the second with a user and no password, a templated
-    password or an image tag before it included.
+  - a URL glued to another by a byte that is not a scheme byte or `_`, the second with a user
+    and no password, a templated password or an image tag before it included.
 - These are tested (`another_url_after_a_list_byte_stays_another_url`,
   `a_host_and_port_never_hide_the_next_urls_password`) and seeded.
 - The corpus's `url-glued` family measures it.
-- A doubled scheme (`https://https://jdoe@host`) is over-redacted, as the Limits state.
+- A doubled scheme, or a bare host glued to the next URL by a scheme byte or nothing, is
+  over-redacted, as the Limits state (round 4 M1).
+- **Across redaction rounds:** a redacted `//` password leaves a placeholder that does not count
+  toward the 512-byte bound. So it never pushes the rest of its URL out of reach in a later
+  round (round 4 M2: `a_redacted_password_never_pushes_its_url_out_of_reach`, seeded).
 
 **Seeded violations** (gate `redaction-corpus`):
 
@@ -332,14 +340,23 @@ which none of these shapes touch.
 | `redact-url-separator-ends-userinfo` | the user is looked for only before the cut | `url_passwords_may_hold_a_scheme_separator` |
 | `redact-url-chain-any-user` | any user owns a password starting with `//` | `another_url_after_a_list_byte_stays_another_url` |
 | `redact-url-chain-blocks-next-url` | a chained anchor does not open its own | `url_passwords_may_hold_a_scheme_separator` |
+| `redact-url-placeholder-counts-toward-bound` | an earlier round's placeholder counts toward the bound (round 4 M2) | `a_redacted_password_never_pushes_its_url_out_of_reach` |
 
 **The reviews' Lows:**
 - The length bound is stated as it is.
 - The status line and the Verification section are updated.
 - The corpus is re-measured with its 41st family ("Measured").
 - `LIST_BYTES` and its `]` went with the broader rule.
-- The property can still draw the older port-then-lowercase-path miss, stated since Amendment 1,
-  in about three runs in 10,000.
+- Round 4: the bound's wording (`USERINFO_MAX`), the linear-work test drives the chained path
+  (`a://u://p@h`), and the comments no longer speak of list bytes.
+- **The generator leaves out every stated miss a random password can reach.** These are a `://`
+  in the password, `host:port/path` (`port_then_path`) and a template reference. The test
+  `the_generator_leaves_out_exactly_the_stated_misses` checks it against the redactor.
+  - Stress seed 3677357430622100055 had drawn `svc2:3/#5pi.m`, a `host:port/path` miss stated
+    since Amendment 1, which the generator did not leave out: about three runs in 10,000
+    could fail on a documented limit.
+  - The detector is unchanged here. `web:8000/?email=a@b.c` (clean) and `svc2:3/#5pi.m@host`
+    (a secret) have one shape, and narrowing the exclusion would trade it for false positives.
 
 **Cost:** re-measured against the base detector on the same machine, with the broader rule of the
 scoped round. The p50s agree within about 1% on all four rows of the cost table:
