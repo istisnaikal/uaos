@@ -16,10 +16,11 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-/// Exemptions without a `notes` reason when the ratchet was introduced (2026-10-13). Lower it
-/// as reasons are added or crates audited; raising it requires review of `xtask/` by its code
-/// owner and defeats the purpose.
-const UNNOTED_BASELINE: usize = 233;
+/// Exemptions without a `notes` reason: 233 when the ratchet was introduced (2026-10-13), 227 since
+/// the cedar-policy and schemars bumps noted their six (2026-10-22). Lower it as reasons are added
+/// or crates audited; raising it requires review of `xtask/` by its code owner and defeats the
+/// purpose.
+const UNNOTED_BASELINE: usize = 227;
 
 #[derive(Debug, Deserialize)]
 struct VetConfig {
