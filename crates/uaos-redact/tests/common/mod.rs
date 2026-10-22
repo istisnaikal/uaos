@@ -262,8 +262,9 @@ pub(crate) fn embed(rng: &mut Prng, text: &str) -> String {
 ///
 /// A password the generator draws ends at the URL's own `@`, so the detector's candidate is the
 /// whole password.
-pub(crate) fn stated_miss(user: &str, password: &str) -> bool {
-    let candidate = password.as_bytes();
+/// `candidate` is that password; a test passes synthetic ones.
+pub(crate) fn stated_miss(user: &str, candidate: &str) -> bool {
+    let bytes = candidate.as_bytes();
     let path_like = |rest: &[u8]| {
         rest.iter().all(|&b| {
             b.is_ascii_lowercase()
@@ -274,16 +275,16 @@ pub(crate) fn stated_miss(user: &str, password: &str) -> bool {
                 )
         })
     };
-    let digits = candidate.iter().take_while(|b| b.is_ascii_digit()).count();
+    let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
     let port_ok = (1..=5).contains(&digits)
-        && password
+        && candidate
             .get(..digits)
             .and_then(|d| d.parse::<u32>().ok())
             .is_some_and(|port| port <= 65_535);
     let host_like = user.contains('.') || user.contains('@') || user.eq_ignore_ascii_case("localhost");
     let port_then_path = port_ok
-        && matches!(candidate.get(digits), Some(b'/' | b'?' | b'#'))
-        && (host_like || candidate.get(digits..).is_some_and(path_like));
+        && matches!(bytes.get(digits), Some(b'/' | b'?' | b'#'))
+        && (host_like || bytes.get(digits..).is_some_and(path_like));
     let ident = |b: &str, upper: bool| {
         !b.is_empty()
             && b.bytes().all(|c| {
@@ -296,12 +297,12 @@ pub(crate) fn stated_miss(user: &str, password: &str) -> bool {
             })
             && !b.bytes().next().is_some_and(|c| c.is_ascii_digit())
     };
-    let inner = |open: &str, close: &str| password.strip_prefix(open).and_then(|r| r.strip_suffix(close));
+    let inner = |open: &str, close: &str| candidate.strip_prefix(open).and_then(|r| r.strip_suffix(close));
     let template = inner("${", "}").is_some_and(|n| ident(n, false))
-        || password.strip_prefix('$').is_some_and(|n| ident(n, true))
+        || candidate.strip_prefix('$').is_some_and(|n| ident(n, true))
         || inner("%(", ")s").is_some_and(|n| ident(n, false))
         || inner("{{", "}}").is_some_and(|n| ident(n, false));
-    password.contains("://") || port_then_path || template
+    candidate.contains("://") || port_then_path || template
 }
 
 /// A secret of `class`.
