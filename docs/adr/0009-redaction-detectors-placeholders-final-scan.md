@@ -366,6 +366,10 @@ which none of these shapes touch.
     could fail on a documented limit.
   - The detector is unchanged here. `web:8000/?email=a@b.c` (clean) and `svc2:3/#5pi.m@host`
     (a secret) have one shape, and narrowing the exclusion would trade it for false positives.
+  - CodeQL flagged the test's synthetic fixtures, with 8 `rust/hard-coded-cryptographic-value`
+    alerts and 1 `rust/cleartext-logging` alert. `stated_miss` took them as a parameter named
+    `password`, and the failure message printed one. They are named `candidate` now, and the
+    message names the case instead of printing it.
 
 **Cost:** re-measured against the base detector on the same machine, with the broader rule of the
 scoped round. The p50s agree within about 1% on all four rows of the cost table:

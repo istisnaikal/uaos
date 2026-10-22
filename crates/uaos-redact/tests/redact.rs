@@ -283,7 +283,8 @@ fn the_generator_leaves_out_exactly_the_stated_misses() {
     // Stress seed 3677357430622100055 drew `amqp://svc2:3/#5pi.m@mq.example.org`, a password that
     // reads as `host:port/path`: a miss ADR-0009 states since Amendment 1, which the generator
     // did not leave out. On each sample, the generator's verdict now matches the redactor's.
-    for (user, password) in [
+    // The candidates are synthetic, and a failure names the case without printing one.
+    for (case, (user, candidate)) in [
         ("svc2", "3/#5pi.m"),
         ("app", "8080?x=1"),
         ("u", "${DB_PASS}"),
@@ -292,13 +293,16 @@ fn the_generator_leaves_out_exactly_the_stated_misses() {
         ("app", "3/Xk!q"),
         ("deploy", "hunter2hunter2"),
         ("u", "//pw0rd"),
-    ] {
-        let text = format!("amqp://{user}:{password}@mq.example.org");
-        let missed = redactor().redact_text(&text).unwrap().output().contains(password);
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let text = format!("amqp://{user}:{candidate}@mq.example.org");
+        let missed = redactor().redact_text(&text).unwrap().output().contains(candidate);
         assert_eq!(
-            common::stated_miss(user, password),
+            common::stated_miss(user, candidate),
             missed,
-            "the generator and the redactor disagree on {user}:{password}"
+            "the generator and the redactor disagree on case {case} (user {user})"
         );
     }
 }
