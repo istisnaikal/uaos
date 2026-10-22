@@ -197,13 +197,24 @@ equals the full scan).
     - that are template references.
 
     Each reads as something else, as URL parsers would read it.
+- **Across redaction rounds, base parity.** Nothing the base detector redacts in any round is
+  lost: #45's scoped review fuzzed 800,000 texts against `ceadeb0`, with 0 secrets and 0 bytes
+  lost. Beyond that and the tested shapes, a later round's reach past an unbroken run of about
+  500 bytes after earlier placeholders is not claimed. A placeholder scheme can open a chain
+  that ends at an `@` inside the next URL's user (`[REDACTED:jwt:…]://u://me@x:…`). The chain's
+  placeholder then replaces that URL's `://`, so in the next round a later placeholder in the
+  run counts toward the bound, and a password past it is kept, as the base keeps it (#45
+  scoped M1).
 - **Over-redaction.** A URL whose path contains `@` after a password is redacted up to that
   `@`, host and path included; a key glued to more of its own characters is redacted with them;
   a doubled scheme (`https://https://jdoe@host`), or a bare host glued to the next URL with no
   glue, a scheme byte or `_` (`http://mirror.example.comhttps://git@host`), reads as a plain user
   before a password starting with `//` (`//jdoe`, `//git`), which is redacted. A merged span
   keeps the lowest class of what it covers, so such a span over a token reports that token's
-  class, not `url_credentials`. All fail closed.
+  class, not `url_credentials`. A whole placeholder glued to `://` reads as the scheme it
+  replaced, so what follows reads as a URL:
+  `[REDACTED:jwt:…]://svc:8443/API/v1?user=Bob@corp.com` loses `8443/API/v1?user=Bob` (#45
+  scoped L1). All fail closed.
 - **Exposed history.** Secrets already sent before a session pinned v1 are not retro-redacted;
   P3 raises "already exposed — rotate" (plan §2.5).
 - **Deferred to P3.**
@@ -334,13 +345,12 @@ which none of these shapes touch.
   password, a redacted `//` password's among them, so neither the placeholder nor the user and
   its `:` count. A whole placeholder right before `://` stands for its scheme, so a secret glued
   to the scheme (`ghp_…https://`) does not leave its URL unreadable in the next round (#45 V1 M1:
-  `a_secret_glued_to_the_scheme_keeps_its_url_readable`, seeded). With both, redacting a
-  password does not push the rest of its URL out of reach in a later round, by the bound or by
-  the scheme. The cost is fail-closed: in a later round the bound reaches one user and one
-  placeholder further, so a path `@` that far is redacted with it. This is round 4 M2, and the
-  follow-up to round 5 M1:
-  `a_redacted_password_never_pushes_its_url_out_of_reach`, with a 300-byte user at the old
-  boundary, seeded.
+  `a_secret_glued_to_the_scheme_keeps_its_url_readable`, seeded). The round-5 shapes keep
+  their URL in reach in a later round, a 300-byte user at the old boundary among them
+  (`a_redacted_password_keeps_the_tested_urls_in_reach`, seeded; round 4 M2, the follow-up
+  to round 5 M1). Beyond the tested shapes, base parity is what is claimed across
+  rounds, as the Limits state. The cost is fail-closed: in a later round the bound reaches one
+  user and one placeholder further, so a path `@` that far is redacted with it.
 
 **Seeded violations** (gate `redaction-corpus`):
 
@@ -349,8 +359,8 @@ which none of these shapes touch.
 | `redact-url-separator-ends-userinfo` | the user is looked for only before the cut | `url_passwords_may_hold_a_scheme_separator` |
 | `redact-url-chain-any-user` | any user owns a password starting with `//` | `another_url_after_a_list_byte_stays_another_url` |
 | `redact-url-chain-blocks-next-url` | a chained anchor does not open its own | `url_passwords_may_hold_a_scheme_separator` |
-| `redact-url-placeholder-counts-toward-bound` | an earlier round's placeholder counts toward the bound (round 4 M2) | `a_redacted_password_never_pushes_its_url_out_of_reach` |
-| `redact-url-bound-counts-the-user` | the bound counts the user and its `:` (#43 round 5 M1, its follow-up) | `a_redacted_password_never_pushes_its_url_out_of_reach` |
+| `redact-url-placeholder-counts-toward-bound` | an earlier round's placeholder counts toward the bound (round 4 M2) | `a_redacted_password_keeps_the_tested_urls_in_reach` |
+| `redact-url-bound-counts-the-user` | the bound counts the user and its `:` (#43 round 5 M1, its follow-up) | `a_redacted_password_keeps_the_tested_urls_in_reach` |
 | `redact-url-placeholder-not-a-scheme` | a placeholder before `://` does not stand for its scheme (#45 V1 M1) | `a_secret_glued_to_the_scheme_keeps_its_url_readable` |
 
 **The reviews' Lows:**
@@ -424,3 +434,23 @@ the scan stays linear. The Limits' residual is removed.
 - **L2:** the `USERINFO_MAX` doc and the Limits no longer bound the chained userinfo at twice
   512 bytes. Each window can add a user and a placeholder.
 - **L3:** the bound's fail-closed over-redaction in a later round is stated in Precision.
+
+**#45's scoped round** (`4d76567`, the fix diff and what it touches): 0 High · 1 Medium ·
+2 Low.
+- **M1.** A placeholder scheme opens a chain, which can end at an `@` inside the next URL's
+  user (`[REDACTED:jwt:…]://u://me@x:…`). The chain's placeholder then replaces that URL's
+  `://`, and in the next round a password past about 500 unbroken bytes is out of reach.
+  #43 alone, and this PR before its V1 fix, redact it in a later round; the head and the base
+  keep it.
+  - **Verified:** nothing the base detector redacts is lost in any round. The review fuzzed
+    800,000 texts against `ceadeb0`: 0 secrets and 0 bytes lost.
+  - **Fix (b) is taken:** the cross-round claim is narrowed to base parity and the tested
+    shapes, and the residual is stated in the Limits. Fix (a), a window of 1,627 bytes, is not:
+    it more than triples the window every anchor reads, for a shape the base misses too.
+  - #43 alone misses #45 V1 M1's shape, which the base finds, so the two ship together.
+- **L1:** a placeholder glued to `://` reading as a URL is stated under Over-redaction.
+- **L2:** the linear-work test drives a placeholder scheme and `]://`. The look-back for a
+  placeholder before `://` is not charged to the work count; it is at most one placeholder's
+  length per anchor.
+- **Also:** the round-5 test is renamed
+  `a_redacted_password_keeps_the_tested_urls_in_reach`, so its name claims what it tests.

@@ -944,10 +944,13 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **Tests:** the CI seed is a fixed case, with unit tests for the shape, for `host:port`
     URLs before another URL, and for URL lists and glued URLs.
   - **Across rounds:** the window's bound is measured from the end of a placeholder that starts
-    a password. A whole placeholder before `://` stands for its scheme. With both, redacting a
-    password does not push the rest of its URL out of reach in a later round, by the bound or
-    by the scheme. The bound reaches one user and one placeholder further, so a path `@` that
-    far is redacted with it, failing closed. This is #43's round 5 M1 and #45's V1 M1.
+    a password, and a whole placeholder before `://` stands for its scheme, so the tested
+    shapes keep their URL in reach in a later round. Beyond them, base parity is claimed:
+    nothing the base detector redacts is lost in any round (fuzzed in #45's review). A later
+    round's reach past an unbroken run of about 500 bytes after earlier placeholders is not
+    claimed. The bound reaches one user and one placeholder further, and a placeholder glued
+    to `://` reads as a scheme, so more can be redacted, failing closed. This is #43's round 5
+    M1 and #45's V1 M1.
   - **Negatives:** six seeded violations:
     - `redact-url-separator-ends-userinfo`;
     - `redact-url-chain-any-user`;

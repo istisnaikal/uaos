@@ -353,7 +353,8 @@ impl DetectorSet {
         let open = memo.url_open.take().filter(|open| open.cut == start);
         // A whole placeholder before the `://` stands where its scheme was: an earlier round
         // redacted a secret glued to it (`ghp_…https://`), and the URL must stay readable (#45 V1
-        // review M1).
+        // review M1). The look-back is at most one placeholder's length per anchor, and `memo`
+        // does not charge it (#45 scoped L2).
         let has_scheme = start
             .checked_sub(1)
             .and_then(|i| text.get(i))
@@ -363,10 +364,10 @@ impl DetectorSet {
             return None;
         }
         // A password an earlier round redacted starts with its placeholder. The bound is measured
-        // from the placeholder's end, so redacting a password does not push the rest of its URL out
-        // of reach by the bound in a later round: neither the placeholder nor the user and its `:`
-        // count (round 4 M2, round 5 M1). One user and one placeholder at most, so the window stays
-        // bounded.
+        // from the placeholder's end, so neither the placeholder nor the user and its `:` count
+        // (round 4 M2, round 5 M1). One user and one placeholder at most, so the window stays
+        // bounded. Across rounds only base parity is claimed beyond the tested shapes (ADR-0009
+        // Limits, #45 scoped M1).
         let base_stop = memo.stop(text, after);
         let lead = text
             .get(after..base_stop.min(after.saturating_add(USERINFO_MAX)))
@@ -1142,6 +1143,10 @@ mod tests {
             "a://b:".to_owned(),
             // Round 4 L4: the chained path, a password starting with `//`.
             "a://u://p@h".to_owned(),
+            // #45 scoped L2: a placeholder before `://` stands for its scheme and opens a chain,
+            // and a bare `]` before `://` makes every anchor look back for a placeholder.
+            "[REDACTED:jwt:0123456789abcdef]://u://p@h".to_owned(),
+            "]://".to_owned(),
             "%25".to_owned(),
         ];
         // V1 review of hardening II, H-A: a long JWT header run followed by a payload and a

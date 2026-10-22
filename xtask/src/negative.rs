@@ -2365,7 +2365,7 @@ pub(crate) fn cases() -> Vec<Case> {
             seed: replace("crates/uaos-redact/src/detect.rs", "        let stop = base_stop.min(after.saturating_add(USERINFO_MAX + lead));\n", "        let stop = base_stop.min(after.saturating_add(USERINFO_MAX)).max(lead.min(0));\n"),
             runner: Runner::Program {
                 program: "cargo",
-                args: &["test", "-p", "uaos-redact", "--test", "redact", "a_redacted_password_never_pushes_its_url_out_of_reach"],
+                args: &["test", "-p", "uaos-redact", "--test", "redact", "a_redacted_password_keeps_the_tested_urls_in_reach"],
             },
             expect: "a redacted password pushed its URL out of reach",
         },
@@ -2379,7 +2379,7 @@ pub(crate) fn cases() -> Vec<Case> {
 "),
             runner: Runner::Program {
                 program: "cargo",
-                args: &["test", "-p", "uaos-redact", "--test", "redact", "a_redacted_password_never_pushes_its_url_out_of_reach"],
+                args: &["test", "-p", "uaos-redact", "--test", "redact", "a_redacted_password_keeps_the_tested_urls_in_reach"],
             },
             expect: "a redacted password pushed its URL out of reach",
         },

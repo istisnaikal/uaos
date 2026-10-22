@@ -338,10 +338,12 @@ fn the_generator_leaves_out_exactly_the_stated_misses() {
 }
 
 #[test]
-fn a_redacted_password_never_pushes_its_url_out_of_reach() {
+fn a_redacted_password_keeps_the_tested_urls_in_reach() {
     // Round 4 M2 of ADR-0009 Amendment 2's reviews: a `//` password redacted in one round leaves
     // a placeholder that must not push the rest of a long URL past the window in the next round,
-    // where the base found its password. The key id is built at runtime (push protection).
+    // where the base found its password. These shapes are tested; beyond them, only base parity
+    // is claimed across rounds (ADR-0009 Limits, #45 scoped M1). The key id is built at runtime
+    // (push protection).
     let key = format!("{}{}", "AK", "IA");
     let password = format!("{}{}", "s3cret", "pw");
     // Round 5 M1: the user and its `:` do not count either; 452 is past where they used to.
