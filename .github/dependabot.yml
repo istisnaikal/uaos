@@ -11,3 +11,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # Every `github/codeql-action` step must run one version: a PR that bumps `init` alone
+      # or `analyze` alone fails CodeQL (#36, #37).
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
