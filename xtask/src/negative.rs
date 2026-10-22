@@ -2384,6 +2384,18 @@ pub(crate) fn cases() -> Vec<Case> {
             expect: "a redacted password pushed its URL out of reach",
         },
         Case {
+            id: "redact-url-placeholder-not-a-scheme",
+            gate: "redaction-corpus",
+            tool: None,
+            // #45 V1 review M1: a placeholder before `://` does not stand for its scheme.
+            seed: replace("crates/uaos-redact/src/detect.rs", "            || placeholder_ends_at(text, start);\n", "            || placeholder_ends_at(text, start) && false;\n"),
+            runner: Runner::Program {
+                program: "cargo",
+                args: &["test", "-p", "uaos-redact", "--test", "redact", "a_secret_glued_to_the_scheme_keeps_its_url_readable"],
+            },
+            expect: "a secret glued to the scheme hid its URL's password",
+        },
+        Case {
             id: "redact-url-password-stops-at-slash",
             gate: "redaction-corpus",
             tool: None,

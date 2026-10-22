@@ -279,6 +279,36 @@ fn the_ci_seed_that_found_a_url_password_gap_is_redacted() {
 }
 
 #[test]
+fn a_secret_glued_to_the_scheme_keeps_its_url_readable() {
+    // #45 V1 review M1: a token glued to the scheme (`ghp_…https://`) is redacted in the same
+    // round as a `//` password. The next round's only `://` then follows the token's placeholder,
+    // which stands for the scheme, so the password the base finds there is still found. The
+    // token and the PEM header are built at runtime (push protection).
+    let token = format!("{}{}", "gh", "p_") + &"a".repeat(36);
+    let pem = format!(
+        "{}{}",
+        "-----BEGIN RSA PRIVATE", " KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----"
+    );
+    let password = format!("{}{}", "s3cret", "pw");
+    let key = format!("{}{}", "AK", "IA");
+    for text in [
+        format!("{token}https://u://p@h:{pem}{password}@db.example.com"),
+        format!(
+            "{token}https://u://p@h-{key}{}{}:{password}@db.example.com",
+            "Q".repeat(100),
+            "z".repeat(452)
+        ),
+    ] {
+        let r = redactor().redact_text(&text).unwrap();
+        assert!(
+            !r.output().contains(password.as_str()),
+            "a secret glued to the scheme hid its URL's password"
+        );
+        assert!(scanner(&[]).check_bytes(r.output().as_bytes()).is_ok());
+    }
+}
+
+#[test]
 fn the_generator_leaves_out_exactly_the_stated_misses() {
     // Stress seed 3677357430622100055 drew `amqp://svc2:3/#5pi.m@mq.example.org`, a password that
     // reads as `host:port/path`: a miss ADR-0009 states since Amendment 1, which the generator

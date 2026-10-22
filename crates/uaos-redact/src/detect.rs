@@ -351,17 +351,22 @@ impl DetectorSet {
     fn url_password(&self, text: &[u8], start: usize, after: usize, memo: &mut Memo) -> Option<Range<usize>> {
         // A password starting with `//` that the anchor before opened runs on here.
         let open = memo.url_open.take().filter(|open| open.cut == start);
+        // A whole placeholder before the `://` stands where its scheme was: an earlier round
+        // redacted a secret glued to it (`ghp_…https://`), and the URL must stay readable (#45 V1
+        // review M1).
         let has_scheme = start
             .checked_sub(1)
             .and_then(|i| text.get(i))
-            .is_some_and(u8::is_ascii_alphanumeric);
+            .is_some_and(u8::is_ascii_alphanumeric)
+            || placeholder_ends_at(text, start);
         if open.is_none() && !has_scheme {
             return None;
         }
         // A password an earlier round redacted starts with its placeholder. The bound is measured
-        // from the placeholder's end, so redacting a password never pushes the rest of its URL out
-        // of reach in a later round: neither the placeholder nor the user and its `:` count (round
-        // 4 M2, round 5 M1). One user and one placeholder at most, so the window stays bounded.
+        // from the placeholder's end, so redacting a password does not push the rest of its URL out
+        // of reach by the bound in a later round: neither the placeholder nor the user and its `:`
+        // count (round 4 M2, round 5 M1). One user and one placeholder at most, so the window stays
+        // bounded.
         let base_stop = memo.stop(text, after);
         let lead = text
             .get(after..base_stop.min(after.saturating_add(USERINFO_MAX)))
@@ -478,7 +483,7 @@ fn plain_user(user: &[u8]) -> bool {
 /// Longest window we inspect after an anchor, measured from the end of a placeholder that starts
 /// the password when there is one.
 /// The userinfo of a password starting with `//` spans the window before its `://` and the one
-/// after, so at most twice this and three bytes (Amendment 2).
+/// after, each of which can add a user and a placeholder (Amendment 2).
 const USERINFO_MAX: usize = 512;
 
 /// A byte a host can start with.
@@ -534,6 +539,15 @@ fn user_end(window: &[u8]) -> Option<usize> {
             _ => i += 1,
         }
     }
+}
+
+/// Whether a whole placeholder ends at `end`. It looks back at most one placeholder's length.
+fn placeholder_ends_at(text: &[u8], end: usize) -> bool {
+    let longest = PLACEHOLDER_PREFIX.len() + 32 + PLACEHOLDER_TAG_HEX + 2;
+    let from = end.saturating_sub(longest);
+    text.get(from..end)
+        .and_then(|head| memchr::memrchr(b'[', head))
+        .is_some_and(|open| text.get(from + open..end).is_some_and(is_placeholder))
 }
 
 /// Length of the placeholder at the start of `bytes`, if one is there.

@@ -190,7 +190,7 @@ equals the full scan).
       `_` or an earlier placeholder (`smtp://o'brien://pw@h`), which reads as glue between two
       URLs;
     - with userinfo longer than 512 bytes, measured from the end of a placeholder that starts the
-      password; a password starting with `//` may run 512 bytes past its `://`;
+      password; the userinfo of a password starting with `//` spans two such windows;
     - that start with a port number and `/`, `?` or `#` after a host-like user, or continue as a
       lowercase path;
     - that look like an scp path after an email-like user;
@@ -221,7 +221,7 @@ equals the full scan).
 ## Verification
 
 - **Gate `redaction-corpus`** (active): `crates/uaos-redact/tests/corpus.rs`, with the URL
-  rule's unit tests. Seven seeded negative cases prove it bites; the five of Amendment 2 are
+  rule's unit tests. Eight seeded negative cases prove it bites; the six of Amendment 2 are
   listed there. The first two:
   - `redact-detector-drops-a-format`: a coarse one, which drops the `ASIA` prefix;
   - `redact-url-password-stops-at-slash`: a subtle one, one byte wide; it brings back review
@@ -332,8 +332,13 @@ which none of these shapes touch.
   over-redacted, as the Limits state (round 4 M1, round 5 L1).
 - **Across redaction rounds:** the bound is measured from the end of a placeholder that starts a
   password, a redacted `//` password's among them, so neither the placeholder nor the user and
-  its `:` count. Redacting a password therefore never pushes the rest of its URL out of reach in
-  a later round. This is round 4 M2, and the follow-up to round 5 M1:
+  its `:` count. A whole placeholder right before `://` stands for its scheme, so a secret glued
+  to the scheme (`ghp_…https://`) does not leave its URL unreadable in the next round (#45 V1 M1:
+  `a_secret_glued_to_the_scheme_keeps_its_url_readable`, seeded). With both, redacting a
+  password does not push the rest of its URL out of reach in a later round, by the bound or by
+  the scheme. The cost is fail-closed: in a later round the bound reaches one user and one
+  placeholder further, so a path `@` that far is redacted with it. This is round 4 M2, and the
+  follow-up to round 5 M1:
   `a_redacted_password_never_pushes_its_url_out_of_reach`, with a 300-byte user at the old
   boundary, seeded.
 
@@ -346,6 +351,7 @@ which none of these shapes touch.
 | `redact-url-chain-blocks-next-url` | a chained anchor does not open its own | `url_passwords_may_hold_a_scheme_separator` |
 | `redact-url-placeholder-counts-toward-bound` | an earlier round's placeholder counts toward the bound (round 4 M2) | `a_redacted_password_never_pushes_its_url_out_of_reach` |
 | `redact-url-bound-counts-the-user` | the bound counts the user and its `:` (#43 round 5 M1, its follow-up) | `a_redacted_password_never_pushes_its_url_out_of_reach` |
+| `redact-url-placeholder-not-a-scheme` | a placeholder before `://` does not stand for its scheme (#45 V1 M1) | `a_secret_glued_to_the_scheme_keeps_its_url_readable` |
 
 **The reviews' Lows:**
 - The length bound is stated as it is.
@@ -405,3 +411,16 @@ the end of a placeholder that starts the password, so the user and its `:` no lo
 URL's reach in a later round. The test covers the old boundary, a 452-byte tail with a 1-byte
 and a 300-byte user. The window stays bounded, at one user and one placeholder past 512 bytes, so
 the scan stays linear. The Limits' residual is removed.
+
+**#45's V1 review** (0 High · 1 Medium · 3 Low):
+- **M1.** A secret glued to the scheme (`ghp_…https://u://p@h…`) is redacted in the same
+  round as the `//` password. The next round's only `://` then follows `]`, and no anchor read
+  the URL, where the base did.
+  - **Fix:** a whole placeholder before `://` stands for its scheme (`placeholder_ends_at`,
+    which looks back at most one placeholder's length).
+  - **Proof:** tested on the review's witness and on the round-5 shape with the token glued;
+    seeded.
+- **L1:** the CHANGELOG lists every seed.
+- **L2:** the `USERINFO_MAX` doc and the Limits no longer bound the chained userinfo at twice
+  512 bytes. Each window can add a user and a placeholder.
+- **L3:** the bound's fail-closed over-redaction in a later round is stated in Precision.

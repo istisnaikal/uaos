@@ -944,11 +944,17 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
   - **Tests:** the CI seed is a fixed case, with unit tests for the shape, for `host:port`
     URLs before another URL, and for URL lists and glued URLs.
   - **Across rounds:** the window's bound is measured from the end of a placeholder that starts
-    a password, so redacting a password never pushes the rest of its URL out of reach in a
-    later round. This is #43's round 5 M1, done in its own follow-up as D-31 requires.
-  - **Negatives:** four seeded violations, `redact-url-separator-ends-userinfo`,
-    `redact-url-chain-any-user`, `redact-url-chain-blocks-next-url` and
-    `redact-url-placeholder-counts-toward-bound`.
+    a password. A whole placeholder before `://` stands for its scheme. With both, redacting a
+    password does not push the rest of its URL out of reach in a later round, by the bound or
+    by the scheme. The bound reaches one user and one placeholder further, so a path `@` that
+    far is redacted with it, failing closed. This is #43's round 5 M1 and #45's V1 M1.
+  - **Negatives:** six seeded violations:
+    - `redact-url-separator-ends-userinfo`;
+    - `redact-url-chain-any-user`;
+    - `redact-url-chain-blocks-next-url`;
+    - `redact-url-placeholder-counts-toward-bound`;
+    - `redact-url-bound-counts-the-user`;
+    - `redact-url-placeholder-not-a-scheme`.
 
 - **`WallTime::from_unix_nanos` no longer panics on far out-of-range values.**
   - For nanoseconds far outside jiff's range (for example `u64::MAX` milliseconds as nanoseconds),
