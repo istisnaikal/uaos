@@ -358,7 +358,17 @@ impl DetectorSet {
         if open.is_none() && !has_scheme {
             return None;
         }
-        let stop = memo.stop(text, after).min(after.saturating_add(USERINFO_MAX));
+        // A password an earlier round redacted starts with its placeholder, which does not count
+        // toward the bound: redacting a password never pushes the rest of its URL out of reach in
+        // a later round (round 4 M2). One placeholder at most, so the window stays bounded.
+        let base_stop = memo.stop(text, after);
+        let lead = text
+            .get(after..base_stop.min(after.saturating_add(USERINFO_MAX)))
+            .and_then(user_end)
+            .and_then(|colon| text.get(after + colon + 1..))
+            .and_then(placeholder_len)
+            .unwrap_or(0);
+        let stop = base_stop.min(after.saturating_add(USERINFO_MAX + lead));
         let cut = text
             .get(after..stop)
             .and_then(|window| self.url_scheme.find(window))
@@ -462,8 +472,9 @@ fn plain_user(user: &[u8]) -> bool {
     true
 }
 
-/// Longest window we inspect after an anchor. A password starting with `//` spans the window
-/// before its `://` and the one after, so at most twice this and three bytes (Amendment 2).
+/// Longest window we inspect after an anchor, not counting a placeholder that starts the password.
+/// The userinfo of a password starting with `//` spans the window before its `://` and the one
+/// after, so at most twice this and three bytes (Amendment 2).
 const USERINFO_MAX: usize = 512;
 
 /// A byte a host can start with.
@@ -965,7 +976,7 @@ mod tests {
             ["p1", "p2"],
             "two listed URLs read as one"
         );
-        // Scoped round M1: a colon-joined scheme after a list byte starts another URL.
+        // Scoped round M1: a colon-joined scheme after a comma starts another URL.
         assert_eq!(
             url("a://u:p1@h,jdbc:mysql://v:p2@k"),
             ["p1", "p2"],
@@ -983,8 +994,8 @@ mod tests {
                 "another URL after a list byte read as a password: {text}"
             );
         }
-        // V1 review of Amendment 2, M1: glue that is no list byte, between a URL with no userinfo
-        // and one with a user and no password.
+        // V1 review of Amendment 2, M1: glue that is not a scheme byte, between a URL with no
+        // userinfo and one with a user and no password.
         for text in [
             "http://mirror.example.com\\nssh://git@github.com/org/repo.git",
             "https://pypi.org\\ngit+ssh://git@github.com/org/lib.git",
@@ -1111,6 +1122,8 @@ mod tests {
             "-eyJ".to_owned(),
             "eyJx.eyJx.".to_owned(),
             "a://b:".to_owned(),
+            // Round 4 L4: the chained path, a password starting with `//`.
+            "a://u://p@h".to_owned(),
             "%25".to_owned(),
         ];
         // V1 review of hardening II, H-A: a long JWT header run followed by a payload and a

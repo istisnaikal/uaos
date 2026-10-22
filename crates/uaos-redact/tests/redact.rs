@@ -278,6 +278,50 @@ fn the_ci_seed_that_found_a_url_password_gap_is_redacted() {
     assert!(scanner(&[]).check_bytes(r.output().as_bytes()).is_ok());
 }
 
+#[test]
+fn the_generator_leaves_out_exactly_the_stated_misses() {
+    // Stress seed 3677357430622100055 drew `amqp://svc2:3/#5pi.m@mq.example.org`, a password that
+    // reads as `host:port/path`: a miss ADR-0009 states since Amendment 1, which the generator
+    // did not leave out. On each sample, the generator's verdict now matches the redactor's.
+    for (user, password) in [
+        ("svc2", "3/#5pi.m"),
+        ("app", "8080?x=1"),
+        ("u", "${DB_PASS}"),
+        ("root", "$ABC_1"),
+        ("svc", "ab://cd"),
+        ("app", "3/Xk!q"),
+        ("deploy", "hunter2hunter2"),
+        ("u", "//pw0rd"),
+    ] {
+        let text = format!("amqp://{user}:{password}@mq.example.org");
+        let missed = redactor().redact_text(&text).unwrap().output().contains(password);
+        assert_eq!(
+            common::stated_miss(user, password),
+            missed,
+            "the generator and the redactor disagree on {user}:{password}"
+        );
+    }
+}
+
+#[test]
+fn a_redacted_password_never_pushes_its_url_out_of_reach() {
+    // Round 4 M2 of ADR-0009 Amendment 2's reviews: a `//` password redacted in one round leaves
+    // a placeholder that must not push the rest of a long URL past the window in the next round,
+    // where the base found its password. The key id is built at runtime (push protection).
+    let key = format!("{}{}", "AK", "IA");
+    let password = format!("{}{}", "s3cret", "pw");
+    let text = format!(
+        "https://u://p@h-{key}{}{}:{password}@db.example.com",
+        "Q".repeat(100),
+        "z".repeat(430)
+    );
+    let r = redactor().redact_text(&text).unwrap();
+    assert!(
+        !r.output().contains(password.as_str()),
+        "a redacted password pushed its URL out of reach"
+    );
+}
+
 fn json_value() -> impl Strategy<Value = Value> {
     let leaf = prop_oneof![
         (any::<u64>(), 0..3_usize).prop_map(|(seed, n)| Value::String(text_with_secrets(seed, n).0)),
