@@ -934,9 +934,11 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
     and stress seed 3677357430622100055 drew `svc2:3/#5pi.m`, which reads as `host:port/path`.
     Both are stated misses, not detector regressions.
   - The corpus generator leaves out every stated miss a random password can reach
-    (`tests/common::stated_miss`), and a test checks it against the redactor.
+    (`tests/common::stated_miss`), and a test checks it against the redactor. Both seeds are
+    fixed cases.
   - The Limits state a password starting with `//` as a miss, and the 512-byte window exactly:
-    userinfo of 511 bytes or more is missed.
+    userinfo of 511 bytes or more is missed. They also state an older miss: a password holding
+    a percent escape, in a URL that shows only once JSON escapes are decoded.
   - Detector set v1 is unchanged. An extension that read a `//` password after a plain user was
     withdrawn: its final review found it regressed against the base across decoded views.
   - New: the negative corpus family `url-glued`, and the seeded violation

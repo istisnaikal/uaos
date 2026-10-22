@@ -280,6 +280,18 @@ fn the_ci_seed_that_drew_a_stated_miss_is_redacted() {
 }
 
 #[test]
+fn the_stress_seed_that_drew_a_stated_miss_is_redacted() {
+    // A 20,000-case stress run drew `amqp://svc2:3/#5pi.m@mq.example.org` with this input: a
+    // password that reads as `host:port/path`, a stated miss the generator now leaves out.
+    let (text, secrets) = text_with_secrets(3_677_357_430_622_100_055, 3);
+    let r = redactor().redact_text(&text).unwrap();
+    for s in &secrets {
+        assert!(!r.output().contains(s.as_str()), "a secret survived redaction");
+    }
+    assert!(scanner(&[]).check_bytes(r.output().as_bytes()).is_ok());
+}
+
+#[test]
 fn the_generator_leaves_out_the_stated_misses() {
     // Stress seed 3677357430622100055 drew `amqp://svc2:3/#5pi.m@mq.example.org`, a password that
     // reads as `host:port/path`: a miss ADR-0009 states since Amendment 1, which the generator
@@ -290,6 +302,10 @@ fn the_generator_leaves_out_the_stated_misses() {
         ("app", "8080?x=1"),
         ("u", "${DB_PASS}"),
         ("root", "$ABC_1"),
+        ("app", "%(db_pass)s"),
+        ("app", "{{db_pass}}"),
+        ("svc", "70000/x.y"),
+        ("svc", "123456/a"),
         ("svc", "ab://cd"),
         ("app", "3/Xk!q"),
         ("deploy", "hunter2hunter2"),

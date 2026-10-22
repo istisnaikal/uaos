@@ -253,16 +253,17 @@ pub(crate) fn embed(rng: &mut Prng, text: &str) -> String {
 /// Whether `user:password` is one of the URL rule's stated misses (ADR-0009, limits), which the
 /// generator leaves out so the properties claim what the rule does. It covers the detector's
 /// exclusions a random password can reach:
-/// - a `://` in the password, which ends it, or a password starting with `//`, where the user's
+/// - a `://` in the password, which ends it, or `//` at its start, where the user's
 ///   `:` and the `//` read as `://`. CI seed 4814893562051029426 drew one (Amendment 2);
 /// - `host:port/path` (`port_then_path`): a port of 1 to 5 digits up to 65535, then `/`, `?` or
 ///   `#`, after a host-like user or before a lowercase path. Stress seed 3677357430622100055
 ///   drew `svc2:3/#5pi.m`, a miss stated since Amendment 1;
 /// - a template reference (`is_template`): `${name}`, `$NAME`, `%(name)s`, `{{name}}`.
 ///
-/// Its verdicts are a superset of the misses: it reads the password as written, so a
-/// `host:port/path` password whose path holds a percent escape (`47039/%47`) is left out
-/// although the nested view finds it.
+/// For URLs as written, as the property tests present them, its verdicts are a superset of the
+/// misses: a `host:port/path` password whose path holds a percent escape (`47039/%47`) is left
+/// out although the nested view finds it. In the corpus's slash-escaped form, a password
+/// holding a percent escape can still be missed (ADR-0009, limits); the corpus measures it.
 ///
 /// A password the generator draws ends at the URL's own `@`, so the detector's candidate is the
 /// whole password.
@@ -904,8 +905,8 @@ pub(crate) fn negative(rng: &mut Prng) -> (&'static str, String) {
                 format!("{scheme}://app:{password}@db:5432/app"),
             )
         }
-        // Two URLs glued by a byte that is not a scheme byte, the second with a user and no password:
-        // no userinfo runs from one into the other (ADR-0009 Amendment 2, its V1 review M1).
+        // Two URLs joined by a separator, the second with a user and no password: neither holds a
+        // password (ADR-0009 Amendment 2).
         45 => {
             let first = rng.pick(&[
                 "http://mirror.example.com",
