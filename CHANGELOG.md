@@ -996,6 +996,13 @@ here in the same change that alters `schemas/` (docs-with-contract gate).
 
 ### Changed
 
+- **Maintainer decisions of 2026-10-22, on the `uaos` binary** (ADR-0021, Proposed).
+  - **D-38:** the binary is P3·M3 (WP3.7), part of Kernel RC-1; P4 stays Surface.
+  - **D-39:** its B1 skeleton is built early, with PR-7.
+  - **D-40:** `uaos shell-init` is deferred to P4; at RC-1, shell integration is
+    `uaos run --`.
+  - ADR-0021 records the binary's boundary, commands, configuration, security boundary,
+    build and proof. Its acceptance is open for its 48 h window (D-41).
 - **Maintainer decisions of 2026-10-20.**
   - **D-31, review convergence:** the rule goes into `GOVERNANCE.md`.
   - **D-32, chunk storage:** prepared pack segments before the RC-1 freeze, through an
